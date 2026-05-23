@@ -1,0 +1,6 @@
+/target
+Cargo.lock
+**/*.rs.bk
+/bench-data/
+/zcash-sync/
+/zcash_note_encryption/
