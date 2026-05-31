@@ -3,9 +3,10 @@
 //!
 //! Incoming detection runs the `sapling` / `orchard` batch trial-decryption
 //! over every compact output and action. When the keys carry nullifier-deriving
-//! material (a full key), each received Orchard note's nullifier is derived and
-//! matched against the spends seen in the scanned blocks. Sapling spend
-//! detection additionally needs leaf-position tracking, which isn't wired yet.
+//! material (a full key), each received note's nullifier is derived and matched
+//! against the spends seen in the scanned blocks. Sapling nullifiers also need
+//! the note's leaf position, taken from each block's `chain_metadata`
+//! (the Sapling tree size lightwalletd stamps on the block).
 
 use std::collections::HashSet;
 
@@ -30,17 +31,17 @@ pub struct ReceivedNote<N, A> {
     /// Whether the note was seen spent within the scanned range.
     ///
     /// Only ever `true` when scanning with a full key (so the nullifier could
-    /// be derived). Always `false` for Sapling, which still lacks
-    /// leaf-position tracking.
+    /// be derived) — and, for Sapling, when the block carried the
+    /// `chain_metadata` needed to compute the note's leaf position.
     pub spent: bool,
 }
 
 /// Notes received across the scanned blocks, grouped by pool.
 #[derive(Default)]
 pub struct Received {
-    /// Sapling notes (spend detection not yet wired — `spent` is always false).
+    /// Sapling notes received.
     pub sapling: Vec<ReceivedNote<sapling::Note, sapling::PaymentAddress>>,
-    /// Orchard notes (spend-detected when scanned with a full key).
+    /// Orchard notes received.
     pub orchard: Vec<ReceivedNote<orchard::Note, orchard::Address>>,
 }
 
@@ -67,13 +68,15 @@ impl Received {
 }
 
 /// Trial-decrypt every Sapling output and Orchard action in `blocks`, flagging
-/// received Orchard notes spent when `keys` carries nullifier-deriving keys.
+/// received notes spent when `keys` carries nullifier-deriving keys.
 pub fn sync(blocks: &[CompactBlock], keys: &ScanningKeys) -> Received {
     let sapling_ivk = keys.sapling.as_ref().map(|k| k.ivk.prepare());
+    let sapling_nk = keys.sapling.as_ref().and_then(|k| k.nk.as_ref());
     let orchard_ivk = keys.orchard.as_ref().map(|k| OrchardPreparedIvk::new(&k.ivk));
     let orchard_nk = keys.orchard.as_ref().and_then(|k| k.nk.as_ref());
 
-    let mut sapling = Vec::new();
+    let mut sapling: Vec<(u32, sapling::Note, sapling::PaymentAddress, Option<[u8; 32]>)> =
+        Vec::new();
     let mut orchard: Vec<(u32, orchard::Note, orchard::Address, Option<[u8; 32]>)> = Vec::new();
     let mut spends: HashSet<[u8; 32]> = HashSet::new();
 
@@ -81,19 +84,41 @@ pub fn sync(blocks: &[CompactBlock], keys: &ScanningKeys) -> Received {
         let height = block.height as u32;
 
         if let Some(ivk) = &sapling_ivk {
-            let inputs: Vec<(SaplingDomain, CompactOutputDescription)> = block
-                .vtx
-                .iter()
-                .flat_map(|tx| &tx.outputs)
-                .filter_map(parse_sapling)
-                .map(|o| (SaplingDomain::new(Zip212Enforcement::On), o))
-                .collect();
-            for ((note, recipient), _) in
-                batch::try_compact_note_decryption(std::slice::from_ref(ivk), &inputs)
-                    .into_iter()
-                    .flatten()
+            // Leaf position of this block's first Sapling output, from the tree
+            // size stamped on the block (post-block size − outputs in block).
+            let block_start = block.chain_metadata.as_ref().map(|m| {
+                let after = m.sapling_commitment_tree_size as u64;
+                let in_block: u64 = block.vtx.iter().map(|tx| tx.outputs.len() as u64).sum();
+                after.saturating_sub(in_block)
+            });
+
+            // Count *every* output for positions, but only feed parseable ones
+            // to batch decryption; `positions[i]` aligns with the i-th input.
+            let mut inputs: Vec<(SaplingDomain, CompactOutputDescription)> = Vec::new();
+            let mut positions: Vec<Option<u64>> = Vec::new();
+            let mut idx = 0u64;
+            for tx in &block.vtx {
+                for out in &tx.outputs {
+                    let pos = block_start.map(|s| s + idx);
+                    idx += 1;
+                    if let Some(desc) = parse_sapling(out) {
+                        inputs.push((SaplingDomain::new(Zip212Enforcement::On), desc));
+                        positions.push(pos);
+                    }
+                }
+            }
+
+            for (i, hit) in batch::try_compact_note_decryption(std::slice::from_ref(ivk), &inputs)
+                .into_iter()
+                .enumerate()
             {
-                sapling.push(ReceivedNote { height, note, recipient, spent: false });
+                if let Some(((note, recipient), _)) = hit {
+                    let nullifier = match (sapling_nk, positions[i]) {
+                        (Some(nk), Some(pos)) => Some(note.nf(nk, pos).0),
+                        _ => None,
+                    };
+                    sapling.push((height, note, recipient, nullifier));
+                }
             }
         }
 
@@ -115,27 +140,44 @@ pub fn sync(blocks: &[CompactBlock], keys: &ScanningKeys) -> Received {
             }
         }
 
-        // Every Orchard action reveals the nullifier of the note it spends.
+        // Spends seen this block: Orchard actions reveal a nullifier each, and
+        // Sapling spends carry theirs directly.
         for tx in &block.vtx {
             for action in &tx.actions {
                 if let Ok(nf) = action.nullifier[..].try_into() {
                     spends.insert(nf);
                 }
             }
+            for spend in &tx.spends {
+                if let Ok(nf) = spend.nf[..].try_into() {
+                    spends.insert(nf);
+                }
+            }
         }
     }
 
-    let orchard = orchard
-        .into_iter()
-        .map(|(height, note, recipient, nf)| ReceivedNote {
-            height,
-            note,
-            recipient,
-            spent: nf.is_some_and(|nf| spends.contains(&nf)),
-        })
-        .collect();
+    let spent_of = |nf: Option<[u8; 32]>| nf.is_some_and(|nf| spends.contains(&nf));
 
-    Received { sapling, orchard }
+    Received {
+        sapling: sapling
+            .into_iter()
+            .map(|(height, note, recipient, nf)| ReceivedNote {
+                height,
+                note,
+                recipient,
+                spent: spent_of(nf),
+            })
+            .collect(),
+        orchard: orchard
+            .into_iter()
+            .map(|(height, note, recipient, nf)| ReceivedNote {
+                height,
+                note,
+                recipient,
+                spent: spent_of(nf),
+            })
+            .collect(),
+    }
 }
 
 /// Proto → `sapling` compact output. Deserialization glue, not crypto.

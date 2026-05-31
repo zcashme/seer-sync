@@ -23,8 +23,6 @@ sapling = { package = "sapling-crypto", version = "0.7", default-features = fals
 # Upstream Zcash stack, crates.io only.
 zcash_protocol = { version = "0.8", default-features = false, features = ["std"] }
 zcash_keys = { version = "0.13", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
-zcash_address = "0.11"
-zcash_transparent = { version = "0.7", default-features = false }
 
 # gRPC + async (driver layer).
 tonic = { version = "0.14", default-features = false, features = ["transport", "tls-ring", "tls-webpki-roots", "codegen"] }
@@ -34,10 +32,6 @@ tokio-stream = "0.1"
 prost = "0.14"
 http = "1"
 futures = "0.3"
-
-# Parallelism.
-rayon = "1"
-crossbeam-channel = "0.5"
 
 # Persistence (optional).
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
