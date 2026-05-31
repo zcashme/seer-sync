@@ -8,7 +8,7 @@ use std::env;
 use std::time::Instant;
 
 use anyhow::Result;
-use seer_sync::chain::{connect, fetch_range, tip_height, ZEC_ROCKS};
+use seer_sync::sync::chain::{connect, fetch_range, tip_height, ZEC_ROCKS};
 use seer_sync::keys::ScanningKeys;
 use seer_sync::sync::sync;
 use zcash_keys::keys::UnifiedIncomingViewingKey;

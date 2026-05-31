@@ -7,7 +7,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use std::time::Duration;
-use seer_sync::chain::{connect, fetch_range, tip_height, ZEC_ROCKS};
+use seer_sync::sync::chain::{connect, fetch_range, tip_height, ZEC_ROCKS};
 use seer_sync::keys::ScanningKeys;
 use seer_sync::sync::sync;
 use zcash_keys::keys::UnifiedIncomingViewingKey;

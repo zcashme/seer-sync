@@ -6,7 +6,7 @@
 //!
 //! # Quick start
 //! ```no_run
-//! # use seer_sync::{chain, keys::ScanningKeys, sync::sync};
+//! # use seer_sync::{keys::ScanningKeys, sync::{chain, sync}};
 //! # use zcash_keys::keys::UnifiedIncomingViewingKey;
 //! # use zcash_protocol::consensus::MainNetwork;
 //! # tokio_test::block_on(async {
@@ -24,7 +24,6 @@
 
 #![warn(missing_docs)]
 
-pub mod chain;
 pub mod keys;
 pub mod note;
 pub mod proto;

@@ -4,6 +4,8 @@
 //! batch trial-decryption over every compact output and action, and return the
 //! hits as the note crates' own `(height, Note, recipient)` — no wrapper types.
 
+pub mod chain;
+
 use orchard::keys::PreparedIncomingViewingKey as OrchardPreparedIvk;
 use orchard::note_encryption::{CompactAction, OrchardDomain};
 use sapling::note_encryption::{CompactOutputDescription, SaplingDomain, Zip212Enforcement};
