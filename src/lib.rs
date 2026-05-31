@@ -15,7 +15,7 @@
 //! let keys = IvkKeys::from_uivk(&uivk);
 //! let mut client = chain::connect(chain::ZEC_ROCKS).await.unwrap();
 //! let tip = chain::tip_height(&mut client).await.unwrap();
-//! let blocks = chain::fetch_range(&mut client, tip - 100, tip).await.unwrap();
+//! let blocks = chain::fetch_range(client, tip - 100, tip).await.unwrap();
 //! for note in scan_ivk(&blocks, &keys) {
 //!     println!("received {} zat at height {}", note.value_zat, note.height);
 //! }
@@ -27,12 +27,10 @@
 pub mod address;
 pub mod chain;
 pub mod decrypt;
-pub mod error;
 pub mod keys;
 pub mod memo;
 pub mod proto;
 pub mod scan;
-pub mod sync;
 pub mod tree;
 
 #[cfg(feature = "db")]

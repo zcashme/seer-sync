@@ -43,9 +43,7 @@ rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 # Tooling.
 anyhow = "1"
-thiserror = "2"
 zip32 = "0.2"
-sysinfo = { version = "0.31", default-features = false, features = ["system"] }
 
 [build-dependencies]
 tonic-prost-build = { version = "0.14", default-features = false }

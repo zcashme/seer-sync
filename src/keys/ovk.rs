@@ -24,7 +24,7 @@ impl OvkKeys {
     pub fn from_fvk_keys(fvk: &FvkKeys) -> Self {
         Self {
             orchard: fvk.orchard_ovk.clone(),
-            sapling: fvk.sapling_ovk.clone(),
+            sapling: fvk.sapling_ovk,
         }
     }
 

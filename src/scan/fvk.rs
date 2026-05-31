@@ -34,8 +34,8 @@ pub fn scan_fvk(
     sapling_start_pos: u64,
     known_nullifiers: &HashSet<[u8; 32]>,
 ) -> FvkScanResult {
-    let orchard_ivk_slice = keys.orchard_ivk.as_ref().map_or(&[][..], std::slice::from_ref);
-    let sapling_ivk_slice = keys.sapling_ivk.as_ref().map_or(&[][..], std::slice::from_ref);
+    let orchard_ivk_slice = keys.orchard_ivk.as_slice();
+    let sapling_ivk_slice = keys.sapling_ivk.as_slice();
 
     // ── Phase 1: serial Sapling leaf-position assignment ─────────────────────
     // Every cmu must be counted in order; within each block all outputs are
@@ -146,7 +146,7 @@ pub fn scan_fvk(
                     pool: ShieldedPool::Orchard,
                     value_zat: note.value().inner(),
                     recipient: Recipient::Orchard(recipient),
-                    rseed: note.rseed().as_bytes().clone(),
+                    rseed: *note.rseed().as_bytes(),
                     rho: Some(ca.nullifier().to_bytes()),
                     sapling_leaf_pos: None,
                 });
@@ -206,7 +206,7 @@ pub fn scan_fvk(
     let mut events: Vec<ScanEvent> = raw_notes
         .into_iter()
         .map(|raw| {
-            ScanEvent::Incoming(IncomingNoteView {
+            ScanEvent::Incoming(Box::new(IncomingNoteView {
                 height: raw.height,
                 tx_id: raw.tx_id,
                 output_index: raw.output_index,
@@ -217,7 +217,7 @@ pub fn scan_fvk(
                 rho: raw.rho,
                 sapling_leaf_pos: raw.sapling_leaf_pos,
                 nullifier: None,
-            })
+            }))
         })
         .collect();
 

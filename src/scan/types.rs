@@ -43,30 +43,14 @@ pub struct IncomingNoteView {
     pub nullifier: Option<[u8; 32]>,
 }
 
-/// A sent note recovered via OVK / FVK (full transactions required).
-#[derive(Debug, Clone)]
-pub struct SentNoteView {
-    /// Block height.
-    pub height: u32,
-    /// Transaction ID.
-    pub tx_id: [u8; 32],
-    /// Output index within the transaction.
-    pub output_index: usize,
-    /// Pool.
-    pub pool: ShieldedPool,
-    /// Value in zatoshis.
-    pub value_zat: u64,
-    /// Bech32m-encoded recipient address.
-    pub recipient: String,
-    /// Full 512-byte ZIP-302 memo.
-    pub memo: Box<[u8; 512]>,
-}
-
 /// Events emitted by [`crate::scan::scan_fvk`].
 #[derive(Debug, Clone)]
 pub enum ScanEvent {
     /// A note was received by this wallet.
-    Incoming(IncomingNoteView),
+    ///
+    /// Boxed so the rare [`ScanEvent::Spent`] variant doesn't pad every element
+    /// of an events `Vec` to the size of [`IncomingNoteView`].
+    Incoming(Box<IncomingNoteView>),
     /// A known nullifier was observed as a compact spend.
     Spent {
         /// Nullifier bytes.

@@ -18,11 +18,13 @@
 mod fvk;
 mod ivk;
 mod parsers;
+mod stream;
 mod types;
 
 pub use fvk::scan_fvk;
 pub use ivk::scan_ivk;
+pub use stream::{scan_stream_fvk, scan_stream_ivk, StreamFvkResult};
 pub use types::{
-    FvkScanResult, IncomingNoteView, Recipient, ScanEvent, SentNoteView, ShieldedPool,
-    TransparentReceived, TransparentSpend,
+    FvkScanResult, IncomingNoteView, Recipient, ScanEvent, ShieldedPool, TransparentReceived,
+    TransparentSpend,
 };

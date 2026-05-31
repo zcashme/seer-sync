@@ -27,6 +27,3 @@ impl IvkKeys {
         self.orchard.is_none() && self.sapling.is_none()
     }
 }
-
-/// Backward-compatible type alias.
-pub type Keys = IvkKeys;

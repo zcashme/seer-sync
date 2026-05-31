@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
     println!("Tip: {tip}  scanning [{from}..{tip}] ({} blocks)", tip - from + 1);
 
     let t_fetch = Instant::now();
-    let blocks = fetch_range(&mut client, from, tip).await?;
+    let blocks = fetch_range(client, from, tip).await?;
     println!("Fetched {} blocks in {:.2}s", blocks.len(), t_fetch.elapsed().as_secs_f64());
 
     let t_sync = Instant::now();

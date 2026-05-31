@@ -10,5 +10,5 @@ mod ivk;
 mod ovk;
 
 pub use fvk::FvkKeys;
-pub use ivk::{IvkKeys, Keys};
+pub use ivk::IvkKeys;
 pub use ovk::OvkKeys;

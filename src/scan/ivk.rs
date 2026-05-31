@@ -22,8 +22,8 @@ pub fn scan_ivk(blocks: &[CompactBlock], keys: &IvkKeys) -> Receiver<IncomingNot
     let (tx, rx) = unbounded();
 
     if !keys.is_empty() {
-        let orchard_ivk_slice = keys.orchard.as_ref().map_or(&[][..], std::slice::from_ref);
-        let sapling_ivk_slice = keys.sapling.as_ref().map_or(&[][..], std::slice::from_ref);
+        let orchard_ivk_slice = keys.orchard.as_slice();
+        let sapling_ivk_slice = keys.sapling.as_slice();
 
         blocks.par_iter().for_each_with(tx, |tx, block| {
             let height = block.height as u32;
@@ -36,7 +36,7 @@ pub fn scan_ivk(blocks: &[CompactBlock], keys: &IvkKeys) -> Receiver<IncomingNot
                     pool: ShieldedPool::Orchard,
                     value_zat: note.value().inner(),
                     recipient: Recipient::Orchard(recipient),
-                    rseed: note.rseed().as_bytes().clone(),
+                    rseed: *note.rseed().as_bytes(),
                     rho: Some(ca.nullifier().to_bytes()),
                     sapling_leaf_pos: None,
                     nullifier: None,

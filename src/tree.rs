@@ -145,9 +145,11 @@ mod tests {
     #[test]
     fn before_block_subtracts_outputs() {
         let mut block = make_block(10, 5);
-        let mut tx = CompactTx::default();
-        tx.outputs = vec![Default::default(); 3];
-        tx.actions = vec![Default::default(); 2];
+        let tx = CompactTx {
+            outputs: vec![Default::default(); 3],
+            actions: vec![Default::default(); 2],
+            ..Default::default()
+        };
         block.vtx = vec![tx];
 
         let before = TreeSize::before_block(&block).unwrap();

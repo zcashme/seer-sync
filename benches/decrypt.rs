@@ -23,7 +23,7 @@ fn bench(c: &mut Criterion) {
         let mut client = connect(ZEC_ROCKS).await.expect("connecting to zec.rocks");
         let tip = tip_height(&mut client).await.expect("tip height");
         eprintln!("[bench] fetching NU6→tip [{NU6}..{tip}] from {ZEC_ROCKS}");
-        fetch_range(&mut client, NU6, tip).await.expect("fetch_range")
+        fetch_range(client, NU6, tip).await.expect("fetch_range")
     });
 
     let uivk_str: String = UIVK.chars().filter(|c| !c.is_whitespace()).collect();

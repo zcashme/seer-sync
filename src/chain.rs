@@ -1,9 +1,9 @@
 //! Lightwalletd gRPC client — connect and fetch blocks, transactions, and transparent UTXOs.
 
 use anyhow::{Context, Result};
-use futures::StreamExt;
+use futures::{Stream, StreamExt, TryStreamExt};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Channel, ClientTlsConfig};
 
 use crate::proto::{
@@ -78,162 +78,72 @@ pub async fn tip_height(client: &mut LwdClient) -> Result<u32> {
     .context("tip height overflowed u32")
 }
 
-// ─── Block fetching ───────────────────────────────────────────────────────────
+// ─── Block streaming ───────────────────────────────────────────────────────────
 
-/// Hard cap on outputs per chunk regardless of available RAM.
-pub const MAX_OUTPUTS_PER_CHUNK: usize = 200_000;
-
-/// Return the current available system memory in bytes.
-pub fn get_available_memory() -> usize {
-    let mut sys = sysinfo::System::new();
-    sys.refresh_memory();
-    sys.available_memory() as usize
-}
-
-/// Conservative in-memory cost per compact output or action (bytes).
+/// Default chunk size (Sapling outputs + Orchard actions per batch).
 ///
-/// Nullifier (32) + cmx/cmu (32) + epk (32) + compact ciphertext (52) plus
-/// proto framing rounds to ~256 bytes.
-pub const fn get_mem_per_output() -> usize {
-    256
-}
+/// At ~256 B per output, two chunks in flight peak around 50 MB. Pass an
+/// explicit `max_outputs` to [`blocks`] if you need a different memory budget.
+pub const DEFAULT_CHUNK_OUTPUTS: usize = 100_000;
 
-/// Compute a chunk size (in total shielded outputs) that fits in available RAM.
+/// Stream compact blocks `[from, to]` as memory-bounded chunks.
 ///
-/// Uses at most half of available memory and never exceeds
-/// [`MAX_OUTPUTS_PER_CHUNK`], adapting to the machine at runtime.
-pub fn adaptive_chunk_size() -> usize {
-    let from_ram = (get_available_memory() / 2) / get_mem_per_output();
-    from_ram.min(MAX_OUTPUTS_PER_CHUNK).max(1_000)
-}
-
-/// Fetch compact blocks `[from, to]` inclusive into a single `Vec`.
+/// The returned [`Stream`] yields `Vec<CompactBlock>` batches, each capped at
+/// `max_outputs` Sapling outputs + Orchard actions combined, so peak memory is
+/// bounded regardless of range size. A download task runs concurrently and is
+/// kept at most one batch ahead of the consumer (channel capacity 1), giving
+/// natural back-pressure. `prev_hash` is verified across blocks; a reorg or
+/// transport failure surfaces as an `Err` item, after which the stream ends.
 ///
-/// All blocks are buffered in memory at once. For large ranges prefer
-/// [`fetch_blocks_adaptive`] which breaks the download into RAM-bounded chunks.
-pub async fn fetch_range(client: &mut LwdClient, from: u32, to: u32) -> Result<Vec<CompactBlock>> {
-    let req = BlockRange {
-        start: Some(BlockId { height: from as u64, hash: vec![] }),
-        end: Some(BlockId { height: to as u64, hash: vec![] }),
-        pool_types: vec![],
-    };
-    let mut stream = client
-        .get_block_range(tonic::Request::new(req))
-        .await
-        .context("GetBlockRange")?
-        .into_inner();
-
-    let mut blocks = Vec::new();
-    while let Some(block) = stream.next().await {
-        blocks.push(block.context("streaming CompactBlock")?);
-    }
-    Ok(blocks)
-}
-
-/// Stream compact blocks `[from, to]` in memory-bounded chunks.
+/// This is the crate's single block-fetch primitive. Feed it straight to
+/// [`crate::scan::scan_stream_ivk`] / [`crate::scan::scan_stream_fvk`], or
+/// collect it with [`fetch_range`].
 ///
-/// Each chunk is limited to `max_outputs` Sapling outputs + Orchard actions
-/// combined, so memory usage is bounded even over very large ranges.
-/// Blocks within a chunk are already in height order.
-///
-/// A `ChainError::Reorg` is returned if `prev_hash` verification fails.
-pub async fn fetch_blocks_chunked(
-    client: &mut LwdClient,
+/// ```no_run
+/// # use seer_sync::chain::{connect, blocks, DEFAULT_CHUNK_OUTPUTS, ZEC_ROCKS};
+/// # use futures::StreamExt;
+/// # tokio_test::block_on(async {
+/// let client = connect(ZEC_ROCKS).await.unwrap();
+/// let mut s = blocks(client, 2_000_000, 2_001_000, DEFAULT_CHUNK_OUTPUTS);
+/// while let Some(batch) = s.next().await {
+///     let batch = batch.unwrap();
+///     println!("got {} blocks", batch.len());
+/// }
+/// # });
+/// ```
+pub fn blocks(
+    client: LwdClient,
     from: u32,
     to: u32,
     max_outputs: usize,
-) -> Result<Vec<Vec<CompactBlock>>> {
-    let req = BlockRange {
-        start: Some(BlockId { height: from as u64, hash: vec![] }),
-        end: Some(BlockId { height: to as u64, hash: vec![] }),
-        pool_types: vec![],
-    };
-    let mut stream = client
-        .get_block_range(tonic::Request::new(req))
-        .await
-        .context("GetBlockRange")?
-        .into_inner();
-
-    let mut chunks: Vec<Vec<CompactBlock>> = Vec::new();
-    let mut chunk: Vec<CompactBlock> = Vec::new();
-    let mut output_count = 0usize;
-    let mut prev_hash: Option<Vec<u8>> = None;
-
-    while let Some(block_result) = stream.next().await {
-        let block = block_result.context("streaming CompactBlock")?;
-
-        // Reorg detection.
-        if let Some(ref ph) = prev_hash {
-            if !block.prev_hash.is_empty() && &block.prev_hash != ph {
-                anyhow::bail!(
-                    "chain reorganization at height {}",
-                    block.height
-                );
-            }
+) -> impl Stream<Item = Result<Vec<CompactBlock>>> {
+    let (tx, rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        if let Err(e) = download(client, from, to, max_outputs, &tx).await {
+            tx.send(Err(e)).await.ok();
         }
-        prev_hash = Some(block.hash.clone());
-
-        let block_outputs: usize = block
-            .vtx
-            .iter()
-            .map(|tx| tx.outputs.len() + tx.actions.len())
-            .sum();
-
-        if output_count + block_outputs > max_outputs && !chunk.is_empty() {
-            chunks.push(std::mem::take(&mut chunk));
-            output_count = 0;
-        }
-
-        output_count += block_outputs;
-        chunk.push(block);
-    }
-    if !chunk.is_empty() {
-        chunks.push(chunk);
-    }
-    Ok(chunks)
+    });
+    ReceiverStream::new(rx)
 }
 
-/// Stream compact blocks `[from, to]` using a chunk size derived from
-/// [`adaptive_chunk_size`].
+/// Fetch compact blocks `[from, to]` into a single `Vec`.
 ///
-/// Equivalent to `fetch_blocks_chunked(client, from, to, adaptive_chunk_size())`
-/// but selects the chunk size automatically based on available system RAM.
-pub async fn fetch_blocks_adaptive(
-    client: &mut LwdClient,
-    from: u32,
-    to: u32,
-) -> Result<Vec<Vec<CompactBlock>>> {
-    fetch_blocks_chunked(client, from, to, adaptive_chunk_size()).await
+/// Convenience over [`blocks`] for callers that want every block in memory at
+/// once (tests, benches, small ranges). For large ranges prefer streaming the
+/// chunks directly so memory stays bounded.
+pub async fn fetch_range(client: LwdClient, from: u32, to: u32) -> Result<Vec<CompactBlock>> {
+    blocks(client, from, to, usize::MAX).try_concat().await
 }
 
-/// Streaming block-download worker — runs inside a spawned task.
-///
-/// Fetches compact blocks `[from, to]` from `client`, groups them into
-/// output-bounded batches (`max_outputs`), and sends each batch over `tx`.
-/// A channel capacity of 1 at the call site gives natural back-pressure:
-/// the downloader fetches at most one batch ahead of the consumer.
-///
-/// ```no_run
-/// # use seer_sync::chain::{connect, download_chain, adaptive_chunk_size, ZEC_ROCKS};
-/// # tokio_test::block_on(async {
-/// let client = connect(ZEC_ROCKS).await.unwrap();
-/// let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-/// let downloader = tokio::spawn(async move {
-///     download_chain(client, 2_000_000, 2_001_000, adaptive_chunk_size(), tx).await
-/// });
-/// while let Some(blocks) = rx.recv().await {
-///     // scan this batch while the downloader prefetches the next
-///     println!("got {} blocks", blocks.len());
-/// }
-/// downloader.await.unwrap().unwrap();
-/// # });
-/// ```
-pub async fn download_chain(
+/// The one download loop: drives `GetBlockRange`, groups blocks into
+/// `max_outputs`-bounded chunks, verifies `prev_hash`, and forwards each ready
+/// chunk over `tx`. Returns early once the consumer drops the receiver.
+async fn download(
     mut client: LwdClient,
     from: u32,
     to: u32,
     max_outputs: usize,
-    tx: mpsc::Sender<Vec<CompactBlock>>,
+    tx: &mpsc::Sender<Result<Vec<CompactBlock>>>,
 ) -> Result<()> {
     let req = BlockRange {
         start: Some(BlockId { height: from as u64, hash: vec![] }),
@@ -264,7 +174,7 @@ pub async fn download_chain(
             block.vtx.iter().map(|t| t.outputs.len() + t.actions.len()).sum();
 
         if output_count + block_outputs > max_outputs && !chunk.is_empty() {
-            if tx.send(std::mem::take(&mut chunk)).await.is_err() {
+            if tx.send(Ok(std::mem::take(&mut chunk))).await.is_err() {
                 return Ok(()); // receiver dropped — consumer cancelled
             }
             output_count = 0;
@@ -275,25 +185,9 @@ pub async fn download_chain(
     }
 
     if !chunk.is_empty() {
-        tx.send(chunk).await.ok();
+        tx.send(Ok(chunk)).await.ok();
     }
     Ok(())
-}
-
-/// Spawn a download worker and return its join handle and block-batch receiver.
-///
-/// The channel has capacity 1, so the downloader prefetches at most one batch
-/// ahead of the consumer. Use [`adaptive_chunk_size`] for `max_outputs` unless
-/// you have a specific memory budget.
-pub fn stream_blocks(
-    client: LwdClient,
-    from: u32,
-    to: u32,
-    max_outputs: usize,
-) -> (JoinHandle<Result<()>>, mpsc::Receiver<Vec<CompactBlock>>) {
-    let (tx, rx) = mpsc::channel(1);
-    let handle = tokio::spawn(download_chain(client, from, to, max_outputs, tx));
-    (handle, rx)
 }
 
 // ─── Full transaction fetch ───────────────────────────────────────────────────
