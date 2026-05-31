@@ -16,8 +16,8 @@
 //! let tip = chain::tip_height(&mut client).await.unwrap();
 //! let blocks = chain::fetch_range(client, tip - 100, tip).await.unwrap();
 //! let received = sync(&blocks, &keys);
-//! for (height, note, _addr) in &received.sapling {
-//!     println!("received {} zat at height {}", note.value().inner(), height);
+//! for n in &received.sapling {
+//!     println!("received {} zat at height {}", n.note.value().inner(), n.height);
 //! }
 //! # });
 //! ```
@@ -28,8 +28,7 @@ pub mod keys;
 pub mod note;
 pub mod sync;
 
-/// Generated lightwalletd compact-format types. Kept crate-private; the few
-/// types that appear in this crate's public API are re-exported below.
+/// Generated lightwalletd compact-format types.
 pub(crate) mod proto;
 
 /// The generated proto types that surface in `seer-sync`'s public API:

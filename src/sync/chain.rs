@@ -129,10 +129,10 @@ pub const DEFAULT_CHUNK_OUTPUTS: usize = 100_000;
 /// [`fetch_range`] and feed the blocks to [`crate::sync::sync`].
 ///
 /// ```no_run
-/// # use seer_sync::chain::{connect, blocks, DEFAULT_CHUNK_OUTPUTS, ZEC_ROCKS};
+/// # use seer_sync::sync::chain::{connect_auto, blocks, DEFAULT_CHUNK_OUTPUTS};
 /// # use futures::StreamExt;
 /// # tokio_test::block_on(async {
-/// let client = connect(ZEC_ROCKS).await.unwrap();
+/// let client = connect_auto().await.unwrap();
 /// let mut s = blocks(client, 2_000_000, 2_001_000, DEFAULT_CHUNK_OUTPUTS);
 /// while let Some(batch) = s.next().await {
 ///     let batch = batch.unwrap();

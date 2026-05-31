@@ -1,8 +1,13 @@
-//! Trial-decrypt compact blocks with a viewing key.
+//! Trial-decrypt compact blocks with a viewing key — and, with a full key,
+//! detect spends and compute a balance.
 //!
-//! The whole job: take the incoming viewing keys, run the `sapling` / `orchard`
-//! batch trial-decryption over every compact output and action, and return the
-//! hits as the note crates' own `(height, Note, recipient)` — no wrapper types.
+//! Incoming detection runs the `sapling` / `orchard` batch trial-decryption
+//! over every compact output and action. When the keys carry nullifier-deriving
+//! material (a full key), each received Orchard note's nullifier is derived and
+//! matched against the spends seen in the scanned blocks. Sapling spend
+//! detection additionally needs leaf-position tracking, which isn't wired yet.
+
+use std::collections::HashSet;
 
 pub mod chain;
 
@@ -14,27 +19,63 @@ use zcash_note_encryption::{batch, EphemeralKeyBytes};
 use crate::keys::ScanningKeys;
 use crate::proto::{CompactBlock, CompactOrchardAction, CompactSaplingOutput};
 
-/// Notes received across the scanned blocks, grouped by pool.
-///
-/// Each entry is `(block_height, note, recipient)` in the `sapling` / `orchard`
-/// crates' own types.
-#[derive(Default)]
-pub struct Received {
-    /// Sapling notes received.
-    pub sapling: Vec<(u32, sapling::Note, sapling::PaymentAddress)>,
-    /// Orchard notes received.
-    pub orchard: Vec<(u32, orchard::Note, orchard::Address)>,
+/// A note received while scanning.
+pub struct ReceivedNote<N, A> {
+    /// Block height the note was received at.
+    pub height: u32,
+    /// The decrypted note (the `sapling` / `orchard` crate's own type).
+    pub note: N,
+    /// Recipient address recovered from the plaintext.
+    pub recipient: A,
+    /// Whether the note was seen spent within the scanned range.
+    ///
+    /// Only ever `true` when scanning with a full key (so the nullifier could
+    /// be derived). Always `false` for Sapling, which still lacks
+    /// leaf-position tracking.
+    pub spent: bool,
 }
 
-/// Trial-decrypt every Sapling output and Orchard action in `blocks`.
-///
-/// Each block is decrypted as a single batch per pool, amortising the
-/// key-agreement setup across all of that block's outputs.
+/// Notes received across the scanned blocks, grouped by pool.
+#[derive(Default)]
+pub struct Received {
+    /// Sapling notes (spend detection not yet wired — `spent` is always false).
+    pub sapling: Vec<ReceivedNote<sapling::Note, sapling::PaymentAddress>>,
+    /// Orchard notes (spend-detected when scanned with a full key).
+    pub orchard: Vec<ReceivedNote<orchard::Note, orchard::Address>>,
+}
+
+/// Received / spent / unspent totals, in zatoshis.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Balance {
+    /// Total value of all notes received.
+    pub received: u64,
+    /// Total value of received notes seen spent within the scanned range.
+    pub spent: u64,
+    /// `received - spent`.
+    pub unspent: u64,
+}
+
+impl Received {
+    /// Sum received, spent, and unspent value across both pools.
+    pub fn balance(&self) -> Balance {
+        let received = self.sapling.iter().map(|n| n.note.value().inner()).sum::<u64>()
+            + self.orchard.iter().map(|n| n.note.value().inner()).sum::<u64>();
+        let spent = self.sapling.iter().filter(|n| n.spent).map(|n| n.note.value().inner()).sum::<u64>()
+            + self.orchard.iter().filter(|n| n.spent).map(|n| n.note.value().inner()).sum::<u64>();
+        Balance { received, spent, unspent: received - spent }
+    }
+}
+
+/// Trial-decrypt every Sapling output and Orchard action in `blocks`, flagging
+/// received Orchard notes spent when `keys` carries nullifier-deriving keys.
 pub fn sync(blocks: &[CompactBlock], keys: &ScanningKeys) -> Received {
     let sapling_ivk = keys.sapling.as_ref().map(|k| k.ivk.prepare());
     let orchard_ivk = keys.orchard.as_ref().map(|k| OrchardPreparedIvk::new(&k.ivk));
+    let orchard_nk = keys.orchard.as_ref().and_then(|k| k.nk.as_ref());
 
-    let mut received = Received::default();
+    let mut sapling = Vec::new();
+    let mut orchard: Vec<(u32, orchard::Note, orchard::Address, Option<[u8; 32]>)> = Vec::new();
+    let mut spends: HashSet<[u8; 32]> = HashSet::new();
 
     for block in blocks {
         let height = block.height as u32;
@@ -52,7 +93,7 @@ pub fn sync(blocks: &[CompactBlock], keys: &ScanningKeys) -> Received {
                     .into_iter()
                     .flatten()
             {
-                received.sapling.push((height, note, recipient));
+                sapling.push(ReceivedNote { height, note, recipient, spent: false });
             }
         }
 
@@ -69,12 +110,32 @@ pub fn sync(blocks: &[CompactBlock], keys: &ScanningKeys) -> Received {
                     .into_iter()
                     .flatten()
             {
-                received.orchard.push((height, note, recipient));
+                let nullifier = orchard_nk.map(|fvk| note.nullifier(fvk).to_bytes());
+                orchard.push((height, note, recipient, nullifier));
+            }
+        }
+
+        // Every Orchard action reveals the nullifier of the note it spends.
+        for tx in &block.vtx {
+            for action in &tx.actions {
+                if let Ok(nf) = action.nullifier[..].try_into() {
+                    spends.insert(nf);
+                }
             }
         }
     }
 
-    received
+    let orchard = orchard
+        .into_iter()
+        .map(|(height, note, recipient, nf)| ReceivedNote {
+            height,
+            note,
+            recipient,
+            spent: nf.is_some_and(|nf| spends.contains(&nf)),
+        })
+        .collect();
+
+    Received { sapling, orchard }
 }
 
 /// Proto → `sapling` compact output. Deserialization glue, not crypto.
