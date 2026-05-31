@@ -24,12 +24,16 @@
 
 #![warn(missing_docs)]
 
+pub mod address;
 pub mod chain;
 pub mod decrypt;
 pub mod error;
 pub mod keys;
+pub mod memo;
 pub mod proto;
 pub mod scan;
+pub mod sync;
+pub mod tree;
 
 #[cfg(feature = "db")]
 pub mod db;

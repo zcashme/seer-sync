@@ -78,10 +78,34 @@ pub async fn tip_height(client: &mut LwdClient) -> Result<u32> {
 
 // ─── Block fetching ───────────────────────────────────────────────────────────
 
-/// Fetch compact blocks `[from, to]` inclusive into a `Vec`.
+/// Hard cap on outputs per chunk regardless of available RAM.
+const MAX_OUTPUTS_PER_CHUNK: usize = 200_000;
+
+/// Conservative in-memory size of one compact action or Sapling output (bytes).
 ///
-/// All blocks are buffered in memory. For ranges exceeding ~50 000 blocks,
-/// prefer [`stream_blocks`] to avoid large allocations.
+/// Nullifier (32) + cmx/cmu (32) + epk (32) + compact ciphertext (52) plus
+/// proto framing overhead rounds to ~256 bytes.
+const BYTES_PER_OUTPUT: usize = 256;
+
+/// Compute a chunk size (in total shielded outputs) that fits comfortably in
+/// the current available system RAM.
+///
+/// Uses at most half of available memory and never exceeds
+/// [`MAX_OUTPUTS_PER_CHUNK`], so the value adapts to the machine at runtime
+/// rather than requiring a hardcoded block count.
+pub fn adaptive_chunk_size() -> usize {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    let available_bytes = sys.available_memory() as usize;
+    // Reserve half for the OS and other processes; divide the rest by per-output cost.
+    let from_ram = (available_bytes / 2) / BYTES_PER_OUTPUT;
+    from_ram.min(MAX_OUTPUTS_PER_CHUNK).max(1_000)
+}
+
+/// Fetch compact blocks `[from, to]` inclusive into a single `Vec`.
+///
+/// All blocks are buffered in memory at once. For large ranges prefer
+/// [`fetch_blocks_adaptive`] which breaks the download into RAM-bounded chunks.
 pub async fn fetch_range(client: &mut LwdClient, from: u32, to: u32) -> Result<Vec<CompactBlock>> {
     let req = BlockRange {
         start: Some(BlockId { height: from as u64, hash: vec![] }),
@@ -162,6 +186,19 @@ pub async fn fetch_blocks_chunked(
         chunks.push(chunk);
     }
     Ok(chunks)
+}
+
+/// Stream compact blocks `[from, to]` using a chunk size derived from
+/// [`adaptive_chunk_size`].
+///
+/// Equivalent to `fetch_blocks_chunked(client, from, to, adaptive_chunk_size())`
+/// but selects the chunk size automatically based on available system RAM.
+pub async fn fetch_blocks_adaptive(
+    client: &mut LwdClient,
+    from: u32,
+    to: u32,
+) -> Result<Vec<Vec<CompactBlock>>> {
+    fetch_blocks_chunked(client, from, to, adaptive_chunk_size()).await
 }
 
 // ─── Full transaction fetch ───────────────────────────────────────────────────

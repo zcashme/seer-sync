@@ -3,7 +3,15 @@
 //! Three entry points:
 //! - [`scan_ivk`] — incoming only, no spend detection
 //! - [`scan_fvk`] — incoming + nullifier derivation + spend detection + transparent
-//! - [`scan_ovk`] — see [`crate::decrypt`] for OVK recovery (full transactions)
+//! - [`scan_ovk`] — see [`crate::decrypt`] for OVK recovery (full transactions required)
+//!
+//! # Parallelism
+//!
+//! Both entry points use two levels of parallelism:
+//! 1. **Block-level** — rayon distributes blocks across CPU threads.
+//! 2. **Transaction-level** — within each block, `zcash_note_encryption::batch`
+//!    decrypts all actions/outputs × all IVKs in a single vectorised call,
+//!    amortising key-agreement setup across the full transaction output set.
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,7 +19,7 @@ use crossbeam_channel::{unbounded, Receiver};
 use orchard::note_encryption::{CompactAction, OrchardDomain};
 use rayon::prelude::*;
 use sapling::note_encryption::{CompactOutputDescription, SaplingDomain, Zip212Enforcement};
-use zcash_note_encryption::{EphemeralKeyBytes, try_compact_note_decryption};
+use zcash_note_encryption::{batch, EphemeralKeyBytes};
 
 use crate::keys::{FvkKeys, IvkKeys};
 use crate::proto::{CompactBlock, CompactOrchardAction, CompactSaplingOutput};
@@ -139,12 +147,18 @@ pub struct FvkScanResult {
 /// Trial-decrypt `blocks` in parallel using IVK-only keys.
 ///
 /// Returns a [`Receiver`] that yields one [`IncomingNoteView`] per hit.
-/// The channel closes when rayon completes. Post-Canopy ZIP-212 is assumed.
+/// The channel closes when all rayon workers finish. Post-Canopy ZIP-212
+/// is assumed for Sapling.
+///
+/// Within each block, all actions/outputs are decrypted in a single
+/// `batch::try_compact_note_decryption` call per pool, amortising the
+/// per-output ephemeral-key setup across the entire transaction.
 pub fn scan_ivk(blocks: &[CompactBlock], keys: &IvkKeys) -> Receiver<IncomingNoteView> {
     let (tx, rx) = unbounded();
 
     if !keys.is_empty() {
-        let sapling_domain = SaplingDomain::new(Zip212Enforcement::On);
+        let orchard_ivk_slice = keys.orchard.as_ref().map_or(&[][..], std::slice::from_ref);
+        let sapling_ivk_slice = keys.sapling.as_ref().map_or(&[][..], std::slice::from_ref);
 
         blocks.par_iter().for_each_with(tx, |tx, block| {
             let height = block.height as u32;
@@ -152,17 +166,30 @@ pub fn scan_ivk(blocks: &[CompactBlock], keys: &IvkKeys) -> Receiver<IncomingNot
             for compact_tx in &block.vtx {
                 let txid = txid_bytes(&compact_tx.txid);
 
-                if let Some(ivk) = &keys.orchard {
-                    for (output_index, proto_action) in compact_tx.actions.iter().enumerate() {
-                        let Some(action) = parse_orchard_action(proto_action) else {
-                            continue;
-                        };
-                        let domain = OrchardDomain::for_compact_action(&action);
-                        if let Some((note, recipient)) =
-                            try_compact_note_decryption(&domain, ivk, &action)
-                        {
+                // ── Orchard batch ────────────────────────────────────────────
+                if !orchard_ivk_slice.is_empty() {
+                    // Collect successfully-parsed actions, retaining original indices.
+                    let parsed: Vec<(usize, CompactAction)> = compact_tx
+                        .actions
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, p)| parse_orchard_action(p).map(|ca| (i, ca)))
+                        .collect();
+
+                    let batch_inputs: Vec<(OrchardDomain, CompactAction)> = parsed
+                        .iter()
+                        .map(|(_, ca)| (OrchardDomain::for_compact_action(ca), ca.clone()))
+                        .collect();
+
+                    for (batch_idx, result) in
+                        batch::try_compact_note_decryption(orchard_ivk_slice, &batch_inputs)
+                            .into_iter()
+                            .enumerate()
+                    {
+                        if let Some(((note, recipient), _)) = result {
+                            let output_index = parsed[batch_idx].0;
+                            let rho: [u8; 32] = parsed[batch_idx].1.nullifier().to_bytes();
                             let rseed: [u8; 32] = note.rseed().as_bytes().clone();
-                            let rho: [u8; 32] = action.nullifier().to_bytes();
                             tx.send(IncomingNoteView {
                                 height,
                                 tx_id: txid,
@@ -180,14 +207,27 @@ pub fn scan_ivk(blocks: &[CompactBlock], keys: &IvkKeys) -> Receiver<IncomingNot
                     }
                 }
 
-                if let Some(ivk) = &keys.sapling {
-                    for (output_index, proto_output) in compact_tx.outputs.iter().enumerate() {
-                        let Some(output) = parse_sapling_output(proto_output) else {
-                            continue;
-                        };
-                        if let Some((note, recipient)) =
-                            try_compact_note_decryption(&sapling_domain, ivk, &output)
-                        {
+                // ── Sapling batch ────────────────────────────────────────────
+                if !sapling_ivk_slice.is_empty() {
+                    let parsed: Vec<(usize, CompactOutputDescription)> = compact_tx
+                        .outputs
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, p)| parse_sapling_output(p).map(|o| (i, o)))
+                        .collect();
+
+                    let batch_inputs: Vec<(SaplingDomain, CompactOutputDescription)> = parsed
+                        .iter()
+                        .map(|(_, o)| (SaplingDomain::new(Zip212Enforcement::On), o.clone()))
+                        .collect();
+
+                    for (batch_idx, result) in
+                        batch::try_compact_note_decryption(sapling_ivk_slice, &batch_inputs)
+                            .into_iter()
+                            .enumerate()
+                    {
+                        if let Some(((note, recipient), _)) = result {
+                            let output_index = parsed[batch_idx].0;
                             let rseed = rseed_bytes_sapling(&note);
                             tx.send(IncomingNoteView {
                                 height,
@@ -218,22 +258,27 @@ pub fn scan_ivk(blocks: &[CompactBlock], keys: &IvkKeys) -> Receiver<IncomingNot
 ///
 /// In addition to incoming note detection, this path:
 /// - Tracks all Sapling note commitments to maintain the leaf-position counter
-/// - Derives nullifiers for each received note (where possible)
 /// - Matches received nullifiers against compact spend sets
 /// - Emits [`ScanEvent::Spent`] for any `known_nullifiers` seen as spends
 /// - Collects transparent inputs/outputs for t-balance accounting
 ///
 /// `sapling_start_pos` must equal the number of Sapling note commitments
-/// already processed before the first block in `blocks`.
+/// already processed before the first block in `blocks`. Use
+/// [`crate::tree::TreeSize`] to derive this value from block metadata.
 pub fn scan_fvk(
     blocks: &[CompactBlock],
     keys: &FvkKeys,
     sapling_start_pos: u64,
     known_nullifiers: &HashSet<[u8; 32]>,
 ) -> FvkScanResult {
+    let sapling_domain = SaplingDomain::new(Zip212Enforcement::On);
+    let orchard_ivk_slice = keys.orchard_ivk.as_ref().map_or(&[][..], std::slice::from_ref);
+    let sapling_ivk_slice = keys.sapling_ivk.as_ref().map_or(&[][..], std::slice::from_ref);
+
     // ── Phase 1: serial Sapling leaf-position assignment ─────────────────────
-    // We must count every cmu in order to assign correct positions for nullifier
-    // derivation. This requires serial block iteration.
+    // Sapling nullifier derivation requires knowing a note's exact leaf position
+    // in the commitment tree, so we must visit every cmu in order. Batch decrypt
+    // is used within each transaction to avoid redundant key-agreement setup.
     struct SaplingHit {
         block_idx: usize,
         tx_idx: usize,
@@ -244,25 +289,37 @@ pub fn scan_fvk(
     let mut sapling_leaf_count = sapling_start_pos;
     let mut sapling_hit_positions: Vec<SaplingHit> = Vec::new();
 
-    if keys.sapling_ivk.is_some() {
-        let sapling_domain = SaplingDomain::new(Zip212Enforcement::On);
-        let ivk = keys.sapling_ivk.as_ref().unwrap();
-
+    if !sapling_ivk_slice.is_empty() {
         for (block_idx, block) in blocks.iter().enumerate() {
             for (tx_idx, compact_tx) in block.vtx.iter().enumerate() {
-                for (output_idx, proto_output) in compact_tx.outputs.iter().enumerate() {
-                    let pos = sapling_leaf_count;
-                    sapling_leaf_count += 1;
+                let tx_start = sapling_leaf_count;
+                sapling_leaf_count += compact_tx.outputs.len() as u64;
 
-                    if let Some(output) = parse_sapling_output(proto_output) {
-                        if try_compact_note_decryption(&sapling_domain, ivk, &output).is_some() {
-                            sapling_hit_positions.push(SaplingHit {
-                                block_idx,
-                                tx_idx,
-                                output_idx,
-                                leaf_pos: pos,
-                            });
-                        }
+                let parsed: Vec<(usize, CompactOutputDescription)> = compact_tx
+                    .outputs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, p)| parse_sapling_output(p).map(|o| (i, o)))
+                    .collect();
+
+                let batch_inputs: Vec<(SaplingDomain, CompactOutputDescription)> = parsed
+                    .iter()
+                    .map(|(_, o)| (SaplingDomain::new(Zip212Enforcement::On), o.clone()))
+                    .collect();
+
+                for (batch_idx, result) in
+                    batch::try_compact_note_decryption(sapling_ivk_slice, &batch_inputs)
+                        .into_iter()
+                        .enumerate()
+                {
+                    if result.is_some() {
+                        let output_idx = parsed[batch_idx].0;
+                        sapling_hit_positions.push(SaplingHit {
+                            block_idx,
+                            tx_idx,
+                            output_idx,
+                            leaf_pos: tx_start + output_idx as u64,
+                        });
                     }
                 }
             }
@@ -286,30 +343,21 @@ pub fn scan_fvk(
         let height = block.height as u32;
         for compact_tx in &block.vtx {
             for action in &compact_tx.actions {
-                if action.nullifier.len() == 32 {
-                    let mut nf = [0u8; 32];
-                    nf.copy_from_slice(&action.nullifier);
+                if let Ok(nf) = action.nullifier.as_slice().try_into() {
                     orchard_spends.push(SpendRecord { nullifier: nf, height });
                 }
             }
             for spend in &compact_tx.spends {
-                if spend.nf.len() == 32 {
-                    let mut nf = [0u8; 32];
-                    nf.copy_from_slice(&spend.nf);
+                if let Ok(nf) = spend.nf.as_slice().try_into() {
                     sapling_spends.push(SpendRecord { nullifier: nf, height });
                 }
             }
         }
     }
 
-    let orchard_spend_set: HashSet<[u8; 32]> =
-        orchard_spends.iter().map(|s| s.nullifier).collect();
-    let sapling_spend_set: HashSet<[u8; 32]> =
-        sapling_spends.iter().map(|s| s.nullifier).collect();
-
-    // ── Phase 3: parallel incoming decrypt ───────────────────────────────────
-    let sapling_domain = SaplingDomain::new(Zip212Enforcement::On);
-
+    // ── Phase 3: parallel incoming decrypt (Orchard batched per tx) ──────────
+    // Sapling hits are already known from Phase 1; re-decrypt to recover the
+    // note value and recipient (compact data does not persist them).
     struct RawNote {
         height: u32,
         tx_id: [u8; 32],
@@ -322,10 +370,6 @@ pub fn scan_fvk(
         sapling_leaf_pos: Option<u64>,
     }
 
-    // Safety: RawNote contains Recipient, which is not Send. Work around by
-    // collecting per-block Vec<RawNote> serially after parallel outer iteration
-    // or by wrapping Recipient. We use par_iter at block granularity and
-    // collect inner notes into a flat Vec.
     let raw_notes: Vec<RawNote> = blocks
         .par_iter()
         .enumerate()
@@ -336,17 +380,29 @@ pub fn scan_fvk(
             for (tx_idx, compact_tx) in block.vtx.iter().enumerate() {
                 let txid = txid_bytes(&compact_tx.txid);
 
-                if let Some(ivk) = &keys.orchard_ivk {
-                    for (output_index, proto_action) in compact_tx.actions.iter().enumerate() {
-                        let Some(action) = parse_orchard_action(proto_action) else {
-                            continue;
-                        };
-                        let domain = OrchardDomain::for_compact_action(&action);
-                        if let Some((note, recipient)) =
-                            try_compact_note_decryption(&domain, ivk, &action)
-                        {
+                // Orchard: batch all actions in the transaction.
+                if !orchard_ivk_slice.is_empty() {
+                    let parsed: Vec<(usize, CompactAction)> = compact_tx
+                        .actions
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, p)| parse_orchard_action(p).map(|ca| (i, ca)))
+                        .collect();
+
+                    let batch_inputs: Vec<(OrchardDomain, CompactAction)> = parsed
+                        .iter()
+                        .map(|(_, ca)| (OrchardDomain::for_compact_action(ca), ca.clone()))
+                        .collect();
+
+                    for (batch_idx, result) in
+                        batch::try_compact_note_decryption(orchard_ivk_slice, &batch_inputs)
+                            .into_iter()
+                            .enumerate()
+                    {
+                        if let Some(((note, recipient), _)) = result {
+                            let output_index = parsed[batch_idx].0;
+                            let rho: [u8; 32] = parsed[batch_idx].1.nullifier().to_bytes();
                             let rseed: [u8; 32] = note.rseed().as_bytes().clone();
-                            let rho: [u8; 32] = action.nullifier().to_bytes();
                             notes.push(RawNote {
                                 height,
                                 tx_id: txid,
@@ -362,7 +418,8 @@ pub fn scan_fvk(
                     }
                 }
 
-                if keys.sapling_ivk.is_some() {
+                // Sapling: decrypt only known Phase-1 hits (guaranteed to succeed).
+                if !sapling_ivk_slice.is_empty() {
                     for (output_index, proto_output) in compact_tx.outputs.iter().enumerate() {
                         let key = (block_idx, tx_idx, output_index);
                         let Some(leaf_pos) = sapling_hits.get(&key).copied() else {
@@ -373,9 +430,12 @@ pub fn scan_fvk(
                         };
                         let ivk = keys.sapling_ivk.as_ref().unwrap();
                         if let Some((note, recipient)) =
-                            try_compact_note_decryption(&sapling_domain, ivk, &output)
+                            zcash_note_encryption::try_compact_note_decryption(
+                                &sapling_domain,
+                                ivk,
+                                &output,
+                            )
                         {
-                            let rseed = rseed_bytes_sapling(&note);
                             notes.push(RawNote {
                                 height,
                                 tx_id: txid,
@@ -383,7 +443,7 @@ pub fn scan_fvk(
                                 pool: ShieldedPool::Sapling,
                                 value_zat: note.value().inner(),
                                 recipient: Recipient::Sapling(recipient),
-                                rseed,
+                                rseed: rseed_bytes_sapling(&note),
                                 rho: None,
                                 sapling_leaf_pos: Some(leaf_pos),
                             });
@@ -395,13 +455,11 @@ pub fn scan_fvk(
         })
         .collect();
 
-    // ── Phase 4: nullifier derivation + spend matching ───────────────────────
+    // ── Phase 4: spend matching ───────────────────────────────────────────────
     // Full nullifier derivation from compact data alone is not possible for
-    // either pool because it requires the note commitment (unavailable without
-    // full transaction data).  We store rseed + rho/leaf_pos and mark
-    // `nullifier = None` here; the DB enrichment pass derives it after
-    // fetching the full transaction.  We DO emit Spent events for any
-    // `known_nullifiers` that appeared in the compact spend sets.
+    // either pool (requires the note commitment from the full transaction).
+    // We store rseed + rho/leaf_pos for later DB-side derivation and emit
+    // Spent events only for `known_nullifiers` already in the caller's state.
     let mut events: Vec<ScanEvent> = raw_notes
         .into_iter()
         .map(|raw| {
@@ -420,24 +478,11 @@ pub fn scan_fvk(
         })
         .collect();
 
-    // Emit Spent events for known wallet nullifiers seen in this batch.
-    for spend in &orchard_spends {
+    for spend in orchard_spends.iter().chain(sapling_spends.iter()) {
         if known_nullifiers.contains(&spend.nullifier) {
-            events.push(ScanEvent::Spent {
-                nullifier: spend.nullifier,
-                height: spend.height,
-            });
+            events.push(ScanEvent::Spent { nullifier: spend.nullifier, height: spend.height });
         }
     }
-    for spend in &sapling_spends {
-        if known_nullifiers.contains(&spend.nullifier) {
-            events.push(ScanEvent::Spent {
-                nullifier: spend.nullifier,
-                height: spend.height,
-            });
-        }
-    }
-    let _ = (orchard_spend_set, sapling_spend_set); // available for future cross-batch matching
 
     // ── Phase 5: transparent inputs/outputs ──────────────────────────────────
     let mut transparent_received: Vec<TransparentReceived> = Vec::new();
@@ -461,9 +506,7 @@ pub fn scan_fvk(
             }
 
             for vin in &compact_tx.vin {
-                if vin.prevout_txid.len() == 32 {
-                    let mut prevout_txid = [0u8; 32];
-                    prevout_txid.copy_from_slice(&vin.prevout_txid);
+                if let Ok(prevout_txid) = vin.prevout_txid.as_slice().try_into() {
                     transparent_spends_out.push(TransparentSpend {
                         height,
                         tx_id: txid,
@@ -514,30 +557,4 @@ fn rseed_bytes_sapling(note: &sapling::Note) -> [u8; 32] {
         sapling::note::Rseed::BeforeZip212(scalar) => scalar.to_bytes(),
         sapling::note::Rseed::AfterZip212(bytes) => *bytes,
     }
-}
-
-/// Parse a P2PKH or P2SH locking script to its address hash.
-///
-/// Returns `Some((kind, 20-byte hash))` where kind is `"p2pkh"` or `"p2sh"`.
-/// Used to match transparent outputs against known addresses.
-pub fn script_to_address_hash(script: &[u8]) -> Option<(&'static str, [u8; 20])> {
-    // P2PKH: OP_DUP OP_HASH160 PUSH20 <hash> OP_EQUALVERIFY OP_CHECKSIG
-    if script.len() == 25
-        && script[0] == 0x76
-        && script[1] == 0xa9
-        && script[2] == 0x14
-        && script[23] == 0x88
-        && script[24] == 0xac
-    {
-        let mut hash = [0u8; 20];
-        hash.copy_from_slice(&script[3..23]);
-        return Some(("p2pkh", hash));
-    }
-    // P2SH: OP_HASH160 PUSH20 <hash> OP_EQUAL
-    if script.len() == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87 {
-        let mut hash = [0u8; 20];
-        hash.copy_from_slice(&script[2..22]);
-        return Some(("p2sh", hash));
-    }
-    None
 }
