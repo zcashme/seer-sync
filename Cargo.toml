@@ -9,6 +9,10 @@ categories = ["cryptography::cryptocurrencies"]
 keywords = ["zcash", "sync", "lightwalletd", "viewing-key", "orchard"]
 publish = false
 
+[features]
+default = ["db"]
+db = ["dep:rusqlite"]
+
 [dependencies]
 # Per-pool note-encryption primitives.
 zcash_note_encryption = "0.4"
@@ -17,12 +21,15 @@ sapling = { package = "sapling-crypto", version = "0.7", default-features = fals
 
 # Upstream Zcash stack, crates.io only.
 zcash_protocol = { version = "0.8", default-features = false, features = ["std"] }
-zcash_keys = { version = "0.13", default-features = false, features = ["orchard", "sapling"] }
+zcash_keys = { version = "0.13", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
+zcash_address = "0.11"
+zcash_transparent = { version = "0.7", default-features = false }
 
 # gRPC + async (driver layer).
 tonic = { version = "0.14", default-features = false, features = ["transport", "tls-ring", "tls-webpki-roots", "codegen"] }
 tonic-prost = "0.14"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-stream = "0.1"
 prost = "0.14"
 http = "1"
 futures = "0.3"
@@ -31,8 +38,13 @@ futures = "0.3"
 rayon = "1"
 crossbeam-channel = "0.5"
 
+# Persistence (optional).
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+
 # Tooling.
 anyhow = "1"
+thiserror = "2"
+zip32 = "0.2"
 
 [build-dependencies]
 tonic-prost-build = { version = "0.14", default-features = false }

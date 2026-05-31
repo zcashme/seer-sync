@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use anyhow::Result;
 use seer_sync::chain::{connect, fetch_range, tip_height, ZEC_ROCKS};
-use seer_sync::keys::Keys;
-use seer_sync::scan::sync;
+use seer_sync::keys::IvkKeys;
+use seer_sync::scan::scan_ivk;
 use zcash_keys::keys::UnifiedIncomingViewingKey;
 use zcash_protocol::consensus::MainNetwork;
 
@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
     let uivk_str: String = UIVK.chars().filter(|c| !c.is_whitespace()).collect();
     let uivk = UnifiedIncomingViewingKey::decode(&MainNetwork, &uivk_str)
         .expect("hardcoded UIVK");
-    let keys = Keys::from_uivk(&uivk);
+    let keys = IvkKeys::from_uivk(&uivk);
 
     println!("Connecting to {ZEC_ROCKS} ...");
     let mut client = connect(ZEC_ROCKS).await?;
@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
 
     let t_sync = Instant::now();
     let mut count = 0u64;
-    for note in sync(&blocks, &keys) {
+    for note in scan_ivk(&blocks, &keys) {
         println!("  height={} pool={:?} value={} zat  recipient={:?}", note.height, note.pool, note.value_zat, note.recipient);
         count += 1;
     }

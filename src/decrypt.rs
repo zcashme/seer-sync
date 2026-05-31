@@ -1,44 +1,96 @@
 //! Full note decryption — recovers value, recipient, and memo from a complete transaction.
 //!
-//! Distinct from compact decryption in scan.rs: compact blocks carry only the
-//! first 52 bytes of enc_ciphertext (enough to confirm ownership), while full
-//! decryption requires the complete 580-byte enc_ciphertext from a fetched tx.
+//! Distinct from compact decryption in [`crate::scan`]: compact blocks carry only
+//! the first 52 bytes of `enc_ciphertext` (enough to confirm ownership and recover
+//! note value / recipient), while full decryption requires the complete 580-byte
+//! `enc_ciphertext` available from a fetched full transaction.
+//!
+//! This module also provides outgoing note recovery via the OVK, enabling
+//! reconstruction of sent notes without the spending key.
 
 use orchard::{
-    keys::PreparedIncomingViewingKey as OrchardPreparedIvk, note_encryption::OrchardDomain, Action,
+    keys::{OutgoingViewingKey as OrchardOvk, PreparedIncomingViewingKey as OrchardPreparedIvk},
+    note_encryption::OrchardDomain,
+    Action,
 };
 use sapling::{
     bundle::OutputDescription,
-    keys::PreparedIncomingViewingKey as SaplingPreparedIvk,
+    keys::{OutgoingViewingKey as SaplingOvk, PreparedIncomingViewingKey as SaplingPreparedIvk},
     note_encryption::{SaplingDomain, Zip212Enforcement},
 };
-use zcash_note_encryption::try_note_decryption;
+use zcash_note_encryption::{try_note_decryption, try_output_recovery_with_ovk};
 
-/// ZIP-302 memo size in bytes. Same for Sapling and Orchard.
+/// ZIP-302 memo size in bytes (same for Sapling and Orchard).
 pub const MEMO_SIZE: usize = 512;
 
-/// Trial-decrypt one Orchard [`Action`] with one IVK.
+// ─── IVK full decryption ──────────────────────────────────────────────────────
+
+/// Trial-decrypt one Orchard [`Action`] with an IVK.
 ///
-/// Returns `Some((note, recipient, memo))` iff the IVK matches the ephemeral
-/// key, the AEAD authenticates, and the on-chain `cmx` matches. Requires a
-/// full action with complete `enc_ciphertext` — not available from compact blocks.
+/// Returns `Some((note, recipient, memo))` iff the IVK matches the ephemeral key,
+/// the AEAD authenticates, and the on-chain `cmx` matches the decrypted note.
+/// Requires the full 580-byte `enc_ciphertext` — **not** available from compact blocks.
 pub fn try_decrypt_orchard<A>(
     action: &Action<A>,
     ivk: &OrchardPreparedIvk,
 ) -> Option<(orchard::Note, orchard::Address, Box<[u8; MEMO_SIZE]>)> {
-    let (note, recipient, memo) = try_note_decryption(&OrchardDomain::for_action(action), ivk, action)?;
+    let (note, recipient, memo) =
+        try_note_decryption(&OrchardDomain::for_action(action), ivk, action)?;
     Some((note, recipient, Box::new(memo)))
 }
 
-/// Trial-decrypt one Sapling [`OutputDescription`] with one IVK.
+/// Trial-decrypt one Sapling [`OutputDescription`] with an IVK.
 ///
-/// `zip212` must match the block height — derive it via
-/// `zcash_primitives::transaction::components::sapling::zip212_enforcement`.
+/// `zip212` must match the block height — use `Zip212Enforcement::On` for
+/// blocks after the Canopy activation (height 1_046_400 on mainnet).
 pub fn try_decrypt_sapling<Proof>(
     output: &OutputDescription<Proof>,
     ivk: &SaplingPreparedIvk,
     zip212: Zip212Enforcement,
 ) -> Option<(sapling::Note, sapling::PaymentAddress, Box<[u8; MEMO_SIZE]>)> {
-    let (note, recipient, memo) = try_note_decryption(&SaplingDomain::new(zip212), ivk, output)?;
+    let (note, recipient, memo) =
+        try_note_decryption(&SaplingDomain::new(zip212), ivk, output)?;
+    Some((note, recipient, Box::new(memo)))
+}
+
+// ─── OVK outgoing recovery ────────────────────────────────────────────────────
+
+/// Attempt to recover an outgoing Orchard note using the sender's OVK.
+///
+/// Succeeds only if `action` was created by the holder of `ovk`.
+/// Returns `Some((note, recipient_address, memo))` on success.
+/// Requires the full `out_ciphertext` from the complete [`Action`].
+pub fn try_recover_orchard_outgoing<A>(
+    action: &Action<A>,
+    ovk: &OrchardOvk,
+) -> Option<(orchard::Note, orchard::Address, Box<[u8; MEMO_SIZE]>)> {
+    let encrypted = action.encrypted_note();
+    let (note, recipient, memo) = try_output_recovery_with_ovk(
+        &OrchardDomain::for_action(action),
+        ovk,
+        action,
+        action.cv_net(),
+        &encrypted.out_ciphertext,
+    )?;
+    Some((note, recipient, Box::new(memo)))
+}
+
+/// Attempt to recover an outgoing Sapling note using the sender's OVK.
+///
+/// Succeeds only if `output` was created by the holder of `ovk`.
+/// Returns `Some((note, recipient_address, memo))` on success.
+/// Requires the full `out_ciphertext` from the complete [`OutputDescription`].
+pub fn try_recover_sapling_outgoing<Proof>(
+    output: &OutputDescription<Proof>,
+    ovk: &SaplingOvk,
+    zip212: Zip212Enforcement,
+) -> Option<(sapling::Note, sapling::PaymentAddress, Box<[u8; MEMO_SIZE]>)> {
+    let (note, recipient, memo) = try_output_recovery_with_ovk(
+        &SaplingDomain::new(zip212),
+        ovk,
+        output,
+        output.cv(),
+        output.out_ciphertext(),
+    )?;
     Some((note, recipient, Box::new(memo)))
 }

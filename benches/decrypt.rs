@@ -7,8 +7,8 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use seer_sync::chain::{connect, fetch_range, tip_height, ZEC_ROCKS};
-use seer_sync::keys::Keys;
-use seer_sync::scan::sync;
+use seer_sync::keys::IvkKeys;
+use seer_sync::scan::scan_ivk;
 use zcash_keys::keys::UnifiedIncomingViewingKey;
 use zcash_protocol::consensus::MainNetwork;
 
@@ -29,7 +29,7 @@ fn bench(c: &mut Criterion) {
     let uivk_str: String = UIVK.chars().filter(|c| !c.is_whitespace()).collect();
     let uivk = UnifiedIncomingViewingKey::decode(&MainNetwork, &uivk_str)
         .expect("decoding hardcoded UIVK");
-    let keys = Keys::from_uivk(&uivk);
+    let keys = IvkKeys::from_uivk(&uivk);
 
     let total_actions: u64 = blocks
         .iter()
@@ -52,7 +52,7 @@ fn bench(c: &mut Criterion) {
     g.throughput(Throughput::Elements(total_actions + total_outputs));
     g.bench_function("uivk", |b| {
         b.iter(|| {
-            for note in sync(&blocks, &keys) {
+            for note in scan_ivk(&blocks, &keys) {
                 black_box(note);
             }
         });
