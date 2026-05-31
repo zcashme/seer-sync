@@ -34,8 +34,8 @@ pub fn scan_fvk(
     sapling_start_pos: u64,
     known_nullifiers: &HashSet<[u8; 32]>,
 ) -> FvkScanResult {
-    let orchard_ivk_slice = keys.orchard_ivk.as_slice();
-    let sapling_ivk_slice = keys.sapling_ivk.as_slice();
+    let orchard_ivk_slice = keys.ivk.orchard.as_slice();
+    let sapling_ivk_slice = keys.ivk.sapling.as_slice();
 
     // ── Phase 1: serial Sapling leaf-position assignment ─────────────────────
     // Every cmu must be counted in order; within each block all outputs are
@@ -169,7 +169,7 @@ pub fn scan_fvk(
                     .collect::<Vec<_>>();
 
                 if !hit_entries.is_empty() {
-                    let ivk = keys.sapling_ivk.as_ref().unwrap();
+                    let ivk = keys.ivk.sapling.as_ref().unwrap();
                     let batch_inputs = hit_entries
                         .iter()
                         .map(|(_, _, _, o)| (SaplingDomain::new(Zip212Enforcement::On), o.clone()))
@@ -266,5 +266,102 @@ pub fn scan_fvk(
         sapling_leaf_count,
         transparent_received,
         transparent_spends: transparent_spends_out,
+    }
+}
+
+/// Cumulative note commitment counts at a given chain height.
+///
+/// Both counts are *inclusive* — they include all commitments up to and
+/// including the block at which this value was recorded. Use [`TreeSize`] to
+/// derive the `sapling_start_pos` argument of [`scan_fvk`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TreeSize {
+    /// Number of Sapling note commitments in the tree.
+    pub sapling: u64,
+    /// Number of Orchard note commitments in the tree.
+    pub orchard: u64,
+}
+
+impl TreeSize {
+    /// Extract tree sizes from a [`CompactBlock`]'s `chain_metadata` field.
+    ///
+    /// Returns `None` for pre-NU5 compact blocks that carry no metadata.
+    pub fn from_block(block: &CompactBlock) -> Option<Self> {
+        let meta = block.chain_metadata.as_ref()?;
+        Some(Self {
+            sapling: meta.sapling_commitment_tree_size as u64,
+            orchard: meta.orchard_commitment_tree_size as u64,
+        })
+    }
+
+    /// Extract tree sizes, falling back to counting block outputs when
+    /// `chain_metadata` is absent.
+    ///
+    /// Pass the [`TreeSize`] **before** this block; the returned value reflects
+    /// the state **after** the block. Useful for pre-NU5 range recovery.
+    pub fn from_block_or_count(block: &CompactBlock, prior: Self) -> Self {
+        if let Some(s) = Self::from_block(block) {
+            return s;
+        }
+        let sapling_delta: u64 = block.vtx.iter().map(|tx| tx.outputs.len() as u64).sum();
+        let orchard_delta: u64 = block.vtx.iter().map(|tx| tx.actions.len() as u64).sum();
+        Self {
+            sapling: prior.sapling + sapling_delta,
+            orchard: prior.orchard + orchard_delta,
+        }
+    }
+
+    /// Compute the [`TreeSize`] before the first output of `block` by
+    /// subtracting this block's output counts from its post-block size.
+    ///
+    /// This is the value to pass as `sapling_start_pos` when scanning a
+    /// single block in isolation.
+    pub fn before_block(block: &CompactBlock) -> Option<Self> {
+        let after = Self::from_block(block)?;
+        let sapling_in_block: u64 = block.vtx.iter().map(|tx| tx.outputs.len() as u64).sum();
+        let orchard_in_block: u64 = block.vtx.iter().map(|tx| tx.actions.len() as u64).sum();
+        Some(Self {
+            sapling: after.sapling.saturating_sub(sapling_in_block),
+            orchard: after.orchard.saturating_sub(orchard_in_block),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tree_size_tests {
+    use super::TreeSize;
+    use crate::proto::{ChainMetadata, CompactBlock, CompactTx};
+
+    fn make_block(sapling_size: u32, orchard_size: u32) -> CompactBlock {
+        CompactBlock {
+            chain_metadata: Some(ChainMetadata {
+                sapling_commitment_tree_size: sapling_size,
+                orchard_commitment_tree_size: orchard_size,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn from_block_reads_metadata() {
+        let block = make_block(100, 50);
+        let size = TreeSize::from_block(&block).unwrap();
+        assert_eq!(size.sapling, 100);
+        assert_eq!(size.orchard, 50);
+    }
+
+    #[test]
+    fn before_block_subtracts_outputs() {
+        let mut block = make_block(10, 5);
+        let tx = CompactTx {
+            outputs: vec![Default::default(); 3],
+            actions: vec![Default::default(); 2],
+            ..Default::default()
+        };
+        block.vtx = vec![tx];
+
+        let before = TreeSize::before_block(&block).unwrap();
+        assert_eq!(before.sapling, 7); // 10 − 3
+        assert_eq!(before.orchard, 3); // 5 − 2
     }
 }
