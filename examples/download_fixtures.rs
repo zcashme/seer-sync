@@ -10,17 +10,13 @@ use std::time::Instant;
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use prost::Message;
-use tonic::transport::{Channel, ClientTlsConfig};
-use zcash_client_backend::proto::service::{
-    compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, ChainSpec,
-};
+use seer_sync::chain::{connect, ZEC_ROCKS};
+use seer_sync::proto::{BlockId, BlockRange};
 use zcash_protocol::consensus::{MainNetwork, NetworkUpgrade, Parameters};
-
-const DEFAULT_LWD_URL: &str = "https://zec.rocks:443";
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let url = env::var("LWD_URL").unwrap_or_else(|_| DEFAULT_LWD_URL.to_string());
+    let url = env::var("LWD_URL").unwrap_or_else(|_| ZEC_ROCKS.to_string());
 
     let nu6_height: u32 = u32::from(
         MainNetwork
@@ -29,23 +25,8 @@ async fn main() -> Result<()> {
     );
 
     println!("Connecting to {url} ...");
-    let uri: tonic::transport::Uri = url.parse().context("parsing LWD_URL")?;
-    let endpoint = Channel::builder(uri)
-        .tls_config(ClientTlsConfig::new().with_webpki_roots())?
-        .connect()
-        .await
-        .context("connecting to lightwalletd")?;
-    let mut client = CompactTxStreamerClient::new(endpoint);
-
-    let tip_height = u32::try_from(
-        client
-            .get_latest_block(ChainSpec {})
-            .await
-            .context("GetLatestBlock")?
-            .into_inner()
-            .height,
-    )
-    .context("tip height overflowed u32")?;
+    let mut client = connect(&url).await?;
+    let tip_height = seer_sync::chain::tip_height(&mut client).await?;
 
     let start = env::var("START_HEIGHT")
         .ok()

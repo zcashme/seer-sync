@@ -1,8 +1,6 @@
-//! The main sync loop — parallel IVK trial-decrypt over a slice of CompactBlocks.
+//! Parallel trial-decrypt loop over compact blocks.
 //!
 //! Profile via: cargo bench --bench decrypt
-
-use std::convert::TryFrom;
 
 use crossbeam_channel::{Receiver, unbounded};
 use orchard::note_encryption::{CompactAction, OrchardDomain};
@@ -13,24 +11,35 @@ use zcash_note_encryption::{EphemeralKeyBytes, try_compact_note_decryption};
 use crate::keys::Keys;
 use crate::proto::{CompactBlock, CompactOrchardAction, CompactSaplingOutput};
 
-/// Which pool a note belongs to.
+/// Which shielded pool a note belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pool {
+pub enum ShieldedPool {
     /// Sapling shielded pool.
     Sapling,
     /// Orchard shielded pool.
     Orchard,
 }
 
+/// The address that received a note, pool-typed.
+#[derive(Debug, Clone)]
+pub enum Recipient {
+    /// An Orchard diversified address.
+    Orchard(orchard::Address),
+    /// A Sapling payment address.
+    Sapling(sapling::PaymentAddress),
+}
+
 /// A successfully trial-decrypted incoming note.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct IncomingNoteView {
     /// Block height containing the action/output.
     pub height: u32,
     /// Pool the note belongs to.
-    pub pool: Pool,
+    pub pool: ShieldedPool,
     /// Value in zatoshis (1 ZEC = 1e8 zatoshis).
     pub value_zat: u64,
+    /// Recipient address recovered from the decrypted plaintext.
+    pub recipient: Recipient,
 }
 
 /// Trial-decrypt `blocks` in parallel using rayon.
@@ -44,9 +53,10 @@ pub fn sync(blocks: &[CompactBlock], keys: &Keys) -> Receiver<IncomingNoteView> 
     let (tx, rx) = unbounded();
 
     if !keys.is_empty() {
+        let sapling_domain = SaplingDomain::new(Zip212Enforcement::On);
+
         blocks.par_iter().for_each_with(tx, |tx, block| {
-            let height = u32::try_from(block.height).unwrap_or(u32::MAX);
-            let sapling_domain = SaplingDomain::new(Zip212Enforcement::On);
+            let height = block.height as u32;
 
             for compact_tx in &block.vtx {
                 if let Some(ivk) = &keys.orchard {
@@ -55,13 +65,14 @@ pub fn sync(blocks: &[CompactBlock], keys: &Keys) -> Receiver<IncomingNoteView> 
                             continue;
                         };
                         let domain = OrchardDomain::for_compact_action(&action);
-                        if let Some((note, _)) =
+                        if let Some((note, recipient)) =
                             try_compact_note_decryption(&domain, ivk, &action)
                         {
                             tx.send(IncomingNoteView {
                                 height,
-                                pool: Pool::Orchard,
+                                pool: ShieldedPool::Orchard,
                                 value_zat: note.value().inner(),
+                                recipient: Recipient::Orchard(recipient),
                             })
                             .ok();
                         }
@@ -73,13 +84,14 @@ pub fn sync(blocks: &[CompactBlock], keys: &Keys) -> Receiver<IncomingNoteView> 
                         let Some(output) = parse_sapling_output(proto_output) else {
                             continue;
                         };
-                        if let Some((note, _)) =
+                        if let Some((note, recipient)) =
                             try_compact_note_decryption(&sapling_domain, ivk, &output)
                         {
                             tx.send(IncomingNoteView {
                                 height,
-                                pool: Pool::Sapling,
+                                pool: ShieldedPool::Sapling,
                                 value_zat: note.value().inner(),
+                                recipient: Recipient::Sapling(recipient),
                             })
                             .ok();
                         }
@@ -93,18 +105,18 @@ pub fn sync(blocks: &[CompactBlock], keys: &Keys) -> Receiver<IncomingNoteView> 
 }
 
 fn parse_orchard_action(p: &CompactOrchardAction) -> Option<CompactAction> {
-    let nf_bytes: [u8; 32] = p.nullifier[..].try_into().ok()?;
-    let nf = Option::from(orchard::note::Nullifier::from_bytes(&nf_bytes))?;
-    let cmx_bytes: [u8; 32] = p.cmx[..].try_into().ok()?;
-    let cmx = Option::from(orchard::note::ExtractedNoteCommitment::from_bytes(&cmx_bytes))?;
+    let nf: [u8; 32] = p.nullifier[..].try_into().ok()?;
+    let nf = Option::from(orchard::note::Nullifier::from_bytes(&nf))?;
+    let cmx: [u8; 32] = p.cmx[..].try_into().ok()?;
+    let cmx = Option::from(orchard::note::ExtractedNoteCommitment::from_bytes(&cmx))?;
     let epk = EphemeralKeyBytes(p.ephemeral_key[..].try_into().ok()?);
     let ct: [u8; 52] = p.ciphertext[..].try_into().ok()?;
     Some(CompactAction::from_parts(nf, cmx, epk, ct))
 }
 
 fn parse_sapling_output(p: &CompactSaplingOutput) -> Option<CompactOutputDescription> {
-    let cmu_bytes: [u8; 32] = p.cmu[..].try_into().ok()?;
-    let cmu = Option::from(sapling::note::ExtractedNoteCommitment::from_bytes(&cmu_bytes))?;
+    let cmu: [u8; 32] = p.cmu[..].try_into().ok()?;
+    let cmu = Option::from(sapling::note::ExtractedNoteCommitment::from_bytes(&cmu))?;
     let epk = EphemeralKeyBytes(p.ephemeral_key[..].try_into().ok()?);
     let ct: [u8; 52] = p.ciphertext[..].try_into().ok()?;
     Some(CompactOutputDescription { cmu, ephemeral_key: epk, enc_ciphertext: ct })

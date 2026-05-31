@@ -3,6 +3,7 @@
 
 #![warn(missing_docs)]
 
+pub mod chain;
 pub mod decrypt;
 pub mod keys;
 pub mod proto;
