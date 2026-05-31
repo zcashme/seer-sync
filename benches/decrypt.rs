@@ -7,7 +7,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use std::time::Duration;
-use seer_sync::sync::chain::{connect, fetch_range, tip_height, ZEC_ROCKS};
+use seer_sync::sync::chain::{connect_auto, fetch_range, tip_height};
 use seer_sync::keys::ScanningKeys;
 use seer_sync::sync::sync;
 use zcash_keys::keys::UnifiedIncomingViewingKey;
@@ -24,13 +24,13 @@ fn bench(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
     let blocks = rt.block_on(async {
-        let mut client = connect(ZEC_ROCKS).await.expect("connecting to zec.rocks");
+        let mut client = connect_auto().await.expect("connecting to lightwalletd");
         let tip = tip_height(&mut client).await.expect("tip height");
         let from = std::env::var("BENCH_FROM")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| tip.saturating_sub(BENCH_WINDOW));
-        eprintln!("[bench] fetching [{from}..{tip}] ({} blocks) from {ZEC_ROCKS}", tip - from + 1);
+        eprintln!("[bench] fetching [{from}..{tip}] ({} blocks)", tip - from + 1);
         fetch_range(client, from, tip).await.expect("fetch_range")
     });
 

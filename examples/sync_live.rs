@@ -8,7 +8,7 @@ use std::env;
 use std::time::Instant;
 
 use anyhow::Result;
-use seer_sync::sync::chain::{connect, fetch_range, tip_height, ZEC_ROCKS};
+use seer_sync::sync::chain::{connect_auto, fetch_range, tip_height};
 use seer_sync::keys::ScanningKeys;
 use seer_sync::sync::sync;
 use zcash_keys::keys::UnifiedIncomingViewingKey;
@@ -24,8 +24,8 @@ async fn main() -> Result<()> {
         .expect("hardcoded UIVK");
     let keys = ScanningKeys::from_uivk(&uivk);
 
-    println!("Connecting to {ZEC_ROCKS} ...");
-    let mut client = connect(ZEC_ROCKS).await?;
+    println!("Connecting to a lightwalletd server ...");
+    let mut client = connect_auto().await?;
     let tip = tip_height(&mut client).await?;
 
     let from = env::var("START_HEIGHT")

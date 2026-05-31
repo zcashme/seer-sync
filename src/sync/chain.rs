@@ -11,15 +11,12 @@ use crate::proto::{
     CompactBlock, GetAddressUtxosArg, GetAddressUtxosReply, RawTransaction, TxFilter,
 };
 
-/// The public zec.rocks lightwalletd endpoint.
-pub const ZEC_ROCKS: &str = "https://zec.rocks:443";
-
 /// Built-in pool of public mainnet lightwalletd endpoints, tried in order by
 /// [`connect_auto`]. `zec.rocks` and its regional mirrors are listed first;
 /// the historical ECC endpoint serves as a final fallback. Override by calling
 /// [`connect`] with an explicit URL.
 pub const DEFAULT_SERVERS: &[&str] = &[
-    ZEC_ROCKS,
+    "https://zec.rocks:443",
     "https://na.zec.rocks:443",
     "https://eu.zec.rocks:443",
     "https://ap.zec.rocks:443",
