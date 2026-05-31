@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use orchard::note_encryption::OrchardDomain;
 use rayon::prelude::*;
 use sapling::note_encryption::{CompactOutputDescription, SaplingDomain, Zip212Enforcement};
 use zcash_note_encryption::batch;
@@ -10,7 +9,9 @@ use zcash_note_encryption::batch;
 use crate::keys::FvkKeys;
 use crate::proto::CompactBlock;
 
-use super::parsers::{parse_orchard_action, parse_sapling_output, rseed_bytes_sapling, txid_bytes};
+use super::parsers::{
+    decrypt_orchard_block, parse_sapling_output, rseed_bytes_sapling, txid_bytes,
+};
 use super::types::{
     FvkScanResult, IncomingNoteView, Recipient, ScanEvent, ShieldedPool, TransparentReceived,
     TransparentSpend,
@@ -136,44 +137,19 @@ pub fn scan_fvk(
             let height = block.height as u32;
             let mut notes = Vec::new();
 
-            // Orchard: one batch for all actions in this block.
-            if !orchard_ivk_slice.is_empty() {
-                let indexed = block
-                    .vtx
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(ti, ctxn)| {
-                        ctxn.actions.iter().enumerate().filter_map(move |(ai, p)| {
-                            parse_orchard_action(p).map(|ca| (ti, ai, ca))
-                        })
-                    })
-                    .collect::<Vec<_>>();
-
-                let batch_inputs = indexed
-                    .iter()
-                    .map(|(_, _, ca)| (OrchardDomain::for_compact_action(ca), ca.clone()))
-                    .collect::<Vec<_>>();
-
-                for (i, result) in
-                    batch::try_compact_note_decryption(orchard_ivk_slice, &batch_inputs)
-                        .into_iter()
-                        .enumerate()
-                {
-                    if let Some(((note, recipient), _)) = result {
-                        let (ti, ai, ca) = &indexed[i];
-                        notes.push(RawNote {
-                            height,
-                            tx_id: txid_bytes(&block.vtx[*ti].txid),
-                            output_index: *ai,
-                            pool: ShieldedPool::Orchard,
-                            value_zat: note.value().inner(),
-                            recipient: Recipient::Orchard(recipient),
-                            rseed: note.rseed().as_bytes().clone(),
-                            rho: Some(ca.nullifier().to_bytes()),
-                            sapling_leaf_pos: None,
-                        });
-                    }
-                }
+            // Orchard: shared block-level batch helper (identical to IVK path).
+            for (ti, ai, ca, note, recipient) in decrypt_orchard_block(block, orchard_ivk_slice) {
+                notes.push(RawNote {
+                    height,
+                    tx_id: txid_bytes(&block.vtx[ti].txid),
+                    output_index: ai,
+                    pool: ShieldedPool::Orchard,
+                    value_zat: note.value().inner(),
+                    recipient: Recipient::Orchard(recipient),
+                    rseed: note.rseed().as_bytes().clone(),
+                    rho: Some(ca.nullifier().to_bytes()),
+                    sapling_leaf_pos: None,
+                });
             }
 
             // Sapling: batch re-decrypt only the Phase-1 hits for this block.
