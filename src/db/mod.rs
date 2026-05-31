@@ -1,5 +1,4 @@
 //! SQLite persistence layer for seer-sync (feature = "db").
-#![allow(missing_docs)]
 //!
 //! Stores accounts, sync progress, received/sent notes, transactions, and
 //! transparent UTXOs. No witness tables — seer-sync is view-only.
@@ -16,17 +15,24 @@ pub use migration::migrate;
 /// A registered viewing key account.
 #[derive(Debug, Clone)]
 pub struct AccountRow {
+    /// Row id assigned by SQLite.
     pub id: i64,
+    /// Human-readable label for this account.
     pub label: String,
+    /// Key type tag: `"ivk"`, `"fvk"`, or `"ovk"`.
     pub key_type: String,
+    /// Bech32m-encoded viewing key string.
     pub encoded: String,
+    /// Block height at which this account's wallet was created (used to skip earlier blocks).
     pub birthday: u32,
 }
 
 /// Saved sync position for one account.
 #[derive(Debug, Clone, Default)]
 pub struct SyncCursor {
+    /// Last fully-processed block height.
     pub height: u32,
+    /// Block hash at `height`, used for reorg detection on resume.
     pub hash: Option<[u8; 32]>,
     /// Running count of Sapling note commitments seen — needed for Sapling
     /// nullifier derivation (commitment position in the tree).
@@ -36,59 +42,95 @@ pub struct SyncCursor {
 /// A received shielded note (IVK / FVK paths).
 #[derive(Debug, Clone)]
 pub struct ReceivedNoteRow {
+    /// Row id assigned by SQLite.
     pub id: i64,
+    /// Foreign key into the `accounts` table.
     pub account: i64,
+    /// Shielded pool: `"orchard"` or `"sapling"`.
     pub pool: String,
+    /// Transaction ID (32 bytes, protocol byte order).
     pub tx_id: Vec<u8>,
+    /// Block height at which this note was mined.
     pub height: u32,
+    /// Index of this output/action within the transaction.
     pub output_index: u32,
+    /// Diversifier bytes (11 bytes for Sapling; Orchard uses recipient directly).
     pub diversifier: Vec<u8>,
+    /// Note value in zatoshis.
     pub value_zat: u64,
+    /// Note commitment randomness (rseed), needed for nullifier / memo derivation.
     pub rseed: Vec<u8>,
+    /// Rho (Orchard only): the input nullifier of the action carrying this note.
     pub rho: Option<Vec<u8>>,
+    /// Sapling leaf position in the commitment tree (FVK path only).
     pub leaf_pos: Option<u64>,
+    /// Derived nullifier — populated after full-transaction fetch; `None` on IVK path.
     pub nullifier: Option<Vec<u8>>,
+    /// Full 512-byte ZIP-302 memo — populated after full-transaction fetch.
     pub memo: Option<Vec<u8>>,
+    /// Height at which this note's nullifier was observed as a spend, if any.
     pub spent_height: Option<u32>,
 }
 
 /// A sent note recovered via OVK / FVK.
 #[derive(Debug, Clone)]
 pub struct SentNoteRow {
+    /// Row id assigned by SQLite.
     pub id: i64,
+    /// Foreign key into the `accounts` table.
     pub account: i64,
+    /// Shielded pool: `"orchard"` or `"sapling"`.
     pub pool: String,
+    /// Transaction ID (32 bytes, protocol byte order).
     pub tx_id: Vec<u8>,
+    /// Block height at which the sending transaction was mined.
     pub height: u32,
+    /// Index of this output/action within the transaction.
     pub output_index: u32,
+    /// Bech32m-encoded recipient address.
     pub recipient: String,
+    /// Value sent in zatoshis.
     pub value_zat: u64,
+    /// Full 512-byte ZIP-302 memo, if recovered.
     pub memo: Option<Vec<u8>>,
 }
 
 /// A transparent UTXO.
 #[derive(Debug, Clone)]
 pub struct TransparentUtxoRow {
+    /// Row id assigned by SQLite.
     pub id: i64,
+    /// Foreign key into the `accounts` table.
     pub account: i64,
+    /// Base58Check-encoded transparent address that controls this output.
     pub address: String,
+    /// Transaction ID (32 bytes, protocol byte order).
     pub tx_id: Vec<u8>,
+    /// Index within the transaction's `vout` array.
     pub output_index: u32,
+    /// Value in zatoshis.
     pub value_zat: u64,
+    /// Block height at which this output was created.
     pub height: u32,
+    /// Raw locking script (`scriptPubKey`).
     pub script: Vec<u8>,
+    /// Height at which this UTXO was spent, if known.
     pub spent_height: Option<u32>,
 }
 
 /// Balance broken down by pool.
 #[derive(Debug, Clone, Default)]
 pub struct PoolBalance {
+    /// Unspent Orchard notes, in zatoshis.
     pub orchard_zat: u64,
+    /// Unspent Sapling notes, in zatoshis.
     pub sapling_zat: u64,
+    /// Unspent transparent UTXOs, in zatoshis.
     pub transparent_zat: u64,
 }
 
 impl PoolBalance {
+    /// Sum of all pools in zatoshis.
     pub fn total_zat(&self) -> u64 {
         self.orchard_zat + self.sapling_zat + self.transparent_zat
     }
@@ -284,16 +326,27 @@ impl Db {
 /// Input struct for persisting a received note.
 #[derive(Debug, Clone)]
 pub struct ReceivedNoteInsert<'a> {
+    /// Foreign key into the `accounts` table.
     pub account: i64,
+    /// Shielded pool: `"orchard"` or `"sapling"`.
     pub pool: &'a str,
+    /// Transaction ID (32 bytes, protocol byte order).
     pub tx_id: &'a [u8],
+    /// Block height at which this note was mined.
     pub height: u32,
+    /// Index of this output/action within the transaction.
     pub output_index: u32,
+    /// Diversifier bytes from the decrypted note plaintext.
     pub diversifier: &'a [u8],
+    /// Note value in zatoshis.
     pub value_zat: u64,
+    /// Note commitment randomness (rseed).
     pub rseed: &'a [u8],
+    /// Rho (Orchard only): the input nullifier of this action.
     pub rho: Option<&'a [u8]>,
+    /// Sapling commitment tree leaf position (FVK path only).
     pub leaf_pos: Option<u64>,
+    /// Derived nullifier, if already known.
     pub nullifier: Option<&'a [u8]>,
 }
 
@@ -393,13 +446,21 @@ impl Db {
 /// Input struct for persisting a sent note.
 #[derive(Debug, Clone)]
 pub struct SentNoteInsert<'a> {
+    /// Foreign key into the `accounts` table.
     pub account: i64,
+    /// Shielded pool: `"orchard"` or `"sapling"`.
     pub pool: &'a str,
+    /// Transaction ID (32 bytes, protocol byte order).
     pub tx_id: &'a [u8],
+    /// Block height at which the sending transaction was mined.
     pub height: u32,
+    /// Index of this output/action within the transaction.
     pub output_index: u32,
+    /// Bech32m-encoded recipient address.
     pub recipient: &'a str,
+    /// Value sent in zatoshis.
     pub value_zat: u64,
+    /// Full 512-byte ZIP-302 memo, if recovered.
     pub memo: Option<&'a [u8]>,
 }
 
@@ -497,12 +558,19 @@ impl Db {
 /// Input for persisting a transparent UTXO.
 #[derive(Debug, Clone)]
 pub struct UtxoInsert<'a> {
+    /// Foreign key into the `accounts` table.
     pub account: i64,
+    /// Base58Check-encoded transparent address that controls this output.
     pub address: &'a str,
+    /// Transaction ID (32 bytes, protocol byte order).
     pub tx_id: &'a [u8],
+    /// Index within the transaction's `vout` array.
     pub output_index: u32,
+    /// Value in zatoshis.
     pub value_zat: u64,
+    /// Block height at which this output was created.
     pub height: u32,
+    /// Raw locking script (`scriptPubKey`).
     pub script: &'a [u8],
 }
 
