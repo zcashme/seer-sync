@@ -5,13 +5,12 @@
 //!   START_HEIGHT=2700000 cargo run --release --example sync_live
 
 use std::env;
-use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use seer_sync::chain::{blocks, connect, tip_height, DEFAULT_CHUNK_OUTPUTS, ZEC_ROCKS};
-use seer_sync::keys::IvkKeys;
-use seer_sync::scan::scan_stream_ivk;
+use seer_sync::chain::{connect, fetch_range, tip_height, ZEC_ROCKS};
+use seer_sync::keys::ScanningKeys;
+use seer_sync::sync::sync;
 use zcash_keys::keys::UnifiedIncomingViewingKey;
 use zcash_protocol::consensus::MainNetwork;
 
@@ -23,7 +22,7 @@ async fn main() -> Result<()> {
     let uivk_str: String = UIVK.chars().filter(|c| !c.is_whitespace()).collect();
     let uivk = UnifiedIncomingViewingKey::decode(&MainNetwork, &uivk_str)
         .expect("hardcoded UIVK");
-    let keys = Arc::new(IvkKeys::from_uivk(&uivk));
+    let keys = ScanningKeys::from_uivk(&uivk);
 
     println!("Connecting to {ZEC_ROCKS} ...");
     let mut client = connect(ZEC_ROCKS).await?;
@@ -36,21 +35,18 @@ async fn main() -> Result<()> {
 
     println!("Tip: {tip}  scanning [{from}..{tip}] ({} blocks)", tip - from + 1);
 
-    let stream = blocks(client, from, tip, DEFAULT_CHUNK_OUTPUTS);
+    let blocks = fetch_range(client, from, tip).await?;
 
     let t = Instant::now();
-    let notes = scan_stream_ivk(keys, stream).await?;
+    let received = sync(&blocks, &keys);
 
-    for note in &notes {
-        println!(
-            "  height={} pool={:?} value={} zat",
-            note.height, note.pool, note.value_zat
-        );
+    for (height, note, _) in &received.sapling {
+        println!("  height={height} pool=Sapling value={} zat", note.value().inner());
     }
-    println!(
-        "Done in {:.3}s — {} incoming notes",
-        t.elapsed().as_secs_f64(),
-        notes.len(),
-    );
+    for (height, note, _) in &received.orchard {
+        println!("  height={height} pool=Orchard value={} zat", note.value().inner());
+    }
+    let total = received.sapling.len() + received.orchard.len();
+    println!("Done in {:.3}s — {total} incoming notes", t.elapsed().as_secs_f64());
     Ok(())
 }

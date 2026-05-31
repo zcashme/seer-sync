@@ -14,6 +14,18 @@ use crate::proto::{
 /// The public zec.rocks lightwalletd endpoint.
 pub const ZEC_ROCKS: &str = "https://zec.rocks:443";
 
+/// Built-in pool of public mainnet lightwalletd endpoints, tried in order by
+/// [`connect_auto`]. `zec.rocks` and its regional mirrors are listed first;
+/// the historical ECC endpoint serves as a final fallback. Override by calling
+/// [`connect`] with an explicit URL.
+pub const DEFAULT_SERVERS: &[&str] = &[
+    ZEC_ROCKS,
+    "https://na.zec.rocks:443",
+    "https://eu.zec.rocks:443",
+    "https://ap.zec.rocks:443",
+    "https://mainnet.lightwalletd.com:9067",
+];
+
 /// A connected lightwalletd gRPC client.
 pub type LwdClient = CompactTxStreamerClient<Channel>;
 
@@ -63,6 +75,27 @@ pub async fn connect(url: &str) -> Result<LwdClient> {
     Ok(CompactTxStreamerClient::new(endpoint))
 }
 
+/// Connect to a public mainnet lightwalletd server automatically.
+///
+/// Tries each endpoint in [`DEFAULT_SERVERS`] in order and returns the first
+/// one that connects, so the caller never has to pick a server. Errors from
+/// servers that are down are collected and only surfaced if *every* endpoint
+/// fails. Pass an explicit URL to [`connect`] to bypass the pool.
+pub async fn connect_auto() -> Result<LwdClient> {
+    let mut errors = Vec::new();
+    for &url in DEFAULT_SERVERS {
+        match connect(url).await {
+            Ok(client) => return Ok(client),
+            Err(e) => errors.push(format!("  {url}: {e:#}")),
+        }
+    }
+    anyhow::bail!(
+        "all {} default lightwalletd servers failed:\n{}",
+        DEFAULT_SERVERS.len(),
+        errors.join("\n")
+    )
+}
+
 // ─── Chain tip ───────────────────────────────────────────────────────────────
 
 /// Return the current chain tip height.
@@ -95,9 +128,8 @@ pub const DEFAULT_CHUNK_OUTPUTS: usize = 100_000;
 /// natural back-pressure. `prev_hash` is verified across blocks; a reorg or
 /// transport failure surfaces as an `Err` item, after which the stream ends.
 ///
-/// This is the crate's single block-fetch primitive. Feed it straight to
-/// [`crate::scan::scan_stream_ivk`] / [`crate::scan::scan_stream_fvk`], or
-/// collect it with [`fetch_range`].
+/// This is the crate's single block-fetch primitive. Collect it with
+/// [`fetch_range`] and feed the blocks to [`crate::sync::sync`].
 ///
 /// ```no_run
 /// # use seer_sync::chain::{connect, blocks, DEFAULT_CHUNK_OUTPUTS, ZEC_ROCKS};
@@ -275,8 +307,7 @@ pub async fn stream_transparent_utxos(
 /// Commitment tree frontier returned by the lightwalletd `GetTreeState` RPC.
 ///
 /// The `sapling_tree` and `orchard_tree` strings are hex-encoded frontier
-/// serializations compatible with the `incrementalmerkletree` crate. For
-/// balance-only use cases the counts in [`crate::scan::TreeSize`] are sufficient.
+/// serializations compatible with the `incrementalmerkletree` crate.
 #[derive(Debug, Clone)]
 pub struct LwdTreeState {
     /// Block height this state corresponds to.

@@ -1,92 +1,61 @@
-//! Prepared per-pool viewing keys for trial decryption.
+//! Parse unified viewing keys into per-pool scanning keys.
 //!
-//! Two key paths are supported:
-//! - [`IvkKeys`] — incoming only; no spend detection
-//! - [`FvkKeys`] — incoming + nullifier derivation; full balance
-//!
-//! An incoming viewing key is just the external-scope projection of a full
-//! viewing key, so [`FvkKeys`] *composes* an [`IvkKeys`] rather than
-//! re-deriving the same prepared scalars.
+//! This module only *parses* — it turns a [`UnifiedIncomingViewingKey`] or
+//! [`UnifiedFullViewingKey`] into the per-pool incoming keys (and, for a full
+//! key, the nullifier-deriving material) the [`crate::sync`] engine consumes.
 
-use orchard::keys::{
-    FullViewingKey as OrchardFvk, PreparedIncomingViewingKey as OrchardPreparedIvk,
-};
-use sapling::{
-    note_encryption::PreparedIncomingViewingKey as SaplingPreparedIvk,
-    zip32::DiversifiableFullViewingKey as SaplingDfvk,
-};
+use orchard::keys::{FullViewingKey as OrchardFvk, IncomingViewingKey as OrchardIvk};
+use sapling::{zip32::IncomingViewingKey as SaplingIvk, NullifierDerivingKey};
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};
-use zcash_transparent::keys::AccountPubKey;
+use zip32::Scope;
 
-/// Prepared IVKs built from a [`UnifiedIncomingViewingKey`].
+/// An incoming viewing key paired with an optional nullifier-deriving key.
 ///
-/// Scalar precomputation happens once at construction and is amortised across
-/// all blocks fed to [`crate::scan::scan_ivk`].
-pub struct IvkKeys {
-    pub(crate) orchard: Option<OrchardPreparedIvk>,
-    pub(crate) sapling: Option<SaplingPreparedIvk>,
+/// Mirrors `zcash_client_backend`'s `ScanningKey<Ivk, Nk>` — which we can't
+/// import (it lives in the banned crate) — minus its account metadata. `nk`
+/// is `Some` for a full key and `None` for an incoming-only key.
+pub(crate) struct ScanningKey<Ivk, Nk> {
+    pub(crate) ivk: Ivk,
+    /// Reserved for spend detection; not yet consumed by [`crate::sync`].
+    #[allow(dead_code)]
+    pub(crate) nk: Option<Nk>,
 }
 
-impl IvkKeys {
-    /// Build from a Unified Incoming Viewing Key.
+/// Per-pool scanning keys parsed from one unified viewing key.
+///
+/// Each pool is `Some` only when the key has that component. Build with
+/// [`ScanningKeys::from_uivk`] (incoming-only) or [`ScanningKeys::from_ufvk`]
+/// (full — additionally carries each pool's nullifier-deriving key).
+pub struct ScanningKeys {
+    pub(crate) sapling: Option<ScanningKey<SaplingIvk, NullifierDerivingKey>>,
+    pub(crate) orchard: Option<ScanningKey<OrchardIvk, OrchardFvk>>,
+}
+
+impl ScanningKeys {
+    /// Incoming-only keys from a UIVK: each pool's `ivk`, with `nk = None`.
     pub fn from_uivk(uivk: &UnifiedIncomingViewingKey) -> Self {
         Self {
-            orchard: uivk.orchard().as_ref().map(OrchardPreparedIvk::new),
-            sapling: uivk.sapling().as_ref().map(|ivk| ivk.prepare()),
+            sapling: uivk.sapling().as_ref().map(|ivk| ScanningKey { ivk: ivk.clone(), nk: None }),
+            orchard: uivk.orchard().as_ref().map(|ivk| ScanningKey { ivk: ivk.clone(), nk: None }),
         }
     }
 
-    /// `true` when no IVKs are present — scanning will produce no hits.
-    pub fn is_empty(&self) -> bool {
-        self.orchard.is_none() && self.sapling.is_none()
-    }
-}
-
-/// Full Viewing Keys — enables incoming detection and nullifier derivation.
-///
-/// Use this path when you need accurate balance accounting. The FVK detects
-/// when received notes are subsequently spent via nullifier matching in compact
-/// spend fields.
-pub struct FvkKeys {
-    /// Incoming viewing keys, derived from the UFVK's contained UIVK.
-    pub(crate) ivk: IvkKeys,
-    pub(crate) orchard_fvk: Option<OrchardFvk>,
-    pub(crate) sapling_dfvk: Option<SaplingDfvk>,
-    pub(crate) transparent: Option<AccountPubKey>,
-}
-
-impl FvkKeys {
-    /// Build from a Unified Full Viewing Key.
+    /// Full keys from a UFVK: each pool's `ivk` plus `nk = Some(..)`. External
+    /// scope only — change (internal scope) is the caller's concern.
     ///
-    /// The incoming viewing keys are obtained via
-    /// [`UnifiedFullViewingKey::to_unified_incoming_viewing_key`] rather than
-    /// re-derived here — the UIVK *is* the external-scope IVK of this UFVK.
+    /// The `ivk`s come from the UFVK's contained UIVK (so their type matches the
+    /// incoming-only path); the FVKs are used only to derive `nk`.
     pub fn from_ufvk(ufvk: &UnifiedFullViewingKey) -> Self {
+        let uivk = ufvk.to_unified_incoming_viewing_key();
         Self {
-            ivk: IvkKeys::from_uivk(&ufvk.to_unified_incoming_viewing_key()),
-            orchard_fvk: ufvk.orchard().cloned(),
-            sapling_dfvk: ufvk.sapling().cloned(),
-            transparent: ufvk.transparent().cloned(),
+            sapling: uivk.sapling().as_ref().zip(ufvk.sapling()).map(|(ivk, dfvk)| ScanningKey {
+                ivk: ivk.clone(),
+                nk: Some(dfvk.to_nk(Scope::External)),
+            }),
+            orchard: uivk.orchard().as_ref().zip(ufvk.orchard()).map(|(ivk, fvk)| ScanningKey {
+                ivk: ivk.clone(),
+                nk: Some(fvk.clone()),
+            }),
         }
-    }
-
-    /// `true` when no shielded FVKs are present.
-    pub fn is_empty(&self) -> bool {
-        self.orchard_fvk.is_none() && self.sapling_dfvk.is_none()
-    }
-
-    /// Returns a reference to the Orchard FVK if present.
-    pub fn orchard_fvk(&self) -> Option<&OrchardFvk> {
-        self.orchard_fvk.as_ref()
-    }
-
-    /// Returns a reference to the Sapling diversifiable FVK if present.
-    pub fn sapling_dfvk(&self) -> Option<&SaplingDfvk> {
-        self.sapling_dfvk.as_ref()
-    }
-
-    /// Returns the transparent account public key if present.
-    pub fn transparent(&self) -> Option<&AccountPubKey> {
-        self.transparent.as_ref()
     }
 }

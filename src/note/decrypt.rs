@@ -1,6 +1,6 @@
 //! Full note decryption — recovers value, recipient, and memo from a complete transaction.
 //!
-//! Distinct from compact decryption in [`crate::scan`]: compact blocks carry only
+//! Distinct from compact decryption in [`crate::sync`]: compact blocks carry only
 //! the first 52 bytes of `enc_ciphertext` (enough to confirm ownership and recover
 //! note value / recipient), while full decryption requires the complete 580-byte
 //! `enc_ciphertext` available from a fetched full transaction.
