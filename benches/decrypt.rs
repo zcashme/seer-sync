@@ -5,7 +5,8 @@
 //!
 //!     cargo bench --bench decrypt
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
+use std::time::Duration;
 use seer_sync::chain::{connect, fetch_range, tip_height, ZEC_ROCKS};
 use seer_sync::keys::IvkKeys;
 use seer_sync::scan::scan_ivk;
@@ -13,8 +14,11 @@ use zcash_keys::keys::UnifiedIncomingViewingKey;
 use zcash_protocol::consensus::MainNetwork;
 
 const UIVK: &str = "uivk1gl26qy0xjja7lqhyg3pf0x4j4j66kqwewrjkdcg28eqq4wgtzjmujpee7x9cs2ec9xhnlgrm8ptlw8z80j2aryw8nqtssser2ys778a0s00uvgkdjnfr58sndhfvc3f4zqjs6ywva6";
-/// NU6 mainnet activation height.
+/// NU6 mainnet activation height — set `BENCH_FROM=2726400` to bench the full post-NU6 range.
+#[allow(dead_code)]
 const NU6: u32 = 2_726_400;
+/// Default window when BENCH_FROM is not set.
+const BENCH_WINDOW: u32 = 5_000;
 
 fn bench(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -22,8 +26,12 @@ fn bench(c: &mut Criterion) {
     let blocks = rt.block_on(async {
         let mut client = connect(ZEC_ROCKS).await.expect("connecting to zec.rocks");
         let tip = tip_height(&mut client).await.expect("tip height");
-        eprintln!("[bench] fetching NU6→tip [{NU6}..{tip}] from {ZEC_ROCKS}");
-        fetch_range(client, NU6, tip).await.expect("fetch_range")
+        let from = std::env::var("BENCH_FROM")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| tip.saturating_sub(BENCH_WINDOW));
+        eprintln!("[bench] fetching [{from}..{tip}] ({} blocks) from {ZEC_ROCKS}", tip - from + 1);
+        fetch_range(client, from, tip).await.expect("fetch_range")
     });
 
     let uivk_str: String = UIVK.chars().filter(|c| !c.is_whitespace()).collect();
@@ -47,8 +55,13 @@ fn bench(c: &mut Criterion) {
         blocks.len(), total_actions, total_outputs,
     );
 
+    let full_range = std::env::var("BENCH_FROM").is_ok();
     let mut g = c.benchmark_group("scan");
-    g.sample_size(3);
+    if full_range {
+        g.sample_size(10);
+        g.sampling_mode(SamplingMode::Flat);
+        g.measurement_time(Duration::from_secs(180));
+    }
     g.throughput(Throughput::Elements(total_actions + total_outputs));
     g.bench_function("uivk", |b| {
         b.iter(|| {

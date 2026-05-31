@@ -19,7 +19,7 @@ pub struct AccountRow {
     pub id: i64,
     /// Human-readable label for this account.
     pub label: String,
-    /// Key type tag: `"ivk"`, `"fvk"`, or `"ovk"`.
+    /// Key type tag: `"ivk"` or `"fvk"`.
     pub key_type: String,
     /// Bech32m-encoded viewing key string.
     pub encoded: String,
@@ -70,29 +70,6 @@ pub struct ReceivedNoteRow {
     pub memo: Option<Vec<u8>>,
     /// Height at which this note's nullifier was observed as a spend, if any.
     pub spent_height: Option<u32>,
-}
-
-/// A sent note recovered via OVK / FVK.
-#[derive(Debug, Clone)]
-pub struct SentNoteRow {
-    /// Row id assigned by SQLite.
-    pub id: i64,
-    /// Foreign key into the `accounts` table.
-    pub account: i64,
-    /// Shielded pool: `"orchard"` or `"sapling"`.
-    pub pool: String,
-    /// Transaction ID (32 bytes, protocol byte order).
-    pub tx_id: Vec<u8>,
-    /// Block height at which the sending transaction was mined.
-    pub height: u32,
-    /// Index of this output/action within the transaction.
-    pub output_index: u32,
-    /// Bech32m-encoded recipient address.
-    pub recipient: String,
-    /// Value sent in zatoshis.
-    pub value_zat: u64,
-    /// Full 512-byte ZIP-302 memo, if recovered.
-    pub memo: Option<Vec<u8>>,
 }
 
 /// A transparent UTXO.
@@ -294,7 +271,6 @@ impl Db {
             "DELETE FROM received_notes WHERE height > ?1",
             params![height],
         )?;
-        tx.execute("DELETE FROM sent_notes WHERE height > ?1", params![height])?;
         tx.execute(
             "DELETE FROM transactions WHERE height > ?1",
             params![height],
@@ -437,79 +413,6 @@ impl Db {
              WHERE account = ?1 AND nullifier IS NOT NULL AND spent_height IS NULL",
         )?;
         let rows = stmt.query_map(params![account], |row| row.get(0))?;
-        rows.collect()
-    }
-}
-
-// ─── Sent notes ──────────────────────────────────────────────────────────────
-
-/// Input struct for persisting a sent note.
-#[derive(Debug, Clone)]
-pub struct SentNoteInsert<'a> {
-    /// Foreign key into the `accounts` table.
-    pub account: i64,
-    /// Shielded pool: `"orchard"` or `"sapling"`.
-    pub pool: &'a str,
-    /// Transaction ID (32 bytes, protocol byte order).
-    pub tx_id: &'a [u8],
-    /// Block height at which the sending transaction was mined.
-    pub height: u32,
-    /// Index of this output/action within the transaction.
-    pub output_index: u32,
-    /// Bech32m-encoded recipient address.
-    pub recipient: &'a str,
-    /// Value sent in zatoshis.
-    pub value_zat: u64,
-    /// Full 512-byte ZIP-302 memo, if recovered.
-    pub memo: Option<&'a [u8]>,
-}
-
-impl Db {
-    /// Insert a sent note.  Ignores duplicates.
-    pub fn insert_sent_note(&self, n: &SentNoteInsert<'_>) -> rusqlite::Result<i64> {
-        self.conn.execute(
-            "INSERT INTO sent_notes(
-                account, pool, tx_id, height, output_index,
-                recipient, value_zat, memo
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-             ON CONFLICT(tx_id, output_index, pool) DO NOTHING",
-            params![
-                n.account,
-                n.pool,
-                n.tx_id,
-                n.height,
-                n.output_index,
-                n.recipient,
-                n.value_zat as i64,
-                n.memo,
-            ],
-        )?;
-        Ok(self.conn.last_insert_rowid())
-    }
-
-    /// Return all sent notes for `account`.
-    pub fn get_sent_notes(&self, account: i64) -> rusqlite::Result<Vec<SentNoteRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, account, pool, tx_id, height, output_index,
-                    recipient, value_zat, memo
-             FROM sent_notes WHERE account = ?1 ORDER BY height",
-        )?;
-        let rows = stmt.query_map(params![account], |row| {
-            Ok(SentNoteRow {
-                id: row.get(0)?,
-                account: row.get(1)?,
-                pool: row.get(2)?,
-                tx_id: row.get(3)?,
-                height: row.get(4)?,
-                output_index: row.get(5)?,
-                recipient: row.get(6)?,
-                value_zat: {
-                    let v: i64 = row.get(7)?;
-                    v as u64
-                },
-                memo: row.get(8)?,
-            })
-        })?;
         rows.collect()
     }
 }

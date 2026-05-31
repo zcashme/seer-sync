@@ -45,7 +45,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             CREATE TABLE IF NOT EXISTS accounts (
                 id        INTEGER PRIMARY KEY,
                 label     TEXT    NOT NULL,
-                key_type  TEXT    NOT NULL CHECK(key_type IN ('ivk','fvk','ovk')),
+                key_type  TEXT    NOT NULL CHECK(key_type IN ('ivk','fvk')),
                 encoded   TEXT    NOT NULL UNIQUE,
                 birthday  INTEGER NOT NULL DEFAULT 0
             );
@@ -88,21 +88,6 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             CREATE INDEX IF NOT EXISTS idx_rn_nullifier ON received_notes(nullifier)
                 WHERE nullifier IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_rn_height    ON received_notes(height);
-
-            -- Sent notes (OVK and FVK paths)
-            CREATE TABLE IF NOT EXISTS sent_notes (
-                id           INTEGER PRIMARY KEY,
-                account      INTEGER NOT NULL REFERENCES accounts(id),
-                pool         TEXT    NOT NULL CHECK(pool IN ('orchard','sapling')),
-                tx_id        BLOB    NOT NULL,
-                height       INTEGER NOT NULL,
-                output_index INTEGER NOT NULL,
-                recipient    TEXT    NOT NULL,
-                value_zat    INTEGER NOT NULL,
-                memo         BLOB,
-                UNIQUE(tx_id, output_index, pool)
-            );
-            CREATE INDEX IF NOT EXISTS idx_sn_account ON sent_notes(account);
 
             -- Transaction index (de-duplicated, net signed value)
             CREATE TABLE IF NOT EXISTS transactions (

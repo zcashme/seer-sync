@@ -1,9 +1,8 @@
 //! Parallel trial-decrypt loop over compact blocks.
 //!
-//! Three entry points:
+//! Two entry points:
 //! - [`scan_ivk`] — incoming only, no spend detection
 //! - [`scan_fvk`] — incoming + nullifier derivation + spend detection + transparent
-//! - [`scan_ovk`] — see [`crate::decrypt`] for OVK recovery (full transactions required)
 //!
 //! # Parallelism
 //!
@@ -21,7 +20,7 @@ mod parsers;
 mod stream;
 mod types;
 
-pub use fvk::scan_fvk;
+pub use fvk::{scan_fvk, TreeSize};
 pub use ivk::scan_ivk;
 pub use stream::{scan_stream_fvk, scan_stream_ivk, StreamFvkResult};
 pub use types::{

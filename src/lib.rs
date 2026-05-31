@@ -1,9 +1,8 @@
 //! View-key-only Zcash chain sync.
 //!
-//! Three key paths:
+//! Two key paths:
 //! - [`keys::IvkKeys`] / [`scan::scan_ivk`] — incoming only (no spend detection)
 //! - [`keys::FvkKeys`] / [`scan::scan_fvk`] — incoming + spend detection + balance
-//! - [`keys::OvkKeys`] / [`decrypt::try_recover_orchard_outgoing`] — sent notes only
 //!
 //! # Quick start
 //! ```no_run
@@ -24,14 +23,11 @@
 
 #![warn(missing_docs)]
 
-pub mod address;
 pub mod chain;
-pub mod decrypt;
 pub mod keys;
-pub mod memo;
+pub mod note;
 pub mod proto;
 pub mod scan;
-pub mod tree;
 
 #[cfg(feature = "db")]
 pub mod db;

@@ -2,6 +2,7 @@
 name = "seer-sync"
 description = "View-key-only Zcash chain sync"
 version = "0.0.1"
+authors = ["Julian Abraham <julesverne505@gmail.com>"]
 edition = "2021"
 rust-version = "1.85.1"
 license = "MIT OR Apache-2.0"
@@ -53,6 +54,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
+tokio-test = "0.4"
 
 [[bench]]
 name = "decrypt"
