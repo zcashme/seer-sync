@@ -16,8 +16,9 @@ use zip32::Scope;
 /// is `Some` for a full key and `None` for an incoming-only key.
 pub(crate) struct ScanningKey<Ivk, Nk> {
     pub(crate) ivk: Ivk,
-    /// Reserved for spend detection; not yet consumed by [`crate::sync`].
-    #[allow(dead_code)]
+    /// Nullifier-deriving key — `Some` for a full key, `None` for incoming-only.
+    /// [`crate::sync::scan`] uses it to derive each note's nullifier (and so
+    /// detect spends); without it, only incoming notes are seen.
     pub(crate) nk: Option<Nk>,
 }
 

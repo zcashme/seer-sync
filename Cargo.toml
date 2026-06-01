@@ -38,6 +38,7 @@ rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 # Tooling.
 anyhow = "1"
+thiserror = "2"
 zip32 = "0.2"
 
 [build-dependencies]

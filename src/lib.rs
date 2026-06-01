@@ -1,26 +1,17 @@
 //! View-key-only Zcash chain sync.
 //!
-//! Parse a unified viewing key into [`keys::ScanningKeys`], then trial-decrypt
-//! compact blocks with [`sync::sync`]. A UIVK gives incoming-only detection; a
-//! UFVK additionally carries each pool's nullifier-deriving key.
+//! Detect the funds a viewing key controls without ever holding spend
+//! authority. The flow is three steps:
 //!
-//! # Quick start
-//! ```no_run
-//! # use seer_sync::{keys::ScanningKeys, sync::{chain, sync}};
-//! # use zcash_keys::keys::UnifiedIncomingViewingKey;
-//! # use zcash_protocol::consensus::MainNetwork;
-//! # tokio_test::block_on(async {
-//! let uivk = UnifiedIncomingViewingKey::decode(&MainNetwork, "uivk1...").unwrap();
-//! let keys = ScanningKeys::from_uivk(&uivk);
-//! let mut client = chain::connect_auto().await.unwrap();
-//! let tip = chain::tip_height(&mut client).await.unwrap();
-//! let blocks = chain::fetch_range(client, tip - 100, tip).await.unwrap();
-//! let received = sync(&blocks, &keys);
-//! for n in &received.sapling {
-//!     println!("received {} zat at height {}", n.note.value().inner(), n.height);
-//! }
-//! # });
-//! ```
+//! 1. Parse a unified viewing key into [`keys::ScanningKeys`].
+//! 2. Fetch compact blocks from a lightwalletd server via [`sync::chain`].
+//! 3. Trial-decrypt them with [`sync::sync`] to recover the received notes.
+//!
+//! The viewing key's strength bounds what can be detected. A UIVK (unified
+//! incoming viewing key) yields incoming-only detection — you see notes as
+//! they arrive but cannot tell when they are spent. A UFVK (unified full
+//! viewing key) additionally carries each pool's nullifier-deriving key, so
+//! spends can be recognized as well.
 
 #![warn(missing_docs)]
 
@@ -37,5 +28,7 @@ pub use proto::{
     compact_tx_streamer_client::CompactTxStreamerClient, CompactBlock, RawTransaction,
 };
 
+/// SQLite persistence for scanned notes, spends, and the sync cursor
+/// (`feature = "db"`). A watch-only store: observe notes, never spend them.
 #[cfg(feature = "db")]
 pub mod db;

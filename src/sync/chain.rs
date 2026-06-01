@@ -122,8 +122,10 @@ pub const DEFAULT_CHUNK_OUTPUTS: usize = 100_000;
 /// `max_outputs` Sapling outputs + Orchard actions combined, so peak memory is
 /// bounded regardless of range size. A download task runs concurrently and is
 /// kept at most one batch ahead of the consumer (channel capacity 1), giving
-/// natural back-pressure. `prev_hash` is verified across blocks; a reorg or
-/// transport failure surfaces as an `Err` item, after which the stream ends.
+/// natural back-pressure. Continuity is verified block-to-block and, when
+/// `prev_hash` is given (the hash of the block before `from`), across the seam
+/// with the caller's stored chain too; a [`Reorg`] or transport failure surfaces
+/// as an `Err` item, after which the stream ends.
 ///
 /// This is the crate's single block-fetch primitive. Collect it with
 /// [`fetch_range`] and feed the blocks to [`crate::sync::sync`].
@@ -133,7 +135,7 @@ pub const DEFAULT_CHUNK_OUTPUTS: usize = 100_000;
 /// # use futures::StreamExt;
 /// # tokio_test::block_on(async {
 /// let client = connect_auto().await.unwrap();
-/// let mut s = blocks(client, 2_000_000, 2_001_000, DEFAULT_CHUNK_OUTPUTS);
+/// let mut s = blocks(client, 2_000_000, 2_001_000, DEFAULT_CHUNK_OUTPUTS, None);
 /// while let Some(batch) = s.next().await {
 ///     let batch = batch.unwrap();
 ///     println!("got {} blocks", batch.len());
@@ -145,10 +147,11 @@ pub fn blocks(
     from: u32,
     to: u32,
     max_outputs: usize,
+    prev_hash: Option<[u8; 32]>,
 ) -> impl Stream<Item = Result<Vec<CompactBlock>>> {
     let (tx, rx) = mpsc::channel(1);
     tokio::spawn(async move {
-        if let Err(e) = download(client, from, to, max_outputs, &tx).await {
+        if let Err(e) = download(client, from, to, max_outputs, prev_hash, &tx).await {
             tx.send(Err(e)).await.ok();
         }
     });
@@ -161,8 +164,14 @@ pub fn blocks(
 /// once (tests, benches, small ranges). For large ranges prefer streaming the
 /// chunks directly so memory stays bounded.
 pub async fn fetch_range(client: LwdClient, from: u32, to: u32) -> Result<Vec<CompactBlock>> {
-    blocks(client, from, to, usize::MAX).try_concat().await
+    blocks(client, from, to, usize::MAX, None).try_concat().await
 }
+
+/// Streamed blocks didn't form a continuous chain — a reorg. Carries the height
+/// at which continuity broke, so the caller can walk back and re-sync.
+#[derive(thiserror::Error, Debug)]
+#[error("chain reorg at height {0}")]
+pub struct Reorg(pub u32);
 
 /// The one download loop: drives `GetBlockRange`, groups blocks into
 /// `max_outputs`-bounded chunks, verifies `prev_hash`, and forwards each ready
@@ -172,6 +181,7 @@ async fn download(
     from: u32,
     to: u32,
     max_outputs: usize,
+    prev_hash: Option<[u8; 32]>,
     tx: &mpsc::Sender<Result<Vec<CompactBlock>>>,
 ) -> Result<()> {
     let req = BlockRange {
@@ -187,14 +197,17 @@ async fn download(
 
     let mut chunk: Vec<CompactBlock> = Vec::new();
     let mut output_count = 0usize;
-    let mut prev_hash: Option<Vec<u8>> = None;
+    // Seeded with the stored hash of the block before `from`, so the first
+    // streamed block is checked against our chain — the seam — and every block
+    // after it against its predecessor.
+    let mut prev_hash: Option<Vec<u8>> = prev_hash.map(|h| h.to_vec());
 
     while let Some(block_result) = stream.next().await {
         let block = block_result.context("streaming CompactBlock")?;
 
         if let Some(ref ph) = prev_hash {
             if !block.prev_hash.is_empty() && &block.prev_hash != ph {
-                anyhow::bail!("chain reorganization at height {}", block.height);
+                anyhow::bail!(Reorg(block.height as u32));
             }
         }
         prev_hash = Some(block.hash.clone());

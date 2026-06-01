@@ -1,192 +1,199 @@
-//! SQLite persistence layer for seer-sync (feature = "db").
-//!
-//! Stores accounts, sync progress, received/sent notes, transactions, and
-//! transparent UTXOs. No witness tables — seer-sync is view-only.
-
-mod migration;
+mod schema;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
 
-pub use migration::migrate;
+pub use schema::init;
 
 // ─── Row types ───────────────────────────────────────────────────────────────
 
-/// A registered viewing key account.
+/// The single viewing key this database tracks.
 #[derive(Debug, Clone)]
-pub struct AccountRow {
-    /// Row id assigned by SQLite.
-    pub id: i64,
-    /// Human-readable label for this account.
-    pub label: String,
-    /// Key type tag: `"ivk"` or `"fvk"`.
-    pub key_type: String,
-    /// Bech32m-encoded viewing key string.
+pub struct Account {
+    /// Encoded unified viewing key (UIVK or UFVK).
     pub encoded: String,
-    /// Block height at which this account's wallet was created (used to skip earlier blocks).
+    /// `"uivk"` (incoming-only) or `"ufvk"` (full).
+    pub key_type: String,
+    /// `"main"` or `"test"`.
+    pub network: String,
+    /// Block height the key was created at; blocks before it are skipped.
     pub birthday: u32,
 }
 
-/// Saved sync position for one account.
-#[derive(Debug, Clone, Default)]
-pub struct SyncCursor {
-    /// Last fully-processed block height.
+/// Saved linear sync position.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SyncState {
+    /// Last fully-applied block height.
     pub height: u32,
-    /// Block hash at `height`, used for reorg detection on resume.
+    /// Block hash at `height`, for reorg detection on resume.
     pub hash: Option<[u8; 32]>,
-    /// Running count of Sapling note commitments seen — needed for Sapling
-    /// nullifier derivation (commitment position in the tree).
-    pub sapling_leaf_count: u64,
+    /// Running Sapling commitment-tree size (next leaf position).
+    pub sapling_pos: u64,
+    /// Running Orchard commitment-tree size (next leaf position).
+    pub orchard_pos: u64,
 }
 
-/// A received shielded note (IVK / FVK paths).
+/// A block header plus the commitment-tree sizes stamped on it.
 #[derive(Debug, Clone)]
-pub struct ReceivedNoteRow {
-    /// Row id assigned by SQLite.
-    pub id: i64,
-    /// Foreign key into the `accounts` table.
-    pub account: i64,
-    /// Shielded pool: `"orchard"` or `"sapling"`.
-    pub pool: String,
-    /// Transaction ID (32 bytes, protocol byte order).
-    pub tx_id: Vec<u8>,
-    /// Block height at which this note was mined.
+pub struct BlockMeta {
+    /// Block height.
     pub height: u32,
-    /// Index of this output/action within the transaction.
-    pub output_index: u32,
-    /// Diversifier bytes (11 bytes for Sapling; Orchard uses recipient directly).
-    pub diversifier: Vec<u8>,
-    /// Note value in zatoshis.
-    pub value_zat: u64,
-    /// Note commitment randomness (rseed), needed for nullifier / memo derivation.
-    pub rseed: Vec<u8>,
-    /// Rho (Orchard only): the input nullifier of the action carrying this note.
-    pub rho: Option<Vec<u8>>,
-    /// Sapling leaf position in the commitment tree (FVK path only).
-    pub leaf_pos: Option<u64>,
-    /// Derived nullifier — populated after full-transaction fetch; `None` on IVK path.
-    pub nullifier: Option<Vec<u8>>,
-    /// Full 512-byte ZIP-302 memo — populated after full-transaction fetch.
-    pub memo: Option<Vec<u8>>,
-    /// Height at which this note's nullifier was observed as a spend, if any.
-    pub spent_height: Option<u32>,
+    /// Block hash (32 bytes, display byte order as delivered by lightwalletd).
+    pub hash: [u8; 32],
+    /// Block timestamp (Unix seconds).
+    pub time: u32,
+    /// Sapling commitment-tree size as of the end of this block.
+    pub sapling_tree_size: Option<u64>,
+    /// Orchard commitment-tree size as of the end of this block.
+    pub orchard_tree_size: Option<u64>,
+    /// Number of Sapling outputs in this block.
+    pub sapling_output_count: Option<u32>,
+    /// Number of Orchard actions in this block.
+    pub orchard_action_count: Option<u32>,
 }
 
-/// A transparent UTXO.
-#[derive(Debug, Clone)]
-pub struct TransparentUtxoRow {
-    /// Row id assigned by SQLite.
-    pub id: i64,
-    /// Foreign key into the `accounts` table.
-    pub account: i64,
-    /// Base58Check-encoded transparent address that controls this output.
-    pub address: String,
-    /// Transaction ID (32 bytes, protocol byte order).
-    pub tx_id: Vec<u8>,
-    /// Index within the transaction's `vout` array.
-    pub output_index: u32,
-    /// Value in zatoshis.
-    pub value_zat: u64,
-    /// Block height at which this output was created.
-    pub height: u32,
-    /// Raw locking script (`scriptPubKey`).
-    pub script: Vec<u8>,
-    /// Height at which this UTXO was spent, if known.
-    pub spent_height: Option<u32>,
-}
-
-/// Balance broken down by pool.
-#[derive(Debug, Clone, Default)]
+/// Balance broken down by pool, in zatoshis.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PoolBalance {
-    /// Unspent Orchard notes, in zatoshis.
+    /// Unspent Orchard notes.
     pub orchard_zat: u64,
-    /// Unspent Sapling notes, in zatoshis.
+    /// Unspent Sapling notes.
     pub sapling_zat: u64,
-    /// Unspent transparent UTXOs, in zatoshis.
+    /// Unspent transparent UTXOs.
     pub transparent_zat: u64,
 }
 
 impl PoolBalance {
-    /// Sum of all pools in zatoshis.
+    /// Sum of all pools.
     pub fn total_zat(&self) -> u64 {
         self.orchard_zat + self.sapling_zat + self.transparent_zat
     }
 }
 
+// ─── Insert structs ──────────────────────────────────────────────────────────
+
+/// A received Sapling note to persist.
+#[derive(Debug, Clone)]
+pub struct SaplingNoteInsert<'a> {
+    /// Row id of the transaction that created this note ([`Db::upsert_transaction`]).
+    pub transaction_id: i64,
+    /// Output index within the transaction.
+    pub output_index: u32,
+    /// Diversifier from the note plaintext.
+    pub diversifier: &'a [u8],
+    /// Note value in zatoshis.
+    pub value: u64,
+    /// Note commitment randomness (`rcm`).
+    pub rcm: &'a [u8],
+    /// Derived nullifier; `None` on the incoming-only path or before a position is known.
+    pub nf: Option<&'a [u8]>,
+    /// Whether this note is change (received in a transaction that also spent ours).
+    pub is_change: bool,
+    /// Leaf position in the Sapling commitment tree.
+    pub commitment_tree_position: Option<u64>,
+}
+
+/// A received Orchard note to persist.
+#[derive(Debug, Clone)]
+pub struct OrchardNoteInsert<'a> {
+    /// Row id of the transaction that created this note.
+    pub transaction_id: i64,
+    /// Action index within the transaction.
+    pub action_index: u32,
+    /// Diversifier from the note plaintext.
+    pub diversifier: &'a [u8],
+    /// Note value in zatoshis.
+    pub value: u64,
+    /// Rho (the action's input nullifier) — needed to derive the nullifier.
+    pub rho: &'a [u8],
+    /// Note seed randomness (`rseed`).
+    pub rseed: &'a [u8],
+    /// Derived nullifier; `None` on the incoming-only path.
+    pub nf: Option<&'a [u8]>,
+    /// Whether this note is change.
+    pub is_change: bool,
+    /// Leaf position in the Orchard commitment tree (not needed for the nullifier).
+    pub commitment_tree_position: Option<u64>,
+}
+
+/// A received transparent output to persist.
+#[derive(Debug, Clone)]
+pub struct TransparentOutputInsert<'a> {
+    /// Row id of the transaction that created this output.
+    pub transaction_id: i64,
+    /// Index within the transaction's `vout`.
+    pub output_index: u32,
+    /// Address that controls the output.
+    pub address: &'a str,
+    /// Locking script (`scriptPubKey`).
+    pub script: &'a [u8],
+    /// Value in zatoshis.
+    pub value_zat: u64,
+    /// Height at which the output was last observed unspent.
+    pub max_observed_unspent_height: Option<u32>,
+}
+
 // ─── Database handle ─────────────────────────────────────────────────────────
 
-/// An open database connection with migrations applied.
+/// An open database connection with the schema initialized.
 pub struct Db {
     pub(crate) conn: Connection,
 }
 
 impl Db {
-    /// Open (or create) a database at `path` and apply migrations.
+    /// Open (or create) a database at `path` and initialize the schema.
     pub fn open<P: AsRef<Path>>(path: P) -> rusqlite::Result<Self> {
         let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
         )?;
-        migrate(&conn)?;
+        init(&conn)?;
         Ok(Self { conn })
     }
 
     /// Open a temporary in-memory database. Useful for testing.
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
-        migrate(&conn)?;
+        init(&conn)?;
         Ok(Self { conn })
     }
 }
 
-// ─── Accounts ────────────────────────────────────────────────────────────────
+// ─── Account ─────────────────────────────────────────────────────────────────
 
 impl Db {
-    /// Insert a new account and return its row id.
-    pub fn insert_account(
-        &self,
-        label: &str,
-        key_type: &str,
-        encoded: &str,
-        birthday: u32,
-    ) -> rusqlite::Result<i64> {
+    /// Set (or replace) the viewing key this database tracks.
+    pub fn set_account(&self, account: &Account) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO accounts(label, key_type, encoded, birthday) VALUES (?1,?2,?3,?4)",
-            params![label, key_type, encoded, birthday],
+            "INSERT INTO account(id, encoded, key_type, network, birthday)
+             VALUES (1, ?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                encoded = excluded.encoded,
+                key_type = excluded.key_type,
+                network = excluded.network,
+                birthday = excluded.birthday",
+            params![
+                account.encoded,
+                account.key_type,
+                account.network,
+                account.birthday
+            ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(())
     }
 
-    /// Return all accounts.
-    pub fn list_accounts(&self) -> rusqlite::Result<Vec<AccountRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, label, key_type, encoded, birthday FROM accounts ORDER BY id",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(AccountRow {
-                id: row.get(0)?,
-                label: row.get(1)?,
-                key_type: row.get(2)?,
-                encoded: row.get(3)?,
-                birthday: row.get(4)?,
-            })
-        })?;
-        rows.collect()
-    }
-
-    /// Look up one account by encoded key string.
-    pub fn find_account_by_key(&self, encoded: &str) -> rusqlite::Result<Option<AccountRow>> {
+    /// Return the tracked viewing key, if one has been set.
+    pub fn get_account(&self) -> rusqlite::Result<Option<Account>> {
         self.conn
             .query_row(
-                "SELECT id, label, key_type, encoded, birthday FROM accounts WHERE encoded = ?1",
-                params![encoded],
+                "SELECT encoded, key_type, network, birthday FROM account WHERE id = 1",
+                [],
                 |row| {
-                    Ok(AccountRow {
-                        id: row.get(0)?,
-                        label: row.get(1)?,
-                        key_type: row.get(2)?,
-                        encoded: row.get(3)?,
-                        birthday: row.get(4)?,
+                    Ok(Account {
+                        encoded: row.get(0)?,
+                        key_type: row.get(1)?,
+                        network: row.get(2)?,
+                        birthday: row.get(3)?,
                     })
                 },
             )
@@ -197,60 +204,72 @@ impl Db {
 // ─── Sync state ──────────────────────────────────────────────────────────────
 
 impl Db {
-    /// Create or replace the sync cursor for `account`.
-    pub fn set_sync_cursor(&self, account: i64, cursor: &SyncCursor) -> rusqlite::Result<()> {
+    /// Persist the sync cursor.
+    pub fn set_sync_state(&self, state: &SyncState) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO sync_state(account, height, hash, sapling_leaf_count)
-             VALUES (?1,?2,?3,?4)
-             ON CONFLICT(account) DO UPDATE SET
+            "INSERT INTO sync_state(id, height, hash, sapling_pos, orchard_pos)
+             VALUES (1, ?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
                 height = excluded.height,
                 hash = excluded.hash,
-                sapling_leaf_count = excluded.sapling_leaf_count",
+                sapling_pos = excluded.sapling_pos,
+                orchard_pos = excluded.orchard_pos",
             params![
-                account,
-                cursor.height,
-                cursor.hash.as_ref().map(|h| h.as_slice()),
-                cursor.sapling_leaf_count as i64,
+                state.height,
+                state.hash.as_ref().map(|h| h.as_slice()),
+                state.sapling_pos as i64,
+                state.orchard_pos as i64,
             ],
         )?;
         Ok(())
     }
 
-    /// Return the sync cursor for `account`, or a zeroed default.
-    pub fn get_sync_cursor(&self, account: i64) -> rusqlite::Result<SyncCursor> {
+    /// Return the sync cursor, or a zeroed default if none is stored.
+    pub fn get_sync_state(&self) -> rusqlite::Result<SyncState> {
         self.conn
             .query_row(
-                "SELECT height, hash, sapling_leaf_count FROM sync_state WHERE account = ?1",
-                params![account],
+                "SELECT height, hash, sapling_pos, orchard_pos FROM sync_state WHERE id = 1",
+                [],
                 |row| {
-                    let height: u32 = row.get(0)?;
-                    let hash_blob: Option<Vec<u8>> = row.get(1)?;
-                    let leaf_count: i64 = row.get(2)?;
-                    Ok(SyncCursor {
-                        height,
-                        hash: hash_blob.and_then(|v| v.try_into().ok()),
-                        sapling_leaf_count: leaf_count as u64,
+                    let hash: Option<Vec<u8>> = row.get(1)?;
+                    Ok(SyncState {
+                        height: row.get(0)?,
+                        hash: hash.and_then(|v| v.try_into().ok()),
+                        sapling_pos: row.get::<_, i64>(2)? as u64,
+                        orchard_pos: row.get::<_, i64>(3)? as u64,
                     })
                 },
             )
             .optional()
-            .map(|opt| opt.unwrap_or_default())
+            .map(Option::unwrap_or_default)
     }
 }
 
 // ─── Blocks ──────────────────────────────────────────────────────────────────
 
 impl Db {
-    /// Persist a block header (height, hash, timestamp).
-    pub fn insert_block(&self, height: u32, hash: &[u8; 32], timestamp: u32) -> rusqlite::Result<()> {
+    /// Persist a block header. Ignores duplicates.
+    pub fn insert_block(&self, b: &BlockMeta) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO blocks(height, hash, timestamp) VALUES (?1,?2,?3) ON CONFLICT DO NOTHING",
-            params![height, hash.as_slice(), timestamp],
+            "INSERT INTO blocks(
+                height, hash, time, sapling_tree_size, orchard_tree_size,
+                sapling_output_count, orchard_action_count)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(height) DO NOTHING",
+            params![
+                b.height,
+                b.hash.as_slice(),
+                b.time,
+                b.sapling_tree_size.map(|v| v as i64),
+                b.orchard_tree_size.map(|v| v as i64),
+                b.sapling_output_count,
+                b.orchard_action_count,
+            ],
         )?;
         Ok(())
     }
 
-    /// Return the block hash at `height`, if synced.
+    /// Return the stored block hash at `height`, if any.
     pub fn get_block_hash(&self, height: u32) -> rusqlite::Result<Option<[u8; 32]>> {
         let blob: Option<Vec<u8>> = self
             .conn
@@ -262,435 +281,431 @@ impl Db {
             .optional()?;
         Ok(blob.and_then(|v| v.try_into().ok()))
     }
+}
 
-    /// Delete all data above `height` (reorg rewind).
-    pub fn rewind_to_height(&mut self, height: u32) -> rusqlite::Result<()> {
-        let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM blocks WHERE height > ?1", params![height])?;
-        tx.execute(
-            "DELETE FROM received_notes WHERE height > ?1",
-            params![height],
+// ─── Transactions ────────────────────────────────────────────────────────────
+
+impl Db {
+    /// Insert or update a transaction, returning its row id (`id_tx`).
+    ///
+    /// A mined transaction sets both `block` and `mined_height` to `height`; an
+    /// unmined (mempool) transaction passes `height = None`.
+    pub fn upsert_transaction(
+        &self,
+        txid: &[u8],
+        height: Option<u32>,
+        tx_index: Option<u32>,
+    ) -> rusqlite::Result<i64> {
+        self.conn.execute(
+            "INSERT INTO transactions(txid, block, mined_height, tx_index)
+             VALUES (?1, ?2, ?2, ?3)
+             ON CONFLICT(txid) DO UPDATE SET
+                block = excluded.block,
+                mined_height = excluded.mined_height,
+                tx_index = excluded.tx_index",
+            params![txid, height, tx_index],
         )?;
-        tx.execute(
-            "DELETE FROM transactions WHERE height > ?1",
-            params![height],
-        )?;
-        tx.execute(
-            "DELETE FROM transparent_utxos WHERE height > ?1",
-            params![height],
-        )?;
-        // Un-mark spends above the rewind point.
-        tx.execute(
-            "UPDATE received_notes SET spent_height = NULL WHERE spent_height > ?1",
-            params![height],
-        )?;
-        tx.execute(
-            "UPDATE transparent_utxos SET spent_height = NULL WHERE spent_height > ?1",
-            params![height],
-        )?;
-        // Reset sync cursors for all accounts beyond the rewind point.
-        tx.execute(
-            "UPDATE sync_state SET height = MIN(height, ?1) WHERE height > ?1",
-            params![height],
-        )?;
-        tx.commit()
+        self.conn.query_row(
+            "SELECT id_tx FROM transactions WHERE txid = ?1",
+            params![txid],
+            |row| row.get(0),
+        )
     }
 }
 
-// ─── Received notes ──────────────────────────────────────────────────────────
-
-/// Input struct for persisting a received note.
-#[derive(Debug, Clone)]
-pub struct ReceivedNoteInsert<'a> {
-    /// Foreign key into the `accounts` table.
-    pub account: i64,
-    /// Shielded pool: `"orchard"` or `"sapling"`.
-    pub pool: &'a str,
-    /// Transaction ID (32 bytes, protocol byte order).
-    pub tx_id: &'a [u8],
-    /// Block height at which this note was mined.
-    pub height: u32,
-    /// Index of this output/action within the transaction.
-    pub output_index: u32,
-    /// Diversifier bytes from the decrypted note plaintext.
-    pub diversifier: &'a [u8],
-    /// Note value in zatoshis.
-    pub value_zat: u64,
-    /// Note commitment randomness (rseed).
-    pub rseed: &'a [u8],
-    /// Rho (Orchard only): the input nullifier of this action.
-    pub rho: Option<&'a [u8]>,
-    /// Sapling commitment tree leaf position (FVK path only).
-    pub leaf_pos: Option<u64>,
-    /// Derived nullifier, if already known.
-    pub nullifier: Option<&'a [u8]>,
-}
+// ─── Shielded notes ──────────────────────────────────────────────────────────
 
 impl Db {
-    /// Insert a received note, returning the row id. Ignores duplicates.
-    pub fn insert_received_note(&self, n: &ReceivedNoteInsert<'_>) -> rusqlite::Result<i64> {
+    /// Insert a received Sapling note, returning its row id. Ignores duplicates.
+    pub fn insert_sapling_note(&self, n: &SaplingNoteInsert<'_>) -> rusqlite::Result<i64> {
         self.conn.execute(
-            "INSERT INTO received_notes(
-                account, pool, tx_id, height, output_index,
-                diversifier, value_zat, rseed, rho, leaf_pos, nullifier
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
-             ON CONFLICT(tx_id, output_index, pool) DO NOTHING",
+            "INSERT INTO sapling_received_notes(
+                transaction_id, output_index, diversifier, value, rcm, nf,
+                is_change, commitment_tree_position)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+             ON CONFLICT(transaction_id, output_index) DO NOTHING",
             params![
-                n.account,
-                n.pool,
-                n.tx_id,
-                n.height,
+                n.transaction_id,
                 n.output_index,
                 n.diversifier,
-                n.value_zat as i64,
-                n.rseed,
-                n.rho,
-                n.leaf_pos.map(|p| p as i64),
-                n.nullifier,
+                n.value as i64,
+                n.rcm,
+                n.nf,
+                n.is_change as i64,
+                n.commitment_tree_position.map(|p| p as i64),
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Mark a note as spent at `spent_height` by nullifier.
-    pub fn mark_note_spent(&self, nullifier: &[u8], spent_height: u32) -> rusqlite::Result<usize> {
+    /// Insert a received Orchard note, returning its row id. Ignores duplicates.
+    pub fn insert_orchard_note(&self, n: &OrchardNoteInsert<'_>) -> rusqlite::Result<i64> {
         self.conn.execute(
-            "UPDATE received_notes SET spent_height = ?1 WHERE nullifier = ?2 AND spent_height IS NULL",
-            params![spent_height, nullifier],
+            "INSERT INTO orchard_received_notes(
+                transaction_id, action_index, diversifier, value, rho, rseed, nf,
+                is_change, commitment_tree_position)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+             ON CONFLICT(transaction_id, action_index) DO NOTHING",
+            params![
+                n.transaction_id,
+                n.action_index,
+                n.diversifier,
+                n.value as i64,
+                n.rho,
+                n.rseed,
+                n.nf,
+                n.is_change as i64,
+                n.commitment_tree_position.map(|p| p as i64),
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Record that the Sapling note with nullifier `nf` was spent by transaction
+    /// `spending_tx`. No-op (returns 0) if no owned note has that nullifier.
+    pub fn mark_sapling_spent(&self, nf: &[u8], spending_tx: i64) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO sapling_received_note_spends(
+                sapling_received_note_id, transaction_id)
+             SELECT id, ?2 FROM sapling_received_notes WHERE nf = ?1",
+            params![nf, spending_tx],
         )
     }
 
-    /// Store memo bytes for a note identified by (tx_id, output_index, pool).
-    pub fn store_memo(
+    /// Record that the Orchard note with nullifier `nf` was spent by transaction
+    /// `spending_tx`. No-op (returns 0) if no owned note has that nullifier.
+    pub fn mark_orchard_spent(&self, nf: &[u8], spending_tx: i64) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO orchard_received_note_spends(
+                orchard_received_note_id, transaction_id)
+             SELECT id, ?2 FROM orchard_received_notes WHERE nf = ?1",
+            params![nf, spending_tx],
+        )
+    }
+
+    /// Store an enriched memo for a Sapling note by (transaction, output index).
+    pub fn set_sapling_memo(
         &self,
-        tx_id: &[u8],
+        transaction_id: i64,
         output_index: u32,
-        pool: &str,
         memo: &[u8],
     ) -> rusqlite::Result<usize> {
         self.conn.execute(
-            "UPDATE received_notes SET memo = ?1 WHERE tx_id = ?2 AND output_index = ?3 AND pool = ?4",
-            params![memo, tx_id, output_index, pool],
+            "UPDATE sapling_received_notes SET memo = ?1
+             WHERE transaction_id = ?2 AND output_index = ?3",
+            params![memo, transaction_id, output_index],
         )
     }
 
-    /// Return all received notes for `account`.
-    pub fn get_received_notes(&self, account: i64) -> rusqlite::Result<Vec<ReceivedNoteRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, account, pool, tx_id, height, output_index,
-                    diversifier, value_zat, rseed, rho, leaf_pos,
-                    nullifier, memo, spent_height
-             FROM received_notes WHERE account = ?1 ORDER BY height",
-        )?;
-        let rows = stmt.query_map(params![account], |row| {
-            Ok(ReceivedNoteRow {
-                id: row.get(0)?,
-                account: row.get(1)?,
-                pool: row.get(2)?,
-                tx_id: row.get(3)?,
-                height: row.get(4)?,
-                output_index: row.get(5)?,
-                diversifier: row.get(6)?,
-                value_zat: {
-                    let v: i64 = row.get(7)?;
-                    v as u64
-                },
-                rseed: row.get(8)?,
-                rho: row.get(9)?,
-                leaf_pos: row.get::<_, Option<i64>>(10)?.map(|p| p as u64),
-                nullifier: row.get(11)?,
-                memo: row.get(12)?,
-                spent_height: row.get(13)?,
-            })
-        })?;
-        rows.collect()
-    }
-
-    /// Return the nullifiers of all currently unspent notes for `account`.
-    pub fn unspent_nullifiers(&self, account: i64) -> rusqlite::Result<Vec<Vec<u8>>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT nullifier FROM received_notes
-             WHERE account = ?1 AND nullifier IS NOT NULL AND spent_height IS NULL",
-        )?;
-        let rows = stmt.query_map(params![account], |row| row.get(0))?;
-        rows.collect()
+    /// Store an enriched memo for an Orchard note by (transaction, action index).
+    pub fn set_orchard_memo(
+        &self,
+        transaction_id: i64,
+        action_index: u32,
+        memo: &[u8],
+    ) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE orchard_received_notes SET memo = ?1
+             WHERE transaction_id = ?2 AND action_index = ?3",
+            params![memo, transaction_id, action_index],
+        )
     }
 }
 
-// ─── Transactions ─────────────────────────────────────────────────────────────
+// ─── Transparent outputs ─────────────────────────────────────────────────────
 
 impl Db {
-    /// Insert (or ignore duplicate) transaction header.
-    pub fn upsert_transaction(
+    /// Insert a received transparent output, returning its row id. Ignores duplicates.
+    pub fn insert_transparent_output(
         &self,
-        account: i64,
-        tx_id: &[u8],
-        height: u32,
-        timestamp: u32,
+        o: &TransparentOutputInsert<'_>,
     ) -> rusqlite::Result<i64> {
         self.conn.execute(
-            "INSERT INTO transactions(account, tx_id, height, timestamp)
-             VALUES (?1,?2,?3,?4)
-             ON CONFLICT(account, tx_id) DO NOTHING",
-            params![account, tx_id, height, timestamp],
-        )?;
-        let rowid: i64 = self.conn.query_row(
-            "SELECT id FROM transactions WHERE account = ?1 AND tx_id = ?2",
-            params![account, tx_id],
-            |row| row.get(0),
-        )?;
-        Ok(rowid)
-    }
-
-    /// Update the net signed value of a transaction (+incoming, −outgoing).
-    pub fn add_transaction_value(
-        &self,
-        id: i64,
-        delta: i64,
-    ) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "UPDATE transactions SET net_value = net_value + ?1 WHERE id = ?2",
-            params![delta, id],
-        )?;
-        Ok(())
-    }
-}
-
-// ─── Transparent UTXOs ───────────────────────────────────────────────────────
-
-/// Input for persisting a transparent UTXO.
-#[derive(Debug, Clone)]
-pub struct UtxoInsert<'a> {
-    /// Foreign key into the `accounts` table.
-    pub account: i64,
-    /// Base58Check-encoded transparent address that controls this output.
-    pub address: &'a str,
-    /// Transaction ID (32 bytes, protocol byte order).
-    pub tx_id: &'a [u8],
-    /// Index within the transaction's `vout` array.
-    pub output_index: u32,
-    /// Value in zatoshis.
-    pub value_zat: u64,
-    /// Block height at which this output was created.
-    pub height: u32,
-    /// Raw locking script (`scriptPubKey`).
-    pub script: &'a [u8],
-}
-
-impl Db {
-    /// Insert a transparent UTXO, ignoring duplicates.
-    pub fn insert_utxo(&self, u: &UtxoInsert<'_>) -> rusqlite::Result<i64> {
-        self.conn.execute(
-            "INSERT INTO transparent_utxos(
-                account, address, tx_id, output_index, value_zat, height, script
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7)
-             ON CONFLICT(tx_id, output_index) DO NOTHING",
+            "INSERT INTO transparent_received_outputs(
+                transaction_id, output_index, address, script, value_zat,
+                max_observed_unspent_height)
+             VALUES (?1,?2,?3,?4,?5,?6)
+             ON CONFLICT(transaction_id, output_index) DO NOTHING",
             params![
-                u.account,
-                u.address,
-                u.tx_id,
-                u.output_index,
-                u.value_zat as i64,
-                u.height,
-                u.script,
+                o.transaction_id,
+                o.output_index,
+                o.address,
+                o.script,
+                o.value_zat as i64,
+                o.max_observed_unspent_height,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Mark a UTXO as spent (by its (tx_id, output_index) outpoint).
-    pub fn mark_utxo_spent(
+    /// Record that the transparent outpoint `(prevout_txid, prevout_index)` was
+    /// spent by transaction `spending_tx`.
+    ///
+    /// Always caches the outpoint in `transparent_spend_map`, and additionally
+    /// links the spend to a known output if we already hold it. Returns the
+    /// number of owned outputs newly marked spent (0 or 1).
+    pub fn mark_transparent_spent(
         &self,
         prevout_txid: &[u8],
         prevout_index: u32,
-        spent_height: u32,
+        spending_tx: i64,
     ) -> rusqlite::Result<usize> {
         self.conn.execute(
-            "UPDATE transparent_utxos SET spent_height = ?1
-             WHERE tx_id = ?2 AND output_index = ?3 AND spent_height IS NULL",
-            params![spent_height, prevout_txid, prevout_index],
-        )
-    }
-
-    /// Return all unspent UTXOs for an account.
-    pub fn unspent_utxos(&self, account: i64) -> rusqlite::Result<Vec<TransparentUtxoRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, account, address, tx_id, output_index,
-                    value_zat, height, script, spent_height
-             FROM transparent_utxos
-             WHERE account = ?1 AND spent_height IS NULL
-             ORDER BY height",
+            "INSERT OR IGNORE INTO transparent_spend_map(
+                spending_transaction_id, prevout_txid, prevout_output_index)
+             VALUES (?1,?2,?3)",
+            params![spending_tx, prevout_txid, prevout_index],
         )?;
-        let rows = stmt.query_map(params![account], |row| {
-            Ok(TransparentUtxoRow {
-                id: row.get(0)?,
-                account: row.get(1)?,
-                address: row.get(2)?,
-                tx_id: row.get(3)?,
-                output_index: row.get(4)?,
-                value_zat: {
-                    let v: i64 = row.get(5)?;
-                    v as u64
-                },
-                height: row.get(6)?,
-                script: row.get(7)?,
-                spent_height: row.get(8)?,
-            })
-        })?;
-        rows.collect()
+        self.conn.execute(
+            "INSERT OR IGNORE INTO transparent_received_output_spends(
+                transparent_received_output_id, transaction_id)
+             SELECT o.id, ?3 FROM transparent_received_outputs o
+             JOIN transactions t ON t.id_tx = o.transaction_id
+             WHERE t.txid = ?1 AND o.output_index = ?2",
+            params![prevout_txid, prevout_index, spending_tx],
+        )
     }
 }
 
 // ─── Balance ─────────────────────────────────────────────────────────────────
 
 impl Db {
-    /// Compute the confirmed balance for `account` across all pools.
-    pub fn balance(&self, account: i64) -> rusqlite::Result<PoolBalance> {
-        let orchard_zat: i64 = self.conn.query_row(
-            "SELECT COALESCE(SUM(value_zat), 0)
-             FROM received_notes
-             WHERE account = ?1 AND pool = 'orchard' AND spent_height IS NULL",
-            params![account],
-            |row| row.get(0),
+    /// Confirmed balance across all pools.
+    ///
+    /// A note/output counts as unspent when no *mined* transaction spends it.
+    pub fn balance(&self) -> rusqlite::Result<PoolBalance> {
+        let sapling_zat = self.unspent_sum(
+            "SELECT COALESCE(SUM(n.value), 0) FROM sapling_received_notes n
+             WHERE NOT EXISTS (
+                SELECT 1 FROM sapling_received_note_spends s
+                JOIN transactions t ON t.id_tx = s.transaction_id
+                WHERE s.sapling_received_note_id = n.id AND t.mined_height IS NOT NULL)",
         )?;
-
-        let sapling_zat: i64 = self.conn.query_row(
-            "SELECT COALESCE(SUM(value_zat), 0)
-             FROM received_notes
-             WHERE account = ?1 AND pool = 'sapling' AND spent_height IS NULL",
-            params![account],
-            |row| row.get(0),
+        let orchard_zat = self.unspent_sum(
+            "SELECT COALESCE(SUM(n.value), 0) FROM orchard_received_notes n
+             WHERE NOT EXISTS (
+                SELECT 1 FROM orchard_received_note_spends s
+                JOIN transactions t ON t.id_tx = s.transaction_id
+                WHERE s.orchard_received_note_id = n.id AND t.mined_height IS NOT NULL)",
         )?;
-
-        let transparent_zat: i64 = self.conn.query_row(
-            "SELECT COALESCE(SUM(value_zat), 0)
-             FROM transparent_utxos
-             WHERE account = ?1 AND spent_height IS NULL",
-            params![account],
-            |row| row.get(0),
+        let transparent_zat = self.unspent_sum(
+            "SELECT COALESCE(SUM(o.value_zat), 0) FROM transparent_received_outputs o
+             WHERE NOT EXISTS (
+                SELECT 1 FROM transparent_received_output_spends s
+                JOIN transactions t ON t.id_tx = s.transaction_id
+                WHERE s.transparent_received_output_id = o.id AND t.mined_height IS NOT NULL)",
         )?;
-
         Ok(PoolBalance {
-            orchard_zat: orchard_zat as u64,
-            sapling_zat: sapling_zat as u64,
-            transparent_zat: transparent_zat as u64,
+            orchard_zat,
+            sapling_zat,
+            transparent_zat,
         })
+    }
+
+    fn unspent_sum(&self, sql: &str) -> rusqlite::Result<u64> {
+        let v: i64 = self.conn.query_row(sql, [], |row| row.get(0))?;
+        Ok(v as u64)
     }
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
+// ─── Reorg rewind ────────────────────────────────────────────────────────────
+
+impl Db {
+    /// Roll the wallet back to `height`, discarding everything above it.
+    ///
+    /// Deleting the mined transactions above `height` cascades to the notes and
+    /// outputs they created and to any spend-junction rows that reference them,
+    /// so spends recorded in rolled-back blocks are automatically undone. The
+    /// cursor is reset to the surviving block at `height`.
+    pub fn rewind_to_height(&mut self, height: u32) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "DELETE FROM transactions WHERE mined_height > ?1",
+            params![height],
+        )?;
+        tx.execute("DELETE FROM blocks WHERE height > ?1", params![height])?;
+        tx.execute(
+            "INSERT INTO sync_state(id, height, hash, sapling_pos, orchard_pos)
+             VALUES (
+                1,
+                ?1,
+                (SELECT hash FROM blocks WHERE height = ?1),
+                COALESCE((SELECT sapling_tree_size FROM blocks WHERE height = ?1), 0),
+                COALESCE((SELECT orchard_tree_size FROM blocks WHERE height = ?1), 0))
+             ON CONFLICT(id) DO UPDATE SET
+                height = excluded.height,
+                hash = excluded.hash,
+                sapling_pos = excluded.sapling_pos,
+                orchard_pos = excluded.orchard_pos",
+            params![height],
+        )?;
+        tx.commit()
+    }
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_open_in_memory_and_schema() {
-        let db = Db::open_in_memory().expect("in-memory db");
-        let v = migration::get_version(&db.conn).expect("schema version");
-        assert_eq!(v, 1);
+    fn mined_tx(db: &Db, txid: &[u8; 32], height: u32) -> i64 {
+        db.insert_block(&BlockMeta {
+            height,
+            hash: [height as u8; 32],
+            time: 1_000 + height,
+            sapling_tree_size: Some(u64::from(height) * 2),
+            orchard_tree_size: Some(u64::from(height) * 3),
+            sapling_output_count: Some(0),
+            orchard_action_count: Some(0),
+        })
+        .unwrap();
+        db.upsert_transaction(txid, Some(height), Some(0)).unwrap()
     }
 
     #[test]
-    fn test_account_crud() {
+    fn schema_initializes_to_v1() {
         let db = Db::open_in_memory().unwrap();
-        let id = db.insert_account("test", "ivk", "encoded_key_here", 100).unwrap();
-        assert!(id > 0);
-        let accounts = db.list_accounts().unwrap();
-        assert_eq!(accounts.len(), 1);
-        assert_eq!(accounts[0].label, "test");
-        assert_eq!(accounts[0].birthday, 100);
+        assert_eq!(schema::get_version(&db.conn).unwrap(), 1);
     }
 
     #[test]
-    fn test_sync_cursor_roundtrip() {
+    fn account_roundtrip() {
         let db = Db::open_in_memory().unwrap();
-        let acct = db.insert_account("a", "fvk", "key1", 0).unwrap();
-        let cursor = SyncCursor { height: 42, hash: Some([7u8; 32]), sapling_leaf_count: 100 };
-        db.set_sync_cursor(acct, &cursor).unwrap();
-        let loaded = db.get_sync_cursor(acct).unwrap();
-        assert_eq!(loaded.height, 42);
-        assert_eq!(loaded.hash, Some([7u8; 32]));
-        assert_eq!(loaded.sapling_leaf_count, 100);
+        assert!(db.get_account().unwrap().is_none());
+        let acct = Account {
+            encoded: "uview1...".into(),
+            key_type: "ufvk".into(),
+            network: "main".into(),
+            birthday: 419_200,
+        };
+        db.set_account(&acct).unwrap();
+        let got = db.get_account().unwrap().unwrap();
+        assert_eq!(got.encoded, acct.encoded);
+        assert_eq!(got.birthday, 419_200);
     }
 
     #[test]
-    fn test_balance_empty() {
+    fn sync_state_roundtrip() {
         let db = Db::open_in_memory().unwrap();
-        let acct = db.insert_account("b", "ivk", "key2", 0).unwrap();
-        let bal = db.balance(acct).unwrap();
-        assert_eq!(bal.total_zat(), 0);
+        assert_eq!(db.get_sync_state().unwrap(), SyncState::default());
+        let state = SyncState {
+            height: 42,
+            hash: Some([7u8; 32]),
+            sapling_pos: 100,
+            orchard_pos: 200,
+        };
+        db.set_sync_state(&state).unwrap();
+        let got = db.get_sync_state().unwrap();
+        assert_eq!(got.height, 42);
+        assert_eq!(got.hash, Some([7u8; 32]));
+        assert_eq!(got.sapling_pos, 100);
+        assert_eq!(got.orchard_pos, 200);
     }
 
     #[test]
-    fn test_received_note_and_balance() {
+    fn balance_empty() {
         let db = Db::open_in_memory().unwrap();
-        let acct = db.insert_account("c", "fvk", "key3", 0).unwrap();
-        db.upsert_transaction(acct, &[0u8; 32], 100, 1000).unwrap();
-        db.insert_received_note(&ReceivedNoteInsert {
-            account: acct,
-            pool: "orchard",
-            tx_id: &[0u8; 32],
-            height: 100,
+        assert_eq!(db.balance().unwrap(), PoolBalance::default());
+    }
+
+    #[test]
+    fn orchard_note_received_then_spent() {
+        let db = Db::open_in_memory().unwrap();
+        let tx = mined_tx(&db, &[1u8; 32], 100);
+        db.insert_orchard_note(&OrchardNoteInsert {
+            transaction_id: tx,
+            action_index: 0,
+            diversifier: &[0u8; 11],
+            value: 5_000_000,
+            rho: &[1u8; 32],
+            rseed: &[2u8; 32],
+            nf: Some(&[9u8; 32]),
+            is_change: false,
+            commitment_tree_position: Some(7),
+        })
+        .unwrap();
+        assert_eq!(db.balance().unwrap().orchard_zat, 5_000_000);
+
+        // Spend it in a later mined transaction.
+        let spend_tx = mined_tx(&db, &[2u8; 32], 101);
+        assert_eq!(db.mark_orchard_spent(&[9u8; 32], spend_tx).unwrap(), 1);
+        assert_eq!(db.balance().unwrap().orchard_zat, 0);
+    }
+
+    #[test]
+    fn unmined_spend_does_not_reduce_balance() {
+        let db = Db::open_in_memory().unwrap();
+        let tx = mined_tx(&db, &[1u8; 32], 100);
+        db.insert_sapling_note(&SaplingNoteInsert {
+            transaction_id: tx,
             output_index: 0,
             diversifier: &[0u8; 11],
-            value_zat: 5_000_000,
-            rseed: &[0u8; 32],
-            rho: Some(&[1u8; 32]),
-            leaf_pos: None,
-            nullifier: Some(&[2u8; 32]),
-        }).unwrap();
-        let bal = db.balance(acct).unwrap();
-        assert_eq!(bal.orchard_zat, 5_000_000);
-        assert_eq!(bal.sapling_zat, 0);
+            value: 3_000_000,
+            rcm: &[2u8; 32],
+            nf: Some(&[9u8; 32]),
+            is_change: false,
+            commitment_tree_position: Some(5),
+        })
+        .unwrap();
 
-        // Mark as spent
-        db.mark_note_spent(&[2u8; 32], 101).unwrap();
-        let bal2 = db.balance(acct).unwrap();
-        assert_eq!(bal2.orchard_zat, 0);
+        // A mempool (unmined) spend should NOT reduce the confirmed balance.
+        let mempool_tx = db.upsert_transaction(&[3u8; 32], None, None).unwrap();
+        assert_eq!(db.mark_sapling_spent(&[9u8; 32], mempool_tx).unwrap(), 1);
+        assert_eq!(db.balance().unwrap().sapling_zat, 3_000_000);
     }
 
     #[test]
-    fn test_transparent_utxo() {
+    fn transparent_received_then_spent() {
         let db = Db::open_in_memory().unwrap();
-        let acct = db.insert_account("d", "fvk", "key4", 0).unwrap();
-        db.insert_utxo(&UtxoInsert {
-            account: acct,
+        let tx = mined_tx(&db, &[1u8; 32], 200);
+        db.insert_transparent_output(&TransparentOutputInsert {
+            transaction_id: tx,
+            output_index: 0,
             address: "t1abc",
-            tx_id: &[0u8; 32],
-            output_index: 0,
-            value_zat: 1_000_000,
-            height: 200,
             script: &[0x76, 0xa9],
-        }).unwrap();
-        let bal = db.balance(acct).unwrap();
-        assert_eq!(bal.transparent_zat, 1_000_000);
-        // Mark spent
-        db.mark_utxo_spent(&[0u8; 32], 0, 201).unwrap();
-        let bal2 = db.balance(acct).unwrap();
-        assert_eq!(bal2.transparent_zat, 0);
+            value_zat: 1_000_000,
+            max_observed_unspent_height: Some(200),
+        })
+        .unwrap();
+        assert_eq!(db.balance().unwrap().transparent_zat, 1_000_000);
+
+        let spend_tx = mined_tx(&db, &[2u8; 32], 201);
+        // Outpoint references the *creating* tx's txid + output index.
+        assert_eq!(
+            db.mark_transparent_spent(&[1u8; 32], 0, spend_tx).unwrap(),
+            1
+        );
+        assert_eq!(db.balance().unwrap().transparent_zat, 0);
     }
 
     #[test]
-    fn test_rewind_to_height() {
+    fn rewind_undoes_notes_and_spends() {
         let mut db = Db::open_in_memory().unwrap();
-        let acct = db.insert_account("e", "fvk", "key5", 0).unwrap();
-        db.upsert_transaction(acct, &[0u8; 32], 300, 2000).unwrap();
-        db.insert_received_note(&ReceivedNoteInsert {
-            account: acct,
-            pool: "sapling",
-            tx_id: &[0u8; 32],
-            height: 300,
-            output_index: 0,
+        let tx = mined_tx(&db, &[1u8; 32], 100);
+        db.insert_orchard_note(&OrchardNoteInsert {
+            transaction_id: tx,
+            action_index: 0,
             diversifier: &[0u8; 11],
-            value_zat: 2_000_000,
-            rseed: &[0u8; 32],
-            rho: None,
-            leaf_pos: Some(5),
-            nullifier: None,
-        }).unwrap();
-        assert_eq!(db.balance(acct).unwrap().sapling_zat, 2_000_000);
-        db.rewind_to_height(100).unwrap();
-        assert_eq!(db.balance(acct).unwrap().sapling_zat, 0);
+            value: 9_000_000,
+            rho: &[1u8; 32],
+            rseed: &[2u8; 32],
+            nf: Some(&[9u8; 32]),
+            is_change: false,
+            commitment_tree_position: Some(0),
+        })
+        .unwrap();
+        let spend_tx = mined_tx(&db, &[2u8; 32], 105);
+        db.mark_orchard_spent(&[9u8; 32], spend_tx).unwrap();
+        assert_eq!(db.balance().unwrap().orchard_zat, 0);
+
+        // Roll back past the spend (but not the note): note returns, spend gone.
+        db.rewind_to_height(104).unwrap();
+        assert_eq!(db.balance().unwrap().orchard_zat, 9_000_000);
+        assert_eq!(db.get_sync_state().unwrap().height, 104);
+
+        // Roll back past the note too: balance empty.
+        db.rewind_to_height(99).unwrap();
+        assert_eq!(db.balance().unwrap().orchard_zat, 0);
     }
 }
