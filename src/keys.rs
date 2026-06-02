@@ -4,6 +4,10 @@
 //! [`UnifiedFullViewingKey`] into the per-pool incoming keys (and, for a full
 //! key, the nullifier-deriving material) the [`crate::sync`] engine consumes.
 
+// The parsed keys are read only by the `lwd` scanner; without that feature the
+// fields are unused, but the parsing is still valid sans-IO API.
+#![cfg_attr(not(feature = "lwd"), allow(dead_code))]
+
 use orchard::keys::{FullViewingKey as OrchardFvk, IncomingViewingKey as OrchardIvk};
 use sapling::{zip32::IncomingViewingKey as SaplingIvk, NullifierDerivingKey};
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};

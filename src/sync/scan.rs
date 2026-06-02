@@ -1,26 +1,32 @@
-//! The sans-IO core: trial-decrypt compact blocks with a viewing key.
+//! Scanning a range of blocks into the [`Transactions`] relevant to a key, in
+//! two phases:
 //!
-//! [`scan`] runs the `sapling` / `orchard` batch trial-decryption over every
-//! compact output and action in a slice of blocks and returns the
-//! [`Transactions`] relevant to the key — the receives it recovered and the
-//! spends it observed. No network, no async, no persistence: hand it blocks and
-//! keys, get findings back. The live-syncing layer ([`crate::sync`]) feeds it
-//! blocks off the wire; a consumer persists what comes out.
+//! 1. [`scan_compact`] — trial-decrypt the compact ciphertext in the blocks
+//!    (via [`crate::note::decrypt`]). Cheap, parallel, sans-IO; recovers
+//!    receives (without memos — compact ciphertext truncates them) and the
+//!    spends observed.
+//! 2. [`scan`] then completes those receives: it fetches each owning full
+//!    transaction ([`crate::sync::chain`]) and full-decrypts the matching output
+//!    ([`crate::note::decrypt`]) to recover the memo. So `scan`'s findings are
+//!    always complete; a failed fetch errors the whole chunk.
 //!
 //! Sapling nullifiers and leaf positions need the tree size lightwalletd stamps
 //! on each block's `chain_metadata`; Orchard nullifiers derive from the key and
 //! the action's `rho` directly.
 
+use anyhow::{Context, Result};
 use orchard::keys::PreparedIncomingViewingKey as OrchardPreparedIvk;
-use orchard::note_encryption::{CompactAction, OrchardDomain};
-use sapling::note_encryption::{CompactOutputDescription, SaplingDomain, Zip212Enforcement};
-use zcash_note_encryption::{batch, EphemeralKeyBytes};
+use zcash_primitives::transaction::components::sapling::zip212_enforcement;
+use zcash_primitives::transaction::Transaction;
+use zcash_protocol::consensus::{BlockHeight as ZBlockHeight, BranchId, Network};
 
 use crate::keys::ScanningKeys;
-use crate::proto::{CompactBlock, CompactOrchardAction, CompactSaplingOutput, CompactTx};
+use crate::note::decrypt;
+use crate::proto::{CompactBlock, CompactTx};
+use crate::sync::chain::{self, LwdClient};
 use crate::BlockHeight;
 
-/// The 512-byte ZIP-302 memo a receive carries once enriched.
+/// The 512-byte ZIP-302 memo a receive carries once its full ciphertext is decrypted.
 pub type RawMemo = Box<[u8; 512]>;
 
 /// One value event relevant to a viewing key — a **receive** or a **spend** —
@@ -87,8 +93,8 @@ pub struct Receive<N, A> {
     /// Leaf position in the pool's commitment tree, when the block carried the
     /// `chain_metadata` needed to compute it.
     pub position: Option<u64>,
-    /// Raw 512-byte ZIP-302 memo. `None` until full-transaction enrichment fills
-    /// it (compact blocks truncate the ciphertext before the memo).
+    /// Raw 512-byte ZIP-302 memo. `None` after phase 1 (compact blocks truncate
+    /// the ciphertext before the memo); filled by [`scan`]'s phase 2.
     pub memo: Option<RawMemo>,
 }
 
@@ -126,22 +132,114 @@ impl Transactions {
     }
 }
 
-/// Trial-decrypt every Sapling output and Orchard action in `blocks`, returning
-/// the [`Transactions`] relevant to `keys`.
+/// Scan `blocks` into the **complete** [`Transactions`] relevant to `keys`.
+///
+/// Phase 1 compact-scans the blocks ([`scan_compact`]); phase 2 fetches each
+/// owning full transaction and full-decrypts the matching output to recover its
+/// memo. A failed fetch or parse errors the whole chunk — findings are complete
+/// or not at all.
+pub async fn scan(
+    client: &mut LwdClient,
+    blocks: &[CompactBlock],
+    keys: &ScanningKeys,
+    network: &Network,
+) -> Result<Transactions> {
+    let mut txs = scan_compact(blocks, keys);
+    complete_memos(client, keys, network, &mut txs).await?;
+    Ok(txs)
+}
+
+/// Phase 2: fill every receive's memo by fetching its full transaction and
+/// full-decrypting the matching output. Each owning transaction is fetched once;
+/// a failed fetch or parse propagates (killing the chunk).
+async fn complete_memos(
+    client: &mut LwdClient,
+    keys: &ScanningKeys,
+    network: &Network,
+    txs: &mut Transactions,
+) -> Result<()> {
+    let sapling_ivk = keys.sapling.as_ref().map(|k| k.ivk.prepare());
+    let orchard_ivk = keys.orchard.as_ref().map(|k| OrchardPreparedIvk::new(&k.ivk));
+
+    // Distinct txids of the receives we need to complete — fetch each once.
+    let mut txids: Vec<[u8; 32]> = Vec::new();
+    for r in receives(&txs.sapling) {
+        txids.push(r.txid);
+    }
+    for r in receives(&txs.orchard) {
+        txids.push(r.txid);
+    }
+    txids.sort_unstable();
+    txids.dedup();
+
+    for txid in txids {
+        let raw = chain::fetch_raw_transaction(client, &txid)
+            .await
+            .context("fetching full transaction for memo")?;
+        let height = ZBlockHeight::from_u32(raw.height as u32);
+        let tx = Transaction::read(&raw.data[..], BranchId::for_height(network, height))
+            .context("parsing full transaction")?;
+
+        if let (Some(ivk), Some(bundle)) = (&sapling_ivk, tx.sapling_bundle()) {
+            let outputs = bundle.shielded_outputs();
+            for r in receives_mut(&mut txs.sapling).filter(|r| r.txid == txid && r.memo.is_none()) {
+                if let Some(output) = outputs.get(r.output_index as usize) {
+                    let zip212 = zip212_enforcement(network, ZBlockHeight::from_u32(r.height));
+                    if let Some((.., memo)) = decrypt::try_decrypt_sapling(output, ivk, zip212) {
+                        r.memo = Some(memo);
+                    }
+                }
+            }
+        }
+
+        if let (Some(ivk), Some(bundle)) = (&orchard_ivk, tx.orchard_bundle()) {
+            let actions = bundle.actions();
+            for r in receives_mut(&mut txs.orchard).filter(|r| r.txid == txid && r.memo.is_none()) {
+                if let Some(action) = actions.get(r.output_index as usize) {
+                    if let Some((.., memo)) = decrypt::try_decrypt_orchard(action, ivk) {
+                        r.memo = Some(memo);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Receives only (skip spends) in a pool's event vec.
+fn receives<N, A>(v: &[Tx<N, A>]) -> impl Iterator<Item = &Receive<N, A>> {
+    v.iter().filter_map(|t| match t {
+        Tx::Receive(r) => Some(r),
+        Tx::Spend(_) => None,
+    })
+}
+
+/// Receives only, mutably.
+fn receives_mut<N, A>(v: &mut [Tx<N, A>]) -> impl Iterator<Item = &mut Receive<N, A>> {
+    v.iter_mut().filter_map(|t| match t {
+        Tx::Receive(r) => Some(r),
+        Tx::Spend(_) => None,
+    })
+}
+
+/// Phase 1: trial-decrypt the compact ciphertext in `blocks` into the
+/// [`Transactions`] relevant to `keys` — receives (memos unset) and the spends
+/// observed. The sans-IO half: cheap and parallel, no network. [`scan`] adds the
+/// memos.
 ///
 /// Blocks are independent, so for large ranges the work is split across the
 /// available CPUs with scoped threads (std only, no external dependency) and the
 /// per-chunk results concatenated in block order. Small inputs run inline.
-pub fn scan(blocks: &[CompactBlock], keys: &ScanningKeys) -> Transactions {
+pub fn scan_compact(blocks: &[CompactBlock], keys: &ScanningKeys) -> Transactions {
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     if threads <= 1 || blocks.len() < 64 {
-        return scan_serial(blocks, keys);
+        return scan_compact_serial(blocks, keys);
     }
 
     let chunk = blocks.len().div_ceil(threads);
     let parts: Vec<Transactions> = std::thread::scope(|s| {
         let handles: Vec<_> =
-            blocks.chunks(chunk).map(|c| s.spawn(move || scan_serial(c, keys))).collect();
+            blocks.chunks(chunk).map(|c| s.spawn(move || scan_compact_serial(c, keys))).collect();
         handles.into_iter().map(|h| h.join().expect("scan thread panicked")).collect()
     });
 
@@ -152,8 +250,8 @@ pub fn scan(blocks: &[CompactBlock], keys: &ScanningKeys) -> Transactions {
     out
 }
 
-/// Single-threaded scan of `blocks` — the body of [`scan`].
-fn scan_serial(blocks: &[CompactBlock], keys: &ScanningKeys) -> Transactions {
+/// Single-threaded compact scan of `blocks` — the body of [`scan_compact`].
+fn scan_compact_serial(blocks: &[CompactBlock], keys: &ScanningKeys) -> Transactions {
     let sapling_ivk = keys.sapling.as_ref().map(|k| k.ivk.prepare());
     let sapling_nk = keys.sapling.as_ref().and_then(|k| k.nk.as_ref());
     let orchard_ivk = keys.orchard.as_ref().map(|k| OrchardPreparedIvk::new(&k.ivk));
@@ -175,27 +273,24 @@ fn scan_serial(blocks: &[CompactBlock], keys: &ScanningKeys) -> Transactions {
 
             // Count *every* output for positions, but only feed parseable ones to
             // batch decryption; `meta[i]` aligns with the i-th decryption input.
-            let mut inputs: Vec<(SaplingDomain, CompactOutputDescription)> = Vec::new();
+            let mut descs = Vec::new();
             let mut meta: Vec<([u8; 32], u32, u32, Option<u64>)> = Vec::new();
             let mut leaf = 0u64;
             for tx in &block.vtx {
                 let Some(txid) = txid_of(tx) else { continue };
                 let tx_index = tx.index as u32;
-                for (oi, out) in tx.outputs.iter().enumerate() {
+                for (oi, output) in tx.outputs.iter().enumerate() {
                     let pos = block_start.map(|s| s + leaf);
                     leaf += 1;
-                    if let Some(desc) = parse_sapling(out) {
-                        inputs.push((SaplingDomain::new(Zip212Enforcement::On), desc));
+                    if let Some(desc) = decrypt::parse_sapling(output) {
+                        descs.push(desc);
                         meta.push((txid, tx_index, oi as u32, pos));
                     }
                 }
             }
 
-            for (i, hit) in batch::try_compact_note_decryption(std::slice::from_ref(ivk), &inputs)
-                .into_iter()
-                .enumerate()
-            {
-                if let Some(((note, recipient), _)) = hit {
+            for (i, hit) in decrypt::try_compact_sapling(ivk, descs).into_iter().enumerate() {
+                if let Some((note, recipient)) = hit {
                     let (txid, tx_index, output_index, position) = meta[i];
                     let nf = match (sapling_nk, position) {
                         (Some(nk), Some(pos)) => Some(note.nf(nk, pos).0),
@@ -223,7 +318,7 @@ fn scan_serial(blocks: &[CompactBlock], keys: &ScanningKeys) -> Transactions {
                 after.saturating_sub(in_block)
             });
 
-            let mut inputs: Vec<(OrchardDomain, CompactAction)> = Vec::new();
+            let mut actions = Vec::new();
             let mut meta: Vec<([u8; 32], u32, u32, Option<u64>)> = Vec::new();
             let mut leaf = 0u64;
             for tx in &block.vtx {
@@ -232,18 +327,15 @@ fn scan_serial(blocks: &[CompactBlock], keys: &ScanningKeys) -> Transactions {
                 for (ai, act) in tx.actions.iter().enumerate() {
                     let pos = block_start.map(|s| s + leaf);
                     leaf += 1;
-                    if let Some(action) = parse_orchard(act) {
-                        inputs.push((OrchardDomain::for_compact_action(&action), action));
+                    if let Some(action) = decrypt::parse_orchard(act) {
+                        actions.push(action);
                         meta.push((txid, tx_index, ai as u32, pos));
                     }
                 }
             }
 
-            for (i, hit) in batch::try_compact_note_decryption(std::slice::from_ref(ivk), &inputs)
-                .into_iter()
-                .enumerate()
-            {
-                if let Some(((note, recipient), _)) = hit {
+            for (i, hit) in decrypt::try_compact_orchard(ivk, actions).into_iter().enumerate() {
+                if let Some((note, recipient)) = hit {
                     let (txid, tx_index, output_index, position) = meta[i];
                     let nf = orchard_nk.map(|fvk| note.nullifier(fvk).to_bytes());
                     out.orchard.push(Tx::Receive(Receive {
@@ -286,24 +378,4 @@ fn scan_serial(blocks: &[CompactBlock], keys: &ScanningKeys) -> Transactions {
 /// Transaction id as a fixed array, or `None` if the proto field isn't 32 bytes.
 fn txid_of(tx: &CompactTx) -> Option<[u8; 32]> {
     tx.txid[..].try_into().ok()
-}
-
-/// Proto → `sapling` compact output. Deserialization glue, not crypto.
-fn parse_sapling(p: &CompactSaplingOutput) -> Option<CompactOutputDescription> {
-    let cmu_bytes: [u8; 32] = p.cmu[..].try_into().ok()?;
-    let cmu = Option::from(sapling::note::ExtractedNoteCommitment::from_bytes(&cmu_bytes))?;
-    let ephemeral_key = EphemeralKeyBytes(p.ephemeral_key[..].try_into().ok()?);
-    let enc_ciphertext = p.ciphertext[..].try_into().ok()?;
-    Some(CompactOutputDescription { cmu, ephemeral_key, enc_ciphertext })
-}
-
-/// Proto → `orchard` compact action. Deserialization glue, not crypto.
-fn parse_orchard(p: &CompactOrchardAction) -> Option<CompactAction> {
-    let nf: [u8; 32] = p.nullifier[..].try_into().ok()?;
-    let nf = Option::from(orchard::note::Nullifier::from_bytes(&nf))?;
-    let cmx: [u8; 32] = p.cmx[..].try_into().ok()?;
-    let cmx = Option::from(orchard::note::ExtractedNoteCommitment::from_bytes(&cmx))?;
-    let epk = EphemeralKeyBytes(p.ephemeral_key[..].try_into().ok()?);
-    let ct: [u8; 52] = p.ciphertext[..].try_into().ok()?;
-    Some(CompactAction::from_parts(nf, cmx, epk, ct))
 }

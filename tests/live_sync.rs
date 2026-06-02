@@ -16,7 +16,6 @@ use seer_sync::keys::ScanningKeys;
 use seer_sync::note::memo::{Memo, MemoBytes};
 use seer_sync::db::sync::sync_to_tip;
 use seer_sync::sync::chain::{connect_auto, tip_height};
-use seer_sync::sync::enrich::enrich_memos;
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_protocol::consensus::{MainNetwork, Network};
 
@@ -54,10 +53,13 @@ async fn probe_range() {
     let to = from + window;
 
     let (_, keys) = funded_keys();
-    let client = connect_auto().await.expect("connect");
+    let mut client = connect_auto().await.expect("connect");
     eprintln!("[probe] fetching [{from}..{to}]");
-    let blocks = fetch_range(client, from, to).await.expect("fetch_range");
-    let mut txs = scan(&blocks, &keys);
+    let blocks = fetch_range(client.clone(), from, to).await.expect("fetch_range");
+    // Two-phase scan: compact-find then full-fetch memos. Findings come back complete.
+    let txs = scan(&mut client, &blocks, &keys, &Network::MainNetwork)
+        .await
+        .expect("scan");
     let outputs: usize =
         blocks.iter().flat_map(|b| &b.vtx).map(|t| t.outputs.len() + t.actions.len()).sum();
     let sapling_recv = receives(&txs.sapling).count();
@@ -75,23 +77,18 @@ async fn probe_range() {
         eprintln!("[probe] first orchard receive at height {}", r.height);
     }
 
-    // Enrich the found notes with their memos (bounded window — no full sync).
-    let total = sapling_recv + orchard_recv;
-    if total > 0 {
-        let mut client = connect_auto().await.expect("connect");
-        enrich_memos(&mut client, &keys, &Network::MainNetwork, &mut txs).await;
-        let with_memo = receives(&txs.sapling).filter(|r| r.memo.is_some()).count()
-            + receives(&txs.orchard).filter(|r| r.memo.is_some()).count();
-        eprintln!("[probe] enriched {with_memo}/{total} notes with a memo");
-        let memos = receives(&txs.sapling)
-            .filter_map(|r| r.memo.as_deref())
-            .chain(receives(&txs.orchard).filter_map(|r| r.memo.as_deref()));
-        for raw in memos {
-            let Ok(bytes) = MemoBytes::from_bytes(raw) else { continue };
-            if let Ok(Memo::Text(text)) = Memo::try_from(&bytes) {
-                eprintln!("[probe] sample text memo: {:?}", &*text);
-                break;
-            }
+    // scan already recovered the memos (phase 2); report them.
+    let with_memo = receives(&txs.sapling).filter(|r| r.memo.is_some()).count()
+        + receives(&txs.orchard).filter(|r| r.memo.is_some()).count();
+    eprintln!("[probe] {with_memo}/{} receives carry a memo", sapling_recv + orchard_recv);
+    let memos = receives(&txs.sapling)
+        .filter_map(|r| r.memo.as_deref())
+        .chain(receives(&txs.orchard).filter_map(|r| r.memo.as_deref()));
+    for raw in memos {
+        let Ok(bytes) = MemoBytes::from_bytes(raw) else { continue };
+        if let Ok(Memo::Text(text)) = Memo::try_from(&bytes) {
+            eprintln!("[probe] sample text memo: {:?}", &*text);
+            break;
         }
     }
 }

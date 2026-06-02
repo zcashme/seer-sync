@@ -1,12 +1,12 @@
 //! Syncing: keep current with the chain.
 //!
-//! Two things, by feature:
-//!
-//! - [`scan`] (core, sans-IO) is the pure decryptor — `&[CompactBlock] + keys →
-//!   Transactions`. No network, no loop. *"What in these blocks is mine?"*
-//! - the rest (`lwd`) is the live process: [`chain`] fetches compact blocks from
-//!   lightwalletd, [`enrich`] recovers their memos, and [`run`] is the loop that
-//!   ties them to [`scan`] and keeps a consumer current. *"Stay synced."*
+//! - [`scan`](scan::scan) (`lwd`, async) scans a slice of blocks into the
+//!   *complete* [`Transactions`](scan::Transactions) relevant to a key: phase 1
+//!   compact-decrypts to find them (via [`crate::note`]), phase 2 fetches each
+//!   owning full transaction (via [`chain`]) and full-decrypts it to recover the
+//!   memo. [`scan::scan_compact`] is the sans-IO phase-1 half on its own.
+//! - [`chain`] fetches compact blocks and full transactions from lightwalletd.
+//! - [`run`] is the loop that keeps a consumer current.
 //!
 //! [`run`] is persistence-free: the consumer supplies three closures over its
 //! own store — `resume_point` (where to start + the seam hash), `rewind` (drop
@@ -14,12 +14,10 @@
 //! sweep, handling transport faults and reorgs inline. The engine reads no
 //! consumer state and exposes no outcome to match: it returns when synced.
 
-pub mod scan;
-
 #[cfg(feature = "lwd")]
 pub mod chain;
 #[cfg(feature = "lwd")]
-pub mod enrich;
+pub mod scan;
 
 /// Transient transport failures to absorb (reconnect + resume) before giving up.
 #[cfg(feature = "lwd")]
@@ -54,13 +52,13 @@ where
     F: FnMut(crate::BlockHeight, [u8; 32], &crate::sync::scan::Transactions) -> anyhow::Result<()>,
 {
     use crate::sync::chain::{self, DEFAULT_CHUNK_OUTPUTS};
-    use crate::sync::enrich::enrich_memos;
     use crate::sync::scan::scan;
     use anyhow::Context;
     use futures::StreamExt;
 
-    // A cheap clone sharing the gRPC channel, for fetching full transactions
-    // (memo enrichment) while the block stream owns its own client.
+    // A cheap clone sharing the gRPC channel, used for the tip query and for
+    // scan's phase-2 full-transaction fetches, while the block stream owns its
+    // own client.
     let mut fetch_client = client.clone();
     let tip = chain::tip_height(&mut fetch_client).await.context("tip height")?;
 
@@ -88,8 +86,9 @@ where
                     let height = last.height as crate::BlockHeight;
                     let hash: [u8; 32] = last.hash[..].try_into().unwrap_or([0u8; 32]);
 
-                    let mut txs = scan(&batch, keys);
-                    enrich_memos(&mut fetch_client, keys, network, &mut txs).await;
+                    let txs = scan(&mut fetch_client, &batch, keys, network)
+                        .await
+                        .context("scanning chunk")?;
                     sink(height, hash, &txs)?;
 
                     // Forward progress clears both backoffs.
