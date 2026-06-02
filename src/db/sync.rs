@@ -3,9 +3,8 @@
 //!
 //! This is "consumer zero" — proof the engine's persistence-free seam works. It
 //! owns its cursor (the `sync_state` row) and its reorg seam (block hashes), and
-//! plugs them into [`run_to_tip`] as two closures. The engine knows none of it.
-
-use std::cell::RefCell;
+//! plugs them into [`crate::sync::run`] as three closures. The engine knows none
+//! of it.
 
 use anyhow::{Context, Result};
 use zcash_protocol::consensus::Network;
@@ -22,14 +21,13 @@ use crate::BlockHeight;
 /// Resumes from the stored cursor; on a cold start it begins at the tracked
 /// account's birthday (or genesis if none is set). Reorgs are handled by the
 /// engine's walk-back driving this consumer's [`Db::rewind_to_height`].
-pub async fn sync_to_tip(db: &mut Db, client: LwdClient, keys: &ScanningKeys) -> Result<u32> {
+///
+/// Every store op is `&self` (rusqlite mutates through `&self`), so the three
+/// closures the engine needs — `resume_point`, `rewind`, `sink` — all just share
+/// `&Db`. No `&mut` to juggle, no `RefCell`.
+pub async fn sync_to_tip(db: &Db, client: LwdClient, keys: &ScanningKeys) -> Result<u32> {
     let network = network_of(db)?;
     let birthday = db.get_account().context("reading account")?.map_or(0, |a| a.birthday);
-
-    // The three closures all touch the one DB; they are only ever called
-    // sequentially (sink during a pass, resume_point/rewind between passes), so a
-    // RefCell shares it safely — no borrow is held across an await.
-    let cell = RefCell::new(db);
 
     crate::sync::run(
         client,
@@ -37,7 +35,7 @@ pub async fn sync_to_tip(db: &mut Db, client: LwdClient, keys: &ScanningKeys) ->
         &network,
         // resume_point: where to start, and the seam hash to check continuity.
         || {
-            let st = cell.borrow().get_sync_state().unwrap_or_default();
+            let st = db.get_sync_state().unwrap_or_default();
             if st.height == 0 {
                 (birthday, None)
             } else {
@@ -45,14 +43,13 @@ pub async fn sync_to_tip(db: &mut Db, client: LwdClient, keys: &ScanningKeys) ->
             }
         },
         // rewind: drop everything above the fork; resets the cursor too.
-        |to| cell.borrow_mut().rewind_to_height(to).context("rewinding after reorg"),
+        |to| db.rewind_to_height(to).context("rewinding after reorg"),
         // sink: apply one chunk and advance the cursor.
-        |height, hash, txs| apply(&cell.borrow(), height, hash, txs),
+        |height, hash, txs| apply(db, height, hash, txs),
     )
     .await?;
 
-    let synced = cell.borrow().get_sync_state().context("reading final cursor")?.height;
-    Ok(synced)
+    Ok(db.get_sync_state().context("reading final cursor")?.height)
 }
 
 /// Apply one chunk's findings, then advance the cursor — the consumer's half of

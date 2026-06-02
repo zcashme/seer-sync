@@ -106,7 +106,7 @@ async fn sync_window_into_db() {
         .unwrap_or_else(|| tip.saturating_sub(window));
 
     let (encoded, keys) = funded_keys();
-    let mut db = Db::open_in_memory().expect("open db");
+    let db = Db::open_in_memory().expect("open db");
     db.set_account(&Account {
         encoded,
         key_type: "ufvk".into(),
@@ -116,7 +116,7 @@ async fn sync_window_into_db() {
     .expect("set account");
 
     eprintln!("[live] syncing [{from}..{tip}] ({} blocks)", tip - from + 1);
-    let synced = sync_to_tip(&mut db, client.clone(), &keys).await.expect("sync_to_tip");
+    let synced = sync_to_tip(&db, client.clone(), &keys).await.expect("sync_to_tip");
 
     // Structural invariants that always hold. (The live tip may advance past
     // `tip` while we sync, so assert we reached at least it.)
@@ -151,7 +151,7 @@ async fn sync_window_into_db() {
     db.rewind_to_height(rewind_to).expect("rewind");
     assert_eq!(db.get_sync_state().unwrap().height, rewind_to, "cursor rewound");
 
-    let again = sync_to_tip(&mut db, client, &keys).await.expect("resync");
+    let again = sync_to_tip(&db, client, &keys).await.expect("resync");
     assert!(again >= synced, "tip only moves forward");
     assert_eq!(db.balance().unwrap(), bal, "re-applying overlapping blocks is idempotent");
 }

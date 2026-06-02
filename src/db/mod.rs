@@ -517,8 +517,12 @@ impl Db {
     /// outputs they created and to any spend-junction rows that reference them,
     /// so spends recorded in rolled-back blocks are automatically undone. The
     /// cursor is reset to the surviving block at `height`.
-    pub fn rewind_to_height(&mut self, height: u32) -> rusqlite::Result<()> {
-        let tx = self.conn.transaction()?;
+    pub fn rewind_to_height(&self, height: u32) -> rusqlite::Result<()> {
+        // `unchecked_transaction` (vs `transaction`) takes `&self`, so a consumer
+        // can drive rewinds through a shared `&Db` alongside its other (`&self`)
+        // store ops — no `&mut` / `RefCell` juggling. Safe here: the sync loop
+        // calls store ops sequentially, never with another transaction open.
+        let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM transactions WHERE mined_height > ?1",
             params![height],
@@ -683,7 +687,7 @@ mod tests {
 
     #[test]
     fn rewind_undoes_notes_and_spends() {
-        let mut db = Db::open_in_memory().unwrap();
+        let db = Db::open_in_memory().unwrap();
         let tx = mined_tx(&db, &[1u8; 32], 100);
         db.insert_orchard_note(&OrchardNoteInsert {
             transaction_id: tx,
