@@ -225,7 +225,7 @@ seer-sync's `db` is the **reference consumer** — it applies `Tx` events into i
 
 The crate builds in all three configurations (`--no-default-features` = sans-IO core, default `lwd`, `lwd + db`), `cargo clippy --all-targets` is clean, and the db unit tests pass. **This section is the authoritative as-built** — §1–§10 record the design journey; where they conflict with this, this wins. Notable evolutions past the journey:
 
-- **Structure — `sync.rs` + submodules; the sans-IO core is `note`/`keys`, not `scan`.** `src/sync.rs` holds the `run` loop; `src/sync/{scan,chain}.rs` are its submodules (no `engine`, no `enrich`). `sync::scan` is `lwd` + async (it fetches). The genuinely sans-IO core is `note` (decryption + ZIP-302 memo decode) + `keys` + proto messages; `--no-default-features` compiles those alone (their lwd-only consumers are `#[allow(dead_code)]`'d). `BlockHeight` is a `pub type = u32` alias.
+- **Structure — `sync.rs` + submodules; the sans-IO core is `note`/`keys`, not `scan`.** `src/sync.rs` holds the `run` loop; `src/sync/{scan,chain}.rs` are its submodules (no `engine`, no `enrich`). `sync::scan` is `lwd` + async (it fetches). The genuinely sans-IO core is `note` (decryption + ZIP-302 memo decode) + `keys` + proto messages; `--no-default-features` compiles those alone (their lwd-only consumers are `#[allow(dead_code)]`'d). `BlockHeight` is re-exported from `zcash_protocol` — the canonical newtype, type-distinct from counts/indices; conversions to/from `u32` happen only at the proto and SQLite boundaries.
 
 - **Decryption lives in `note`.** `note::decrypt` owns both compact (`parse_*`, `try_compact_*`) and full (`try_decrypt_*`) trial-decryption. `scan` delegates the crypto and only orchestrates (positions, nullifiers, assembly, fetch).
 
@@ -239,4 +239,4 @@ The crate builds in all three configurations (`--no-default-features` = sans-IO 
 
 - **db consumer — no `RefCell`.** Every `Db` op is `&self` (`rewind_to_height` uses `Connection::unchecked_transaction`), so `db::sync::sync_to_tip(&Db, client, keys)` shares a plain `&Db` across the three closures. `apply` writes the block header (hash only), receives, spends, advances the cursor; note positions ride on `Receive.position`.
 
-Still open: a true `BlockHeight` newtype; **concurrency** (a `TxFetcher` trait + parallel phase-2 fetches — which also pulls `scan` back toward core); ovk / outgoing-note recovery; per-chunk atomic `apply`.
+Still open: **concurrency** (a `TxFetcher` trait + parallel phase-2 fetches — which also pulls `scan` back toward core); ovk / outgoing-note recovery; per-chunk atomic `apply`. (Done: `BlockHeight` is now `zcash_protocol`'s newtype, not an alias.)
