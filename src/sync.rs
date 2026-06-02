@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 
 pub mod chain;
+pub mod enrich;
 #[cfg(feature = "db")]
 pub mod engine;
 
@@ -54,6 +55,10 @@ pub struct ScannedSapling {
     /// Leaf position in the Sapling commitment tree, if the block carried the
     /// `chain_metadata` needed to compute it.
     pub position: Option<u64>,
+    /// Raw 512-byte ZIP-302 memo. `None` until full-transaction enrichment fills
+    /// it — compact blocks truncate the ciphertext before the memo. Stored raw;
+    /// decode with [`crate::note::memo`].
+    pub memo: Option<Box<[u8; 512]>>,
 }
 
 /// An Orchard note found while scanning, with everything needed to persist it.
@@ -74,6 +79,10 @@ pub struct ScannedOrchard {
     pub nf: Option<[u8; 32]>,
     /// Leaf position in the Orchard commitment tree, if known.
     pub position: Option<u64>,
+    /// Raw 512-byte ZIP-302 memo. `None` until full-transaction enrichment fills
+    /// it — compact blocks truncate the ciphertext before the memo. Stored raw;
+    /// decode with [`crate::note::memo`].
+    pub memo: Option<Box<[u8; 512]>>,
 }
 
 /// A nullifier revealed as spent in a scanned block.
@@ -230,6 +239,7 @@ fn scan_serial(blocks: &[CompactBlock], keys: &ScanningKeys) -> Scanned {
                         recipient,
                         nf,
                         position,
+                        memo: None,
                     });
                 }
             }
@@ -274,6 +284,7 @@ fn scan_serial(blocks: &[CompactBlock], keys: &ScanningKeys) -> Scanned {
                         recipient,
                         nf,
                         position,
+                        memo: None,
                     });
                 }
             }

@@ -13,6 +13,7 @@
 
 use seer_sync::db::{Account, Db};
 use seer_sync::keys::ScanningKeys;
+use seer_sync::note::memo::{Memo, MemoBytes};
 use seer_sync::sync::chain::{connect_auto, tip_height};
 use seer_sync::sync::engine::sync_to_tip;
 use zcash_keys::keys::UnifiedFullViewingKey;
@@ -99,6 +100,19 @@ async fn sync_window_into_db() {
         "[live] balance: orchard={} sapling={} transparent={} (total {} zat)",
         bal.orchard_zat, bal.sapling_zat, bal.transparent_zat, bal.total_zat()
     );
+
+    // Memo enrichment: every owned note should have its full transaction fetched
+    // and its memo recovered (even an "empty" memo stores its 512-byte encoding).
+    let memos = db.memos().unwrap();
+    eprintln!("[live] {} notes carry a recovered memo", memos.len());
+    for raw in &memos {
+        let Ok(bytes) = MemoBytes::from_bytes(raw) else { continue };
+        let Ok(memo) = Memo::try_from(&bytes) else { continue };
+        if let Memo::Text(text) = memo {
+            eprintln!("[live] sample text memo: {:?}", &*text);
+            break;
+        }
+    }
 
     // Dedup / idempotency on *real* blocks: rewind into already-synced territory
     // and re-sync. Overlapping blocks are re-fetched and re-applied, so a working

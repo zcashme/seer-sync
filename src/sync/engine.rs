@@ -14,10 +14,13 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
 
+use zcash_protocol::consensus::Network;
+
 use crate::db::{BlockMeta, Db, OrchardNoteInsert, SaplingNoteInsert, SyncState};
 use crate::keys::ScanningKeys;
 use crate::proto::CompactBlock;
 use crate::sync::chain::{self, LwdClient, DEFAULT_CHUNK_OUTPUTS};
+use crate::sync::enrich::enrich_memos;
 use crate::sync::{scan, Pool, Scanned};
 
 /// Transient transport failures to retry before giving up. A dropped stream is
@@ -117,6 +120,11 @@ async fn scan_range(
     start: u32,
     tip: u32,
 ) -> Result<RangeOutcome> {
+    let network = network_of(db)?;
+    // A cheap clone sharing the same gRPC channel, used to fetch full
+    // transactions for memo enrichment while the block stream owns `client`.
+    let mut fetch_client = client.clone();
+
     // Seed the stream with the stored hash of the block before `start`, so its
     // continuity check spans the seam with our chain as well as block-to-block.
     let seam = db.get_block_hash(start.saturating_sub(1))?;
@@ -132,11 +140,21 @@ async fn scan_range(
             }
             Err(e) => return Err(e).context("streaming blocks"),
         };
-        let scanned = scan(&batch, keys);
+        let mut scanned = scan(&batch, keys);
+        enrich_memos(&mut fetch_client, keys, &network, &mut scanned).await;
         apply(db, &batch, &scanned)?;
     }
 
     Ok(RangeOutcome::Done)
+}
+
+/// The network the tracked account is on, for transaction parsing (branch id)
+/// and Sapling ZIP-212 enforcement. Defaults to mainnet when no account is set.
+fn network_of(db: &Db) -> Result<Network> {
+    Ok(match db.get_account()?.map(|a| a.network).as_deref() {
+        Some("test") => Network::TestNetwork,
+        _ => Network::MainNetwork,
+    })
 }
 
 /// Apply one batch of blocks to the database, in dependency order.
@@ -158,6 +176,7 @@ fn apply(db: &Db, blocks: &[CompactBlock], scanned: &Scanned) -> Result<()> {
             rcm: &s.note.rcm().to_bytes(),
             nf: s.nf.as_ref().map(|n| n.as_slice()),
             is_change: false,
+            memo: s.memo.as_deref().map(|m| m.as_slice()),
             commitment_tree_position: s.position,
         })?;
     }
@@ -172,6 +191,7 @@ fn apply(db: &Db, blocks: &[CompactBlock], scanned: &Scanned) -> Result<()> {
             rseed: o.note.rseed().as_bytes(),
             nf: o.nf.as_ref().map(|n| n.as_slice()),
             is_change: false,
+            memo: o.memo.as_deref().map(|m| m.as_slice()),
             commitment_tree_position: o.position,
         })?;
     }

@@ -89,6 +89,8 @@ pub struct SaplingNoteInsert<'a> {
     pub nf: Option<&'a [u8]>,
     /// Whether this note is change (received in a transaction that also spent ours).
     pub is_change: bool,
+    /// Raw 512-byte ZIP-302 memo, if recovered by full-transaction enrichment.
+    pub memo: Option<&'a [u8]>,
     /// Leaf position in the Sapling commitment tree.
     pub commitment_tree_position: Option<u64>,
 }
@@ -112,6 +114,8 @@ pub struct OrchardNoteInsert<'a> {
     pub nf: Option<&'a [u8]>,
     /// Whether this note is change.
     pub is_change: bool,
+    /// Raw 512-byte ZIP-302 memo, if recovered by full-transaction enrichment.
+    pub memo: Option<&'a [u8]>,
     /// Leaf position in the Orchard commitment tree (not needed for the nullifier).
     pub commitment_tree_position: Option<u64>,
 }
@@ -321,8 +325,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO sapling_received_notes(
                 transaction_id, output_index, diversifier, value, rcm, nf,
-                is_change, commitment_tree_position)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+                is_change, memo, commitment_tree_position)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
              ON CONFLICT(transaction_id, output_index) DO NOTHING",
             params![
                 n.transaction_id,
@@ -332,6 +336,7 @@ impl Db {
                 n.rcm,
                 n.nf,
                 n.is_change as i64,
+                n.memo,
                 n.commitment_tree_position.map(|p| p as i64),
             ],
         )?;
@@ -343,8 +348,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO orchard_received_notes(
                 transaction_id, action_index, diversifier, value, rho, rseed, nf,
-                is_change, commitment_tree_position)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                is_change, memo, commitment_tree_position)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
              ON CONFLICT(transaction_id, action_index) DO NOTHING",
             params![
                 n.transaction_id,
@@ -355,10 +360,27 @@ impl Db {
                 n.rseed,
                 n.nf,
                 n.is_change as i64,
+                n.memo,
                 n.commitment_tree_position.map(|p| p as i64),
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Raw ZIP-302 memo bytes for every shielded note that has one recovered,
+    /// across both pools. Decode with [`crate::note::memo`].
+    pub fn memos(&self) -> rusqlite::Result<Vec<Vec<u8>>> {
+        let mut out = Vec::new();
+        for table in ["sapling_received_notes", "orchard_received_notes"] {
+            let mut stmt = self
+                .conn
+                .prepare(&format!("SELECT memo FROM {table} WHERE memo IS NOT NULL"))?;
+            let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+            for memo in rows {
+                out.push(memo?);
+            }
+        }
+        Ok(out)
     }
 
     /// Record that the Sapling note with nullifier `nf` was spent by transaction
@@ -383,33 +405,6 @@ impl Db {
         )
     }
 
-    /// Store an enriched memo for a Sapling note by (transaction, output index).
-    pub fn set_sapling_memo(
-        &self,
-        transaction_id: i64,
-        output_index: u32,
-        memo: &[u8],
-    ) -> rusqlite::Result<usize> {
-        self.conn.execute(
-            "UPDATE sapling_received_notes SET memo = ?1
-             WHERE transaction_id = ?2 AND output_index = ?3",
-            params![memo, transaction_id, output_index],
-        )
-    }
-
-    /// Store an enriched memo for an Orchard note by (transaction, action index).
-    pub fn set_orchard_memo(
-        &self,
-        transaction_id: i64,
-        action_index: u32,
-        memo: &[u8],
-    ) -> rusqlite::Result<usize> {
-        self.conn.execute(
-            "UPDATE orchard_received_notes SET memo = ?1
-             WHERE transaction_id = ?2 AND action_index = ?3",
-            params![memo, transaction_id, action_index],
-        )
-    }
 }
 
 // ─── Transparent outputs ─────────────────────────────────────────────────────
@@ -622,6 +617,7 @@ mod tests {
             rseed: &[2u8; 32],
             nf: Some(&[9u8; 32]),
             is_change: false,
+            memo: None,
             commitment_tree_position: Some(7),
         })
         .unwrap();
@@ -645,6 +641,7 @@ mod tests {
             rcm: &[2u8; 32],
             nf: Some(&[9u8; 32]),
             is_change: false,
+            memo: None,
             commitment_tree_position: Some(5),
         })
         .unwrap();
@@ -692,6 +689,7 @@ mod tests {
             rseed: &[2u8; 32],
             nf: Some(&[9u8; 32]),
             is_change: false,
+            memo: None,
             commitment_tree_position: Some(0),
         })
         .unwrap();
