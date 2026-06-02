@@ -16,8 +16,9 @@ use seer_sync::keys::ScanningKeys;
 use seer_sync::note::memo::{Memo, MemoBytes};
 use seer_sync::sync::chain::{connect_auto, tip_height};
 use seer_sync::sync::engine::sync_to_tip;
+use seer_sync::sync::enrich::enrich_memos;
 use zcash_keys::keys::UnifiedFullViewingKey;
-use zcash_protocol::consensus::MainNetwork;
+use zcash_protocol::consensus::{MainNetwork, Network};
 
 /// A funded mainnet UFVK (receives notes around height ~3,000,000).
 const UFVK: &str = "uview1hzzcqccht7226cqmwfxvesey863wzugkdckl4ecyrpy6pmzteum4x75p8gsqqeghfg0ngkhafvjkgzq6u3d2chf9nxlxqldtpfce80renlet8nw6zvkmkt7v2xqf203t63jufh7640kheemmq89u5gha6w6vvjs93gcae7tcswl9glfjwc80afw86y794cuq0rk8mqyylrguq3wcere2lwv4clhxdc76c79et846p6pv69qw40pxjpu8vywwkg440mp46ed97ytcvumj5lzvqf0n3fv7nfze22me7rh07rtzgr6grh3ra6rq9lgcsstvfh7c70nukklnz7a45eauxj70px6tjquklmh7ayryw205zzp7uuxemm4qd8awxc6vsc0l4dc77v5tg";
@@ -48,7 +49,7 @@ async fn probe_range() {
     let client = connect_auto().await.expect("connect");
     eprintln!("[probe] fetching [{from}..{to}]");
     let blocks = fetch_range(client, from, to).await.expect("fetch_range");
-    let scanned = scan(&blocks, &keys);
+    let mut scanned = scan(&blocks, &keys);
     let outputs: usize =
         blocks.iter().flat_map(|b| &b.vtx).map(|t| t.outputs.len() + t.actions.len()).sum();
     eprintln!(
@@ -60,6 +61,28 @@ async fn probe_range() {
     }
     if let Some(n) = scanned.orchard.first() {
         eprintln!("[probe] first orchard hit at height {}", n.height);
+    }
+
+    // Enrich the found notes with their memos (bounded window — no full sync).
+    let total = scanned.sapling.len() + scanned.orchard.len();
+    if total > 0 {
+        let mut client = connect_auto().await.expect("connect");
+        enrich_memos(&mut client, &keys, &Network::MainNetwork, &mut scanned).await;
+        let with_memo = scanned.sapling.iter().filter(|n| n.memo.is_some()).count()
+            + scanned.orchard.iter().filter(|n| n.memo.is_some()).count();
+        eprintln!("[probe] enriched {with_memo}/{total} notes with a memo");
+        let memos = scanned
+            .sapling
+            .iter()
+            .filter_map(|n| n.memo.as_deref())
+            .chain(scanned.orchard.iter().filter_map(|n| n.memo.as_deref()));
+        for raw in memos {
+            let Ok(bytes) = MemoBytes::from_bytes(raw) else { continue };
+            if let Ok(Memo::Text(text)) = Memo::try_from(&bytes) {
+                eprintln!("[probe] sample text memo: {:?}", &*text);
+                break;
+            }
+        }
     }
 }
 
