@@ -75,14 +75,22 @@ pub async fn connect(url: &str) -> Result<LwdClient> {
 /// Connect to a public mainnet lightwalletd server automatically.
 ///
 /// Tries each endpoint in [`DEFAULT_SERVERS`] in order and returns the first
-/// one that connects, so the caller never has to pick a server. Errors from
-/// servers that are down are collected and only surfaced if *every* endpoint
-/// fails. Pass an explicit URL to [`connect`] to bypass the pool.
+/// one that actually answers, so the caller never has to pick a server. Errors
+/// from servers that are down are collected and only surfaced if *every*
+/// endpoint fails. Pass an explicit URL to [`connect`] to bypass the pool.
 pub async fn connect_auto() -> Result<LwdClient> {
     let mut errors = Vec::new();
     for &url in DEFAULT_SERVERS {
         match connect(url).await {
-            Ok(client) => return Ok(client),
+            // A successful TLS connection is not proof the endpoint serves gRPC:
+            // a host can accept the handshake then answer requests with a plain
+            // HTTP 404. Probe with a cheap `GetLatestBlock` and only accept a
+            // server that actually responds, so a dead endpoint falls through to
+            // the next mirror instead of poisoning every later call.
+            Ok(mut client) => match tip_height(&mut client).await {
+                Ok(_) => return Ok(client),
+                Err(e) => errors.push(format!("  {url}: connected but not serving gRPC: {e:#}")),
+            },
             Err(e) => errors.push(format!("  {url}: {e:#}")),
         }
     }
