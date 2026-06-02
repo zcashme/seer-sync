@@ -3,3 +3,4 @@ Cargo.lock
 **/*.rs.bk
 /zcash-sync/
 /zcash_note_encryption/
+/zingolib/
