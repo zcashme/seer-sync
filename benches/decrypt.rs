@@ -9,7 +9,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingM
 use std::time::Duration;
 use seer_sync::sync::chain::{connect_auto, fetch_range, tip_height};
 use seer_sync::keys::ScanningKeys;
-use seer_sync::sync::sync;
+use seer_sync::sync::scan::scan;
 use zcash_keys::keys::UnifiedIncomingViewingKey;
 use zcash_protocol::consensus::MainNetwork;
 
@@ -65,7 +65,7 @@ fn bench(c: &mut Criterion) {
     g.throughput(Throughput::Elements(total_actions + total_outputs));
     g.bench_function("uivk", |b| {
         b.iter(|| {
-            black_box(sync(&blocks, &keys));
+            black_box(scan(&blocks, &keys));
         });
     });
     g.finish();

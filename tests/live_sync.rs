@@ -14,8 +14,8 @@
 use seer_sync::db::{Account, Db};
 use seer_sync::keys::ScanningKeys;
 use seer_sync::note::memo::{Memo, MemoBytes};
+use seer_sync::db::sync::sync_to_tip;
 use seer_sync::sync::chain::{connect_auto, tip_height};
-use seer_sync::sync::engine::sync_to_tip;
 use seer_sync::sync::enrich::enrich_memos;
 use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_protocol::consensus::{MainNetwork, Network};
@@ -39,7 +39,15 @@ fn funded_keys() -> (String, ScanningKeys) {
 #[tokio::test]
 async fn probe_range() {
     use seer_sync::sync::chain::fetch_range;
-    use seer_sync::sync::scan;
+    use seer_sync::sync::scan::{scan, Receive, Tx};
+
+    /// Receives only (skip spends) from a pool's event vec.
+    fn receives<N, A>(v: &[Tx<N, A>]) -> impl Iterator<Item = &Receive<N, A>> {
+        v.iter().filter_map(|t| match t {
+            Tx::Receive(r) => Some(r),
+            Tx::Spend(_) => None,
+        })
+    }
 
     let from: u32 = std::env::var("TEST_FROM").expect("set TEST_FROM").parse().unwrap();
     let window: u32 = std::env::var("TEST_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(2_000);
@@ -49,33 +57,35 @@ async fn probe_range() {
     let client = connect_auto().await.expect("connect");
     eprintln!("[probe] fetching [{from}..{to}]");
     let blocks = fetch_range(client, from, to).await.expect("fetch_range");
-    let mut scanned = scan(&blocks, &keys);
+    let mut txs = scan(&blocks, &keys);
     let outputs: usize =
         blocks.iter().flat_map(|b| &b.vtx).map(|t| t.outputs.len() + t.actions.len()).sum();
+    let sapling_recv = receives(&txs.sapling).count();
+    let orchard_recv = receives(&txs.orchard).count();
+    let spends = txs.sapling.iter().filter(|t| matches!(t, Tx::Spend(_))).count()
+        + txs.orchard.iter().filter(|t| matches!(t, Tx::Spend(_))).count();
     eprintln!(
-        "[probe] {} blocks, {outputs} shielded outputs -> {} sapling + {} orchard notes, {} spends",
-        blocks.len(), scanned.sapling.len(), scanned.orchard.len(), scanned.spends.len()
+        "[probe] {} blocks, {outputs} shielded outputs -> {sapling_recv} sapling + {orchard_recv} orchard receives, {spends} spends",
+        blocks.len(),
     );
-    if let Some(n) = scanned.sapling.first() {
-        eprintln!("[probe] first sapling hit at height {}", n.height);
+    if let Some(r) = receives(&txs.sapling).next() {
+        eprintln!("[probe] first sapling receive at height {}", r.height);
     }
-    if let Some(n) = scanned.orchard.first() {
-        eprintln!("[probe] first orchard hit at height {}", n.height);
+    if let Some(r) = receives(&txs.orchard).next() {
+        eprintln!("[probe] first orchard receive at height {}", r.height);
     }
 
     // Enrich the found notes with their memos (bounded window — no full sync).
-    let total = scanned.sapling.len() + scanned.orchard.len();
+    let total = sapling_recv + orchard_recv;
     if total > 0 {
         let mut client = connect_auto().await.expect("connect");
-        enrich_memos(&mut client, &keys, &Network::MainNetwork, &mut scanned).await;
-        let with_memo = scanned.sapling.iter().filter(|n| n.memo.is_some()).count()
-            + scanned.orchard.iter().filter(|n| n.memo.is_some()).count();
+        enrich_memos(&mut client, &keys, &Network::MainNetwork, &mut txs).await;
+        let with_memo = receives(&txs.sapling).filter(|r| r.memo.is_some()).count()
+            + receives(&txs.orchard).filter(|r| r.memo.is_some()).count();
         eprintln!("[probe] enriched {with_memo}/{total} notes with a memo");
-        let memos = scanned
-            .sapling
-            .iter()
-            .filter_map(|n| n.memo.as_deref())
-            .chain(scanned.orchard.iter().filter_map(|n| n.memo.as_deref()));
+        let memos = receives(&txs.sapling)
+            .filter_map(|r| r.memo.as_deref())
+            .chain(receives(&txs.orchard).filter_map(|r| r.memo.as_deref()));
         for raw in memos {
             let Ok(bytes) = MemoBytes::from_bytes(raw) else { continue };
             if let Ok(Memo::Text(text)) = Memo::try_from(&bytes) {

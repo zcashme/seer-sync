@@ -1,5 +1,10 @@
 mod schema;
 
+/// The reference sync consumer: drive the engine and persist its findings here.
+/// Needs the live-syncing layer, so it is gated on `lwd` as well as `db`.
+#[cfg(feature = "lwd")]
+pub mod sync;
+
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
 
