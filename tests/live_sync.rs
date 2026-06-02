@@ -123,7 +123,7 @@ async fn sync_window_into_db() {
     assert!(synced >= tip, "synced past the observed tip");
     let cursor = db.get_sync_state().unwrap();
     assert_eq!(cursor.height, synced, "cursor parked at the synced height");
-    assert!(db.get_block_hash(synced).unwrap().is_some(), "synced tip block persisted");
+    assert!(cursor.hash.is_some(), "cursor recorded the synced tip's seam hash");
 
     let bal = db.balance().unwrap();
     eprintln!(

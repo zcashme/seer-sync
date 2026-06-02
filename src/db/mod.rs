@@ -25,36 +25,14 @@ pub struct Account {
     pub birthday: u32,
 }
 
-/// Saved linear sync position.
+/// Saved linear sync position: the scanned watermark and its block hash (the
+/// reorg seam checked on resume). The only chain-position state an observer keeps.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncState {
     /// Last fully-applied block height.
     pub height: u32,
     /// Block hash at `height`, for reorg detection on resume.
     pub hash: Option<[u8; 32]>,
-    /// Running Sapling commitment-tree size (next leaf position).
-    pub sapling_pos: u64,
-    /// Running Orchard commitment-tree size (next leaf position).
-    pub orchard_pos: u64,
-}
-
-/// A block header plus the commitment-tree sizes stamped on it.
-#[derive(Debug, Clone)]
-pub struct BlockMeta {
-    /// Block height.
-    pub height: u32,
-    /// Block hash (32 bytes, display byte order as delivered by lightwalletd).
-    pub hash: [u8; 32],
-    /// Block timestamp (Unix seconds).
-    pub time: u32,
-    /// Sapling commitment-tree size as of the end of this block.
-    pub sapling_tree_size: Option<u64>,
-    /// Orchard commitment-tree size as of the end of this block.
-    pub orchard_tree_size: Option<u64>,
-    /// Number of Sapling outputs in this block.
-    pub sapling_output_count: Option<u32>,
-    /// Number of Orchard actions in this block.
-    pub orchard_action_count: Option<u32>,
 }
 
 /// Balance broken down by pool, in zatoshis.
@@ -216,18 +194,14 @@ impl Db {
     /// Persist the sync cursor.
     pub fn set_sync_state(&self, state: &SyncState) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO sync_state(id, height, hash, sapling_pos, orchard_pos)
-             VALUES (1, ?1, ?2, ?3, ?4)
+            "INSERT INTO sync_state(id, height, hash)
+             VALUES (1, ?1, ?2)
              ON CONFLICT(id) DO UPDATE SET
                 height = excluded.height,
-                hash = excluded.hash,
-                sapling_pos = excluded.sapling_pos,
-                orchard_pos = excluded.orchard_pos",
+                hash = excluded.hash",
             params![
                 state.height,
                 state.hash.as_ref().map(|h| h.as_slice()),
-                state.sapling_pos as i64,
-                state.orchard_pos as i64,
             ],
         )?;
         Ok(())
@@ -237,15 +211,13 @@ impl Db {
     pub fn get_sync_state(&self) -> rusqlite::Result<SyncState> {
         self.conn
             .query_row(
-                "SELECT height, hash, sapling_pos, orchard_pos FROM sync_state WHERE id = 1",
+                "SELECT height, hash FROM sync_state WHERE id = 1",
                 [],
                 |row| {
                     let hash: Option<Vec<u8>> = row.get(1)?;
                     Ok(SyncState {
                         height: row.get(0)?,
                         hash: hash.and_then(|v| v.try_into().ok()),
-                        sapling_pos: row.get::<_, i64>(2)? as u64,
-                        orchard_pos: row.get::<_, i64>(3)? as u64,
                     })
                 },
             )
@@ -256,49 +228,13 @@ impl Db {
 
 // ─── Blocks ──────────────────────────────────────────────────────────────────
 
-impl Db {
-    /// Persist a block header. Ignores duplicates.
-    pub fn insert_block(&self, b: &BlockMeta) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "INSERT INTO blocks(
-                height, hash, time, sapling_tree_size, orchard_tree_size,
-                sapling_output_count, orchard_action_count)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)
-             ON CONFLICT(height) DO NOTHING",
-            params![
-                b.height,
-                b.hash.as_slice(),
-                b.time,
-                b.sapling_tree_size.map(|v| v as i64),
-                b.orchard_tree_size.map(|v| v as i64),
-                b.sapling_output_count,
-                b.orchard_action_count,
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Return the stored block hash at `height`, if any.
-    pub fn get_block_hash(&self, height: u32) -> rusqlite::Result<Option<[u8; 32]>> {
-        let blob: Option<Vec<u8>> = self
-            .conn
-            .query_row(
-                "SELECT hash FROM blocks WHERE height = ?1",
-                params![height],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(blob.and_then(|v| v.try_into().ok()))
-    }
-}
-
 // ─── Transactions ────────────────────────────────────────────────────────────
 
 impl Db {
     /// Insert or update a transaction, returning its row id (`id_tx`).
     ///
-    /// A mined transaction sets both `block` and `mined_height` to `height`; an
-    /// unmined (mempool) transaction passes `height = None`.
+    /// A mined transaction sets `mined_height` to `height`; an unmined (mempool)
+    /// transaction passes `height = None`.
     pub fn upsert_transaction(
         &self,
         txid: &[u8],
@@ -306,10 +242,9 @@ impl Db {
         tx_index: Option<u32>,
     ) -> rusqlite::Result<i64> {
         self.conn.execute(
-            "INSERT INTO transactions(txid, block, mined_height, tx_index)
-             VALUES (?1, ?2, ?2, ?3)
+            "INSERT INTO transactions(txid, mined_height, tx_index)
+             VALUES (?1, ?2, ?3)
              ON CONFLICT(txid) DO UPDATE SET
-                block = excluded.block,
                 mined_height = excluded.mined_height,
                 tx_index = excluded.tx_index",
             params![txid, height, tx_index],
@@ -410,6 +345,24 @@ impl Db {
         )
     }
 
+    /// Whether a received Sapling note with this nullifier is in the store — i.e.
+    /// whether an observed spend of `nf` actually touches the wallet.
+    pub fn owns_sapling_nf(&self, nf: &[u8]) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sapling_received_notes WHERE nf = ?1)",
+            params![nf],
+            |row| row.get(0),
+        )
+    }
+
+    /// Whether a received Orchard note with this nullifier is in the store.
+    pub fn owns_orchard_nf(&self, nf: &[u8]) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM orchard_received_notes WHERE nf = ?1)",
+            params![nf],
+            |row| row.get(0),
+        )
+    }
 }
 
 // ─── Transparent outputs ─────────────────────────────────────────────────────
@@ -516,7 +469,8 @@ impl Db {
     /// Deleting the mined transactions above `height` cascades to the notes and
     /// outputs they created and to any spend-junction rows that reference them,
     /// so spends recorded in rolled-back blocks are automatically undone. The
-    /// cursor is reset to the surviving block at `height`.
+    /// cursor is reset to `height`; its seam hash is cleared (we no longer store
+    /// per-block hashes), so the next resume re-verifies forward from there.
     pub fn rewind_to_height(&self, height: u32) -> rusqlite::Result<()> {
         // `unchecked_transaction` (vs `transaction`) takes `&self`, so a consumer
         // can drive rewinds through a shared `&Db` alongside its other (`&self`)
@@ -527,20 +481,12 @@ impl Db {
             "DELETE FROM transactions WHERE mined_height > ?1",
             params![height],
         )?;
-        tx.execute("DELETE FROM blocks WHERE height > ?1", params![height])?;
         tx.execute(
-            "INSERT INTO sync_state(id, height, hash, sapling_pos, orchard_pos)
-             VALUES (
-                1,
-                ?1,
-                (SELECT hash FROM blocks WHERE height = ?1),
-                COALESCE((SELECT sapling_tree_size FROM blocks WHERE height = ?1), 0),
-                COALESCE((SELECT orchard_tree_size FROM blocks WHERE height = ?1), 0))
+            "INSERT INTO sync_state(id, height, hash)
+             VALUES (1, ?1, NULL)
              ON CONFLICT(id) DO UPDATE SET
                 height = excluded.height,
-                hash = excluded.hash,
-                sapling_pos = excluded.sapling_pos,
-                orchard_pos = excluded.orchard_pos",
+                hash = excluded.hash",
             params![height],
         )?;
         tx.commit()
@@ -554,16 +500,6 @@ mod tests {
     use super::*;
 
     fn mined_tx(db: &Db, txid: &[u8; 32], height: u32) -> i64 {
-        db.insert_block(&BlockMeta {
-            height,
-            hash: [height as u8; 32],
-            time: 1_000 + height,
-            sapling_tree_size: Some(u64::from(height) * 2),
-            orchard_tree_size: Some(u64::from(height) * 3),
-            sapling_output_count: Some(0),
-            orchard_action_count: Some(0),
-        })
-        .unwrap();
         db.upsert_transaction(txid, Some(height), Some(0)).unwrap()
     }
 
@@ -596,15 +532,11 @@ mod tests {
         let state = SyncState {
             height: 42,
             hash: Some([7u8; 32]),
-            sapling_pos: 100,
-            orchard_pos: 200,
         };
         db.set_sync_state(&state).unwrap();
         let got = db.get_sync_state().unwrap();
         assert_eq!(got.height, 42);
         assert_eq!(got.hash, Some([7u8; 32]));
-        assert_eq!(got.sapling_pos, 100);
-        assert_eq!(got.orchard_pos, 200);
     }
 
     #[test]

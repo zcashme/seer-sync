@@ -65,39 +65,25 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 birthday INTEGER NOT NULL DEFAULT 0
             );
 
-            -- Linear sync cursor (replaces upstream's scan_queue). Exactly one
-            -- row. `sapling_pos` / `orchard_pos` are the running commitment-tree
-            -- sizes used to assign leaf positions to the next block's notes.
+            -- Linear sync cursor. Exactly one row: the scanned watermark
+            -- (`height`) and its block `hash` (the reorg seam checked on resume).
+            -- A view-key observer needs nothing more to know where it is.
             CREATE TABLE IF NOT EXISTS sync_state (
                 id          INTEGER PRIMARY KEY CHECK (id = 1),
                 height      INTEGER NOT NULL DEFAULT 0,
-                hash        BLOB,
-                sapling_pos INTEGER NOT NULL DEFAULT 0,
-                orchard_pos INTEGER NOT NULL DEFAULT 0
+                hash        BLOB
             );
 
-            -- Block headers, kept for reorg detection and per-block tree sizes.
-            -- No commitment-tree frontier blob: that is witness data we never need.
-            CREATE TABLE IF NOT EXISTS blocks (
-                height               INTEGER PRIMARY KEY,
-                hash                 BLOB    NOT NULL,
-                time                 INTEGER NOT NULL,
-                sapling_tree_size    INTEGER,
-                orchard_tree_size    INTEGER,
-                sapling_output_count INTEGER,
-                orchard_action_count INTEGER
-            );
-
-            -- The hub. A wallet-touching transaction. `mined_height IS NULL`
-            -- means unmined (mempool); otherwise it equals `block`.
+            -- The hub. A wallet-touching transaction, keyed by its mined height.
+            -- `mined_height IS NULL` means unmined (mempool). There is no `blocks`
+            -- table to point at: an observer tracks notes by height, not a block
+            -- ledger, so the cursor (sync_state) is the only chain-position state.
             CREATE TABLE IF NOT EXISTS transactions (
                 id_tx         INTEGER PRIMARY KEY,
                 txid          BLOB    NOT NULL UNIQUE,
-                block         INTEGER REFERENCES blocks(height),
                 mined_height  INTEGER,
                 tx_index      INTEGER,
-                expiry_height INTEGER,
-                CONSTRAINT height_consistency CHECK (block IS NULL OR mined_height = block)
+                expiry_height INTEGER
             );
 
             -- ── Sapling ──────────────────────────────────────────────────────

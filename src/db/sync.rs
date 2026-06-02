@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use zcash_protocol::consensus::Network;
 
-use crate::db::{BlockMeta, Db, OrchardNoteInsert, SaplingNoteInsert, SyncState};
+use crate::db::{Db, OrchardNoteInsert, SaplingNoteInsert, SyncState};
 use crate::keys::ScanningKeys;
 use crate::sync::chain::LwdClient;
 use crate::sync::scan::{Transactions, Tx};
@@ -55,21 +55,11 @@ pub async fn sync_to_tip(db: &Db, client: LwdClient, keys: &ScanningKeys) -> Res
 /// Apply one chunk's findings, then advance the cursor — the consumer's half of
 /// the boundary contract.
 fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], txs: &Transactions) -> Result<()> {
-    // The watermark block header. The compact-block tree sizes / timestamp don't
-    // cross the sink (height is the spine, hash is reorg seam material), so they
-    // are left unset — note positions ride on the findings themselves.
-    db.insert_block(&BlockMeta {
-        height: u32::from(height),
-        hash,
-        time: 0,
-        sapling_tree_size: None,
-        orchard_tree_size: None,
-        sapling_output_count: None,
-        orchard_action_count: None,
-    })?;
-
-    // Receives first (a note must exist before a spend can link to it), then
-    // spends, per pool.
+    // No block row to write: an observer tracks notes by height, and the cursor
+    // (set at the end) is the only chain-position state. Receives first (a note
+    // must exist before a spend can link to it), then spends — and a spend is
+    // recorded only when its nullifier matches a note we already own, so the
+    // store fills with the wallet's transactions, not every spend on chain.
     for tx in &txs.orchard {
         match tx {
             Tx::Receive(r) => {
@@ -88,8 +78,10 @@ fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], txs: &Transactions) -> Re
                 })?;
             }
             Tx::Spend(s) => {
-                let id = db.upsert_transaction(&s.txid, Some(u32::from(s.height)), Some(s.tx_index))?;
-                db.mark_orchard_spent(&s.nf, id)?;
+                if db.owns_orchard_nf(&s.nf)? {
+                    let id = db.upsert_transaction(&s.txid, Some(u32::from(s.height)), Some(s.tx_index))?;
+                    db.mark_orchard_spent(&s.nf, id)?;
+                }
             }
         }
     }
@@ -110,19 +102,16 @@ fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], txs: &Transactions) -> Re
                 })?;
             }
             Tx::Spend(s) => {
-                let id = db.upsert_transaction(&s.txid, Some(u32::from(s.height)), Some(s.tx_index))?;
-                db.mark_sapling_spent(&s.nf, id)?;
+                if db.owns_sapling_nf(&s.nf)? {
+                    let id = db.upsert_transaction(&s.txid, Some(u32::from(s.height)), Some(s.tx_index))?;
+                    db.mark_sapling_spent(&s.nf, id)?;
+                }
             }
         }
     }
 
     // Advance the cursor to this chunk's tip, recording the seam hash.
-    db.set_sync_state(&SyncState {
-        height: u32::from(height),
-        hash: Some(hash),
-        sapling_pos: 0,
-        orchard_pos: 0,
-    })?;
+    db.set_sync_state(&SyncState { height: u32::from(height), hash: Some(hash) })?;
     Ok(())
 }
 
