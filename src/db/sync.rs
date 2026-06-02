@@ -37,13 +37,13 @@ pub async fn sync_to_tip(db: &Db, client: LwdClient, keys: &ScanningKeys) -> Res
         || {
             let st = db.get_sync_state().unwrap_or_default();
             if st.height == 0 {
-                (birthday, None)
+                (BlockHeight::from_u32(birthday), None)
             } else {
-                (st.height + 1, st.hash)
+                (BlockHeight::from_u32(st.height + 1), st.hash)
             }
         },
         // rewind: drop everything above the fork; resets the cursor too.
-        |to| db.rewind_to_height(to).context("rewinding after reorg"),
+        |to| db.rewind_to_height(u32::from(to)).context("rewinding after reorg"),
         // sink: apply one chunk and advance the cursor.
         |height, hash, txs| apply(db, height, hash, txs),
     )
@@ -59,7 +59,7 @@ fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], txs: &Transactions) -> Re
     // cross the sink (height is the spine, hash is reorg seam material), so they
     // are left unset — note positions ride on the findings themselves.
     db.insert_block(&BlockMeta {
-        height,
+        height: u32::from(height),
         hash,
         time: 0,
         sapling_tree_size: None,
@@ -73,7 +73,7 @@ fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], txs: &Transactions) -> Re
     for tx in &txs.orchard {
         match tx {
             Tx::Receive(r) => {
-                let id = db.upsert_transaction(&r.txid, Some(r.height), Some(r.tx_index))?;
+                let id = db.upsert_transaction(&r.txid, Some(u32::from(r.height)), Some(r.tx_index))?;
                 db.insert_orchard_note(&OrchardNoteInsert {
                     transaction_id: id,
                     action_index: r.output_index,
@@ -88,7 +88,7 @@ fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], txs: &Transactions) -> Re
                 })?;
             }
             Tx::Spend(s) => {
-                let id = db.upsert_transaction(&s.txid, Some(s.height), Some(s.tx_index))?;
+                let id = db.upsert_transaction(&s.txid, Some(u32::from(s.height)), Some(s.tx_index))?;
                 db.mark_orchard_spent(&s.nf, id)?;
             }
         }
@@ -96,7 +96,7 @@ fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], txs: &Transactions) -> Re
     for tx in &txs.sapling {
         match tx {
             Tx::Receive(r) => {
-                let id = db.upsert_transaction(&r.txid, Some(r.height), Some(r.tx_index))?;
+                let id = db.upsert_transaction(&r.txid, Some(u32::from(r.height)), Some(r.tx_index))?;
                 db.insert_sapling_note(&SaplingNoteInsert {
                     transaction_id: id,
                     output_index: r.output_index,
@@ -110,7 +110,7 @@ fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], txs: &Transactions) -> Re
                 })?;
             }
             Tx::Spend(s) => {
-                let id = db.upsert_transaction(&s.txid, Some(s.height), Some(s.tx_index))?;
+                let id = db.upsert_transaction(&s.txid, Some(u32::from(s.height)), Some(s.tx_index))?;
                 db.mark_sapling_spent(&s.nf, id)?;
             }
         }
@@ -118,7 +118,7 @@ fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], txs: &Transactions) -> Re
 
     // Advance the cursor to this chunk's tip, recording the seam hash.
     db.set_sync_state(&SyncState {
-        height,
+        height: u32::from(height),
         hash: Some(hash),
         sapling_pos: 0,
         orchard_pos: 0,

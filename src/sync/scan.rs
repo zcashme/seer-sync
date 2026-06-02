@@ -18,13 +18,12 @@ use anyhow::{Context, Result};
 use orchard::keys::PreparedIncomingViewingKey as OrchardPreparedIvk;
 use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 use zcash_primitives::transaction::Transaction;
-use zcash_protocol::consensus::{BlockHeight as ZBlockHeight, BranchId, Network};
+use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 
 use crate::keys::ScanningKeys;
 use crate::note::decrypt;
 use crate::proto::{CompactBlock, CompactTx};
 use crate::sync::chain::{self, LwdClient};
-use crate::BlockHeight;
 
 /// The 512-byte ZIP-302 memo a receive carries once its full ciphertext is decrypted.
 pub type RawMemo = Box<[u8; 512]>;
@@ -176,7 +175,7 @@ async fn complete_memos(
         let raw = chain::fetch_raw_transaction(client, &txid)
             .await
             .context("fetching full transaction for memo")?;
-        let height = ZBlockHeight::from_u32(raw.height as u32);
+        let height = BlockHeight::from_u32(raw.height as u32);
         let tx = Transaction::read(&raw.data[..], BranchId::for_height(network, height))
             .context("parsing full transaction")?;
 
@@ -184,7 +183,7 @@ async fn complete_memos(
             let outputs = bundle.shielded_outputs();
             for r in receives_mut(&mut txs.sapling).filter(|r| r.txid == txid && r.memo.is_none()) {
                 if let Some(output) = outputs.get(r.output_index as usize) {
-                    let zip212 = zip212_enforcement(network, ZBlockHeight::from_u32(r.height));
+                    let zip212 = zip212_enforcement(network, r.height);
                     if let Some((.., memo)) = decrypt::try_decrypt_sapling(output, ivk, zip212) {
                         r.memo = Some(memo);
                     }
@@ -260,7 +259,7 @@ fn scan_compact_serial(blocks: &[CompactBlock], keys: &ScanningKeys) -> Transact
     let mut out = Transactions::default();
 
     for block in blocks {
-        let height = block.height as BlockHeight;
+        let height = BlockHeight::from_u32(block.height as u32);
 
         if let Some(ivk) = &sapling_ivk {
             // Leaf position of this block's first Sapling output: tree size after

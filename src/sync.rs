@@ -53,6 +53,7 @@ where
 {
     use crate::sync::chain::{self, DEFAULT_CHUNK_OUTPUTS};
     use crate::sync::scan::scan;
+    use crate::BlockHeight;
     use anyhow::Context;
     use futures::StreamExt;
 
@@ -60,7 +61,7 @@ where
     // scan's phase-2 full-transaction fetches, while the block stream owns its
     // own client.
     let mut fetch_client = client.clone();
-    let tip = chain::tip_height(&mut fetch_client).await.context("tip height")?;
+    let tip = BlockHeight::from_u32(chain::tip_height(&mut fetch_client).await.context("tip height")?);
 
     let mut rewind_by: u32 = 1;
     let mut transport_attempts: usize = 0;
@@ -72,7 +73,8 @@ where
         if start > tip {
             return Ok(());
         }
-        let mut stream = chain::blocks(client.clone(), start, tip, DEFAULT_CHUNK_OUTPUTS, seam);
+        let mut stream =
+            chain::blocks(client.clone(), u32::from(start), u32::from(tip), DEFAULT_CHUNK_OUTPUTS, seam);
 
         // Inner loop: consume chunks until the stream ends, a reorg, or a fault.
         loop {
@@ -83,7 +85,7 @@ where
             match item {
                 Ok(batch) => {
                     let Some(last) = batch.last() else { continue };
-                    let height = last.height as crate::BlockHeight;
+                    let height = BlockHeight::from_u32(last.height as u32);
                     let hash: [u8; 32] = last.hash[..].try_into().unwrap_or([0u8; 32]);
 
                     let txs = scan(&mut fetch_client, &batch, keys, network)
@@ -99,7 +101,7 @@ where
                 // re-resume; double the step until the seam reconnects.
                 Err(e) if e.downcast_ref::<chain::Reorg>().is_some() => {
                     let chain::Reorg(at) = e.downcast::<chain::Reorg>().expect("downcast checked");
-                    rewind(at.saturating_sub(rewind_by))?;
+                    rewind(BlockHeight::from_u32(at.saturating_sub(rewind_by)))?;
                     rewind_by = rewind_by.saturating_mul(2);
                     break;
                 }

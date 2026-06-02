@@ -3,10 +3,11 @@
 //
 #![warn(missing_docs)]
 
-/// A block height — the chain coordinate the whole sync module speaks in, and
-/// the unit of the sync cursor (the *scanned* watermark). A first-class alias so
-/// signatures read in chain terms rather than bare `u32`.
-pub type BlockHeight = u32;
+/// A block height — the chain coordinate the sync layer speaks in, and the unit
+/// of the sync cursor (the *scanned* watermark). Re-exported from
+/// `zcash_protocol`: the canonical newtype, type-distinct from counts/indices
+/// and the exact type librustzcash's protocol functions take.
+pub use zcash_protocol::consensus::BlockHeight;
 
 pub mod keys;
 pub mod note;
