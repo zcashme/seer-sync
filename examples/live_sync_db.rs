@@ -1,0 +1,96 @@
+//! Live mainnet sync into a SQLite store.
+//!
+//! Run with:
+//!     cargo run --release --features db --example live_sync_db
+//!
+//! Where `live_sync.rs` drives the bare `run()` engine and fakes the scan cursor
+//! in memory, this persists into a `seer_sync::db::Db`. The whole sync collapses
+//! to a single call — `db::sync::sync_to_tip` — because the *store* owns the
+//! stateful parts: the cursor (its `sync_state` row), the reorg rewinds, and the
+//! note writes. The caller declares a store and a key; there is no cursor and no
+//! closures to wire.
+//!
+//! Trade-off: `sync_to_tip` runs the entire loop internally, so there is no
+//! per-chunk hook to print a heartbeat from — the payoff lands *after*, when the
+//! store is queryable. (For a live per-chunk heartbeat, drive `run()` yourself
+//! as `live_sync.rs` does.)
+
+use std::io::Write;
+
+use anyhow::{anyhow, Result};
+use seer_sync::db::sync::sync_to_tip;
+use seer_sync::db::{Account, Db};
+use seer_sync::sync::chain;
+use seer_sync::{keys, Network};
+use zcash_protocol::value::Zatoshis;
+
+/// A unified full viewing key (`uview1…`). Swap in your own.
+const UFVK: &str = "uview1hzzcqccht7226cqmwfxvesey863wzugkdckl4ecyrpy6pmzteum4x75p8gsqqeghfg0ngkhafvjkgzq6u3d2chf9nxlxqldtpfce80renlet8nw6zvkmkt7v2xqf203t63jufh7640kheemmq89u5gha6w6vvjs93gcae7tcswl9glfjwc80afw86y794cuq0rk8mqyylrguq3wcere2lwv4clhxdc76c79et846p6pv69qw40pxjpu8vywwkg440mp46ed97ytcvumj5lzvqf0n3fv7nfze22me7rh07rtzgr6grh3ra6rq9lgcsstvfh7c70nukklnz7a45eauxj70px6tjquklmh7ayryw205zzp7uuxemm4qd8awxc6vsc0l4dc77v5tg";
+
+/// Where to start scanning. Stored on the account as its birthday.
+const BIRTHDAY: u32 = 3_000_000;
+
+/// Render a range-checked `Zatoshis` as fractional ZEC. 1 ZEC = 100_000_000 zatoshi.
+fn zec(amount: Zatoshis) -> f64 {
+    amount.into_u64() as f64 / 1e8
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let network = Network::MainNetwork;
+
+    // The store owns everything stateful. In-memory here so the example is
+    // self-contained; swap `Db::open("wallet.db")` to keep it across runs.
+    let db = Db::open_in_memory()?;
+    db.set_account(&Account {
+        encoded: UFVK.into(),
+        key_type: "ufvk".into(),
+        network: "main".into(),
+        birthday: BIRTHDAY,
+    })?;
+
+    let keys = keys::from_ufvk_str(UFVK, &network).map_err(|e| anyhow!(e))?;
+    // connect_auto() health-checks liveness only and tends to land on
+    // zec.rocks, whose block streaming is ~9× slower than na.zec.rocks. Pin the
+    // fast one explicitly.
+    let mut client = chain::connect("https://na.zec.rocks:443").await?;
+    let tip = chain::tip_height(&mut client).await?;
+
+    println!("┌─ seer-sync · view-key wallet sync ────────────────");
+    println!("│  network    mainnet");
+    println!("│  birthday   {BIRTHDAY}");
+    println!("│  tip        {tip}");
+    println!("│  store      in-memory SQLite");
+    println!("├───────────────────────────────────────────────────");
+
+    // The store holds the cursor, so this is the whole sync. It reads the
+    // watermark, streams + scans to tip, persists notes/spends, and advances.
+    // The progress closure ticks once per chunk with the height just applied.
+    let span = tip.saturating_sub(BIRTHDAY).max(1) as f64;
+    let final_height = sync_to_tip(&db, client, &keys, |h| {
+        let done = u32::from(h).saturating_sub(BIRTHDAY) as f64;
+        let pct = (done / span * 100.0).min(100.0);
+        print!("\r│  scanning … {pct:>5.1}%  (height {})        ", u32::from(h));
+        std::io::stdout().flush().ok();
+    })
+    .await?;
+    println!(); // end the in-place progress line
+
+    // Now the store is queryable — this is what persistence buys you.
+    let bal = db.balance()?;
+    let memos = db.memos()?.len();
+
+    println!("├───────────────────────────────────────────────────");
+    println!("│  synced to height {final_height}");
+    println!("│");
+    println!("│  balance");
+    println!("│    orchard      {:>16.8} ZEC", zec(bal.orchard));
+    println!("│    sapling      {:>16.8} ZEC", zec(bal.sapling));
+    println!("│    transparent  {:>16.8} ZEC", zec(bal.transparent));
+    println!("│    ───────────────────────────────");
+    println!("│    total        {:>16.8} ZEC", zec(bal.total()));
+    println!("│  {memos} memo(s) recovered");
+    println!("└───────────────────────────────────────────────────");
+
+    Ok(())
+}

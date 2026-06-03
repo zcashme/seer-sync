@@ -4,6 +4,7 @@ pub mod sync;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
+use zcash_protocol::value::Zatoshis;
 
 pub use schema::init;
 
@@ -21,16 +22,31 @@ pub struct SyncState {
     pub hash: Option<[u8; 32]>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolBalance {
-    pub orchard_zat: u64,
-    pub sapling_zat: u64,
-    pub transparent_zat: u64,
+    pub orchard: Zatoshis,
+    pub sapling: Zatoshis,
+    pub transparent: Zatoshis,
+}
+
+// `Zatoshis` is range-checked and so has no `Default`; an empty balance is zero
+// in every pool.
+impl Default for PoolBalance {
+    fn default() -> Self {
+        PoolBalance {
+            orchard: Zatoshis::ZERO,
+            sapling: Zatoshis::ZERO,
+            transparent: Zatoshis::ZERO,
+        }
+    }
 }
 
 impl PoolBalance {
-    pub fn total_zat(&self) -> u64 {
-        self.orchard_zat + self.sapling_zat + self.transparent_zat
+    pub fn total(&self) -> Zatoshis {
+        // `Zatoshis + Zatoshis` is checked against MAX_MONEY and yields an
+        // `Option`; three sub-cap pool balances can never overflow the cap.
+        (self.orchard + self.sapling + self.transparent)
+            .expect("summed pool balances exceed MAX_MONEY")
     }
 }
 
@@ -330,21 +346,21 @@ impl Db {
 
 impl Db {
     pub fn balance(&self) -> rusqlite::Result<PoolBalance> {
-        let sapling_zat = self.unspent_sum(
+        let sapling = self.unspent_sum(
             "SELECT COALESCE(SUM(n.value), 0) FROM sapling_received_notes n
              WHERE NOT EXISTS (
                 SELECT 1 FROM sapling_received_note_spends s
                 JOIN transactions t ON t.id_tx = s.transaction_id
                 WHERE s.sapling_received_note_id = n.id AND t.mined_height IS NOT NULL)",
         )?;
-        let orchard_zat = self.unspent_sum(
+        let orchard = self.unspent_sum(
             "SELECT COALESCE(SUM(n.value), 0) FROM orchard_received_notes n
              WHERE NOT EXISTS (
                 SELECT 1 FROM orchard_received_note_spends s
                 JOIN transactions t ON t.id_tx = s.transaction_id
                 WHERE s.orchard_received_note_id = n.id AND t.mined_height IS NOT NULL)",
         )?;
-        let transparent_zat = self.unspent_sum(
+        let transparent = self.unspent_sum(
             "SELECT COALESCE(SUM(o.value_zat), 0) FROM transparent_received_outputs o
              WHERE NOT EXISTS (
                 SELECT 1 FROM transparent_received_output_spends s
@@ -352,15 +368,17 @@ impl Db {
                 WHERE s.transparent_received_output_id = o.id AND t.mined_height IS NOT NULL)",
         )?;
         Ok(PoolBalance {
-            orchard_zat,
-            sapling_zat,
-            transparent_zat,
+            orchard,
+            sapling,
+            transparent,
         })
     }
 
-    fn unspent_sum(&self, sql: &str) -> rusqlite::Result<u64> {
+    /// Sums a pool's unspent values into a `Zatoshis` — the conversion boundary
+    /// where raw SQL integers become a range-checked amount.
+    fn unspent_sum(&self, sql: &str) -> rusqlite::Result<Zatoshis> {
         let v: i64 = self.conn.query_row(sql, [], |row| row.get(0))?;
-        Ok(v as u64)
+        Ok(Zatoshis::from_u64(v as u64).expect("pool balance exceeds MAX_MONEY"))
     }
 }
 
@@ -462,11 +480,14 @@ mod tests {
             commitment_tree_position: Some(7),
         })
         .unwrap();
-        assert_eq!(db.balance().unwrap().orchard_zat, 5_000_000);
+        assert_eq!(
+            db.balance().unwrap().orchard,
+            Zatoshis::const_from_u64(5_000_000)
+        );
 
         let spend_tx = mined_tx(&db, &[2u8; 32], 101);
         assert_eq!(db.mark_orchard_spent(&[9u8; 32], spend_tx).unwrap(), 1);
-        assert_eq!(db.balance().unwrap().orchard_zat, 0);
+        assert_eq!(db.balance().unwrap().orchard, Zatoshis::ZERO);
     }
 
     #[test]
@@ -488,7 +509,10 @@ mod tests {
 
         let mempool_tx = db.upsert_transaction(&[3u8; 32], None, None).unwrap();
         assert_eq!(db.mark_sapling_spent(&[9u8; 32], mempool_tx).unwrap(), 1);
-        assert_eq!(db.balance().unwrap().sapling_zat, 3_000_000);
+        assert_eq!(
+            db.balance().unwrap().sapling,
+            Zatoshis::const_from_u64(3_000_000)
+        );
     }
 
     #[test]
@@ -504,14 +528,17 @@ mod tests {
             max_observed_unspent_height: Some(200),
         })
         .unwrap();
-        assert_eq!(db.balance().unwrap().transparent_zat, 1_000_000);
+        assert_eq!(
+            db.balance().unwrap().transparent,
+            Zatoshis::const_from_u64(1_000_000)
+        );
 
         let spend_tx = mined_tx(&db, &[2u8; 32], 201);
         assert_eq!(
             db.mark_transparent_spent(&[1u8; 32], 0, spend_tx).unwrap(),
             1
         );
-        assert_eq!(db.balance().unwrap().transparent_zat, 0);
+        assert_eq!(db.balance().unwrap().transparent, Zatoshis::ZERO);
     }
 
     #[test]
@@ -533,13 +560,16 @@ mod tests {
         .unwrap();
         let spend_tx = mined_tx(&db, &[2u8; 32], 105);
         db.mark_orchard_spent(&[9u8; 32], spend_tx).unwrap();
-        assert_eq!(db.balance().unwrap().orchard_zat, 0);
+        assert_eq!(db.balance().unwrap().orchard, Zatoshis::ZERO);
 
         db.rewind_to_height(104).unwrap();
-        assert_eq!(db.balance().unwrap().orchard_zat, 9_000_000);
+        assert_eq!(
+            db.balance().unwrap().orchard,
+            Zatoshis::const_from_u64(9_000_000)
+        );
         assert_eq!(db.get_sync_state().unwrap().height, 104);
 
         db.rewind_to_height(99).unwrap();
-        assert_eq!(db.balance().unwrap().orchard_zat, 0);
+        assert_eq!(db.balance().unwrap().orchard, Zatoshis::ZERO);
     }
 }
