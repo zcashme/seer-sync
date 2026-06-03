@@ -1,19 +1,19 @@
 //! SQLite schema for seer-sync (feature = "db").
 //!
 //! One database tracks exactly one viewing key — this is a *watch-only* store:
-//! observe notes, never spend them. The schema is a stripped descendant of
-//! `zcash_client_sqlite`, with the spend-only machinery removed: no witness /
-//! shardtree tables (we never build a Merkle path), no `scan_queue` (we
-//! tip-follow linearly), no `nullifier_map` / `tx_locator_map` (linear scan
-//! always sees a note before its spend), and no `sent_notes` (we never author
+//! observe notes, never spend them. The schema is a watch-only subset of the
+//! `zcash_client_sqlite` model, carrying none of the spend-only machinery: no
+//! witness / shardtree tables (it never builds a Merkle path), no `scan_queue`
+//! (tip-follow is linear), no `nullifier_map` / `tx_locator_map` (a linear scan
+//! always sees a note before its spend), and no `sent_notes` (it never authors
 //! transactions).
 //!
-//! Spentness follows the upstream model: every note references the transaction
-//! that created it, and a per-pool junction table links a note to the
-//! transaction that spends it. A note is spent iff that spending transaction is
-//! mined. "Unconfirmed" therefore falls out for free — a transaction with
-//! `mined_height IS NULL` is in the mempool — though mempool ingestion itself
-//! is a later feature.
+//! Spentness follows the same model: every note references the transaction that
+//! created it, and a per-pool junction table links a note to the transaction
+//! that spends it. A note is spent iff that spending transaction is mined.
+//! "Unconfirmed" therefore falls out for free — a transaction with
+//! `mined_height IS NULL` is in the mempool — though mempool ingestion itself is
+//! not wired.
 
 use rusqlite::{params, Connection};
 

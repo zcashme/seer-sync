@@ -136,7 +136,8 @@ pub const DEFAULT_CHUNK_OUTPUTS: usize = 100_000;
 /// as an `Err` item, after which the stream ends.
 ///
 /// This is the crate's single block-fetch primitive. Collect it with
-/// [`fetch_range`] and feed the blocks to [`crate::sync::sync`].
+/// [`fetch_range`] and feed the blocks to [`scan`](crate::sync::scan::scan), or
+/// let the [`run`](crate::sync::run) loop drive both for you.
 ///
 /// ```no_run
 /// # use seer_sync::sync::chain::{connect_auto, blocks, DEFAULT_CHUNK_OUTPUTS};

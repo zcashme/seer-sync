@@ -9,12 +9,17 @@
 /// and the exact type librustzcash's protocol functions take.
 pub use zcash_protocol::consensus::BlockHeight;
 
+/// The Zcash network to scan against, and the parameter
+/// [`keys::ScanningKeys::from_ufvk_str`] decodes a UFVK for. Re-exported from
+/// `zcash_protocol` so consumers needn't depend on that crate directly.
+pub use zcash_protocol::consensus::Network;
+
 pub mod keys;
 pub mod note;
 
 /// Syncing. Its [`scan`](sync::scan) submodule is the sans-IO core (always
-/// compiled); the rest — `chain`, `enrich`, and the [`run`](sync::run) loop — is
-/// the live layer, gated on `lwd`.
+/// compiled, via [`scan_compact`](sync::scan::scan_compact)); the rest — `chain`
+/// and the [`run`](sync::run) loop — is the live layer, gated on `lwd`.
 pub mod sync;
 
 /// Generated lightwalletd proto types. Messages (e.g. [`CompactBlock`]) are

@@ -226,8 +226,6 @@ impl Db {
     }
 }
 
-// ─── Blocks ──────────────────────────────────────────────────────────────────
-
 // ─── Transactions ────────────────────────────────────────────────────────────
 
 impl Db {
@@ -469,7 +467,7 @@ impl Db {
     /// Deleting the mined transactions above `height` cascades to the notes and
     /// outputs they created and to any spend-junction rows that reference them,
     /// so spends recorded in rolled-back blocks are automatically undone. The
-    /// cursor is reset to `height`; its seam hash is cleared (we no longer store
+    /// cursor is reset to `height` and its seam hash cleared (the store keeps no
     /// per-block hashes), so the next resume re-verifies forward from there.
     pub fn rewind_to_height(&self, height: u32) -> rusqlite::Result<()> {
         // `unchecked_transaction` (vs `transaction`) takes `&self`, so a consumer

@@ -3,6 +3,9 @@
 //! This module only *parses* — it turns a [`UnifiedIncomingViewingKey`] or
 //! [`UnifiedFullViewingKey`] into the per-pool incoming keys (and, for a full
 //! key, the nullifier-deriving material) the [`crate::sync`] engine consumes.
+//!
+//! The one bit of *de*coding lives in the free [`from_ufvk_str`] convenience,
+//! kept off [`ScanningKeys`] so the type's constructors stay pure parsers.
 
 // The parsed keys are read only by the `lwd` scanner; without that feature the
 // fields are unused, but the parsing is still valid sans-IO API.
@@ -11,6 +14,7 @@
 use orchard::keys::{FullViewingKey as OrchardFvk, IncomingViewingKey as OrchardIvk};
 use sapling::{zip32::IncomingViewingKey as SaplingIvk, NullifierDerivingKey};
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};
+use zcash_protocol::consensus::Network;
 use zip32::Scope;
 
 /// An incoming viewing key paired with an optional nullifier-deriving key.
@@ -63,4 +67,16 @@ impl ScanningKeys {
             }),
         }
     }
+}
+
+/// Decode an encoded UFVK string for `network` into [`ScanningKeys`] in one
+/// step — the convenience that saves a caller a trip through
+/// [`UnifiedFullViewingKey`] and a direct `zcash_keys` dependency. Whitespace in
+/// `encoded` is ignored (UFVKs are often wrapped across lines). Equivalent to
+/// decoding then calling [`ScanningKeys::from_ufvk`]; the `Err` carries the
+/// decoder's own message.
+pub fn from_ufvk_str(encoded: &str, network: &Network) -> Result<ScanningKeys, String> {
+    let stripped: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
+    let ufvk = UnifiedFullViewingKey::decode(network, &stripped)?;
+    Ok(ScanningKeys::from_ufvk(&ufvk))
 }
