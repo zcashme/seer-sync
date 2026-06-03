@@ -76,7 +76,3 @@ tokio-test = "0.4"
 [[bench]]
 name = "decrypt"
 harness = false
-
-[[example]]
-name = "run_sync_db"
-required-features = ["db"]
