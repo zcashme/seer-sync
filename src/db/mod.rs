@@ -1,8 +1,5 @@
 mod schema;
 
-/// The reference sync consumer: drive the engine and persist its findings here.
-/// Needs the live-syncing layer, so it is gated on `lwd` as well as `db`.
-#[cfg(feature = "lwd")]
 pub mod sync;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
@@ -10,125 +7,75 @@ use std::path::Path;
 
 pub use schema::init;
 
-// ─── Row types ───────────────────────────────────────────────────────────────
-
-/// The single viewing key this database tracks.
 #[derive(Debug, Clone)]
 pub struct Account {
-    /// Encoded unified viewing key (UIVK or UFVK).
     pub encoded: String,
-    /// `"uivk"` (incoming-only) or `"ufvk"` (full).
     pub key_type: String,
-    /// `"main"` or `"test"`.
     pub network: String,
-    /// Block height the key was created at; blocks before it are skipped.
     pub birthday: u32,
 }
 
-/// Saved linear sync position: the scanned watermark and its block hash (the
-/// reorg seam checked on resume). The only chain-position state an observer keeps.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncState {
-    /// Last fully-applied block height.
     pub height: u32,
-    /// Block hash at `height`, for reorg detection on resume.
     pub hash: Option<[u8; 32]>,
 }
 
-/// Balance broken down by pool, in zatoshis.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PoolBalance {
-    /// Unspent Orchard notes.
     pub orchard_zat: u64,
-    /// Unspent Sapling notes.
     pub sapling_zat: u64,
-    /// Unspent transparent UTXOs.
     pub transparent_zat: u64,
 }
 
 impl PoolBalance {
-    /// Sum of all pools.
     pub fn total_zat(&self) -> u64 {
         self.orchard_zat + self.sapling_zat + self.transparent_zat
     }
 }
 
-// ─── Insert structs ──────────────────────────────────────────────────────────
-
-/// A received Sapling note to persist.
 #[derive(Debug, Clone)]
 pub struct SaplingNoteInsert<'a> {
-    /// Row id of the transaction that created this note ([`Db::upsert_transaction`]).
     pub transaction_id: i64,
-    /// Output index within the transaction.
     pub output_index: u32,
-    /// Diversifier from the note plaintext.
     pub diversifier: &'a [u8],
-    /// Note value in zatoshis.
     pub value: u64,
-    /// Note commitment randomness (`rcm`).
     pub rcm: &'a [u8],
-    /// Derived nullifier; `None` on the incoming-only path or before a position is known.
     pub nf: Option<&'a [u8]>,
-    /// Whether this note is change (received in a transaction that also spent ours).
     pub is_change: bool,
-    /// Raw 512-byte ZIP-302 memo, if recovered by full-transaction enrichment.
     pub memo: Option<&'a [u8]>,
-    /// Leaf position in the Sapling commitment tree.
     pub commitment_tree_position: Option<u64>,
 }
 
-/// A received Orchard note to persist.
 #[derive(Debug, Clone)]
 pub struct OrchardNoteInsert<'a> {
-    /// Row id of the transaction that created this note.
     pub transaction_id: i64,
-    /// Action index within the transaction.
     pub action_index: u32,
-    /// Diversifier from the note plaintext.
     pub diversifier: &'a [u8],
-    /// Note value in zatoshis.
     pub value: u64,
-    /// Rho (the action's input nullifier) — needed to derive the nullifier.
     pub rho: &'a [u8],
-    /// Note seed randomness (`rseed`).
     pub rseed: &'a [u8],
-    /// Derived nullifier; `None` on the incoming-only path.
     pub nf: Option<&'a [u8]>,
-    /// Whether this note is change.
     pub is_change: bool,
-    /// Raw 512-byte ZIP-302 memo, if recovered by full-transaction enrichment.
     pub memo: Option<&'a [u8]>,
-    /// Leaf position in the Orchard commitment tree (not needed for the nullifier).
     pub commitment_tree_position: Option<u64>,
 }
 
-/// A received transparent output to persist.
 #[derive(Debug, Clone)]
 pub struct TransparentOutputInsert<'a> {
-    /// Row id of the transaction that created this output.
     pub transaction_id: i64,
-    /// Index within the transaction's `vout`.
     pub output_index: u32,
-    /// Address that controls the output.
     pub address: &'a str,
-    /// Locking script (`scriptPubKey`).
     pub script: &'a [u8],
-    /// Value in zatoshis.
     pub value_zat: u64,
-    /// Height at which the output was last observed unspent.
     pub max_observed_unspent_height: Option<u32>,
 }
 
-// ─── Database handle ─────────────────────────────────────────────────────────
-
-/// An open database connection with the schema initialized.
 pub struct Db {
     pub(crate) conn: Connection,
 }
 
 impl Db {
-    /// Open (or create) a database at `path` and initialize the schema.
     pub fn open<P: AsRef<Path>>(path: P) -> rusqlite::Result<Self> {
         let conn = Connection::open_with_flags(
             path,
@@ -138,7 +85,6 @@ impl Db {
         Ok(Self { conn })
     }
 
-    /// Open a temporary in-memory database. Useful for testing.
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
         init(&conn)?;
@@ -146,10 +92,7 @@ impl Db {
     }
 }
 
-// ─── Account ─────────────────────────────────────────────────────────────────
-
 impl Db {
-    /// Set (or replace) the viewing key this database tracks.
     pub fn set_account(&self, account: &Account) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT INTO account(id, encoded, key_type, network, birthday)
@@ -169,7 +112,6 @@ impl Db {
         Ok(())
     }
 
-    /// Return the tracked viewing key, if one has been set.
     pub fn get_account(&self) -> rusqlite::Result<Option<Account>> {
         self.conn
             .query_row(
@@ -188,10 +130,7 @@ impl Db {
     }
 }
 
-// ─── Sync state ──────────────────────────────────────────────────────────────
-
 impl Db {
-    /// Persist the sync cursor.
     pub fn set_sync_state(&self, state: &SyncState) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT INTO sync_state(id, height, hash)
@@ -207,7 +146,6 @@ impl Db {
         Ok(())
     }
 
-    /// Return the sync cursor, or a zeroed default if none is stored.
     pub fn get_sync_state(&self) -> rusqlite::Result<SyncState> {
         self.conn
             .query_row(
@@ -226,13 +164,7 @@ impl Db {
     }
 }
 
-// ─── Transactions ────────────────────────────────────────────────────────────
-
 impl Db {
-    /// Insert or update a transaction, returning its row id (`id_tx`).
-    ///
-    /// A mined transaction sets `mined_height` to `height`; an unmined (mempool)
-    /// transaction passes `height = None`.
     pub fn upsert_transaction(
         &self,
         txid: &[u8],
@@ -255,10 +187,7 @@ impl Db {
     }
 }
 
-// ─── Shielded notes ──────────────────────────────────────────────────────────
-
 impl Db {
-    /// Insert a received Sapling note, returning its row id. Ignores duplicates.
     pub fn insert_sapling_note(&self, n: &SaplingNoteInsert<'_>) -> rusqlite::Result<i64> {
         self.conn.execute(
             "INSERT INTO sapling_received_notes(
@@ -281,7 +210,6 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Insert a received Orchard note, returning its row id. Ignores duplicates.
     pub fn insert_orchard_note(&self, n: &OrchardNoteInsert<'_>) -> rusqlite::Result<i64> {
         self.conn.execute(
             "INSERT INTO orchard_received_notes(
@@ -305,8 +233,6 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Raw ZIP-302 memo bytes for every shielded note that has one recovered,
-    /// across both pools. Decode with [`crate::note::memo`].
     pub fn memos(&self) -> rusqlite::Result<Vec<Vec<u8>>> {
         let mut out = Vec::new();
         for table in ["sapling_received_notes", "orchard_received_notes"] {
@@ -321,8 +247,6 @@ impl Db {
         Ok(out)
     }
 
-    /// Record that the Sapling note with nullifier `nf` was spent by transaction
-    /// `spending_tx`. No-op (returns 0) if no owned note has that nullifier.
     pub fn mark_sapling_spent(&self, nf: &[u8], spending_tx: i64) -> rusqlite::Result<usize> {
         self.conn.execute(
             "INSERT OR IGNORE INTO sapling_received_note_spends(
@@ -332,8 +256,6 @@ impl Db {
         )
     }
 
-    /// Record that the Orchard note with nullifier `nf` was spent by transaction
-    /// `spending_tx`. No-op (returns 0) if no owned note has that nullifier.
     pub fn mark_orchard_spent(&self, nf: &[u8], spending_tx: i64) -> rusqlite::Result<usize> {
         self.conn.execute(
             "INSERT OR IGNORE INTO orchard_received_note_spends(
@@ -343,8 +265,6 @@ impl Db {
         )
     }
 
-    /// Whether a received Sapling note with this nullifier is in the store — i.e.
-    /// whether an observed spend of `nf` actually touches the wallet.
     pub fn owns_sapling_nf(&self, nf: &[u8]) -> rusqlite::Result<bool> {
         self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sapling_received_notes WHERE nf = ?1)",
@@ -353,7 +273,6 @@ impl Db {
         )
     }
 
-    /// Whether a received Orchard note with this nullifier is in the store.
     pub fn owns_orchard_nf(&self, nf: &[u8]) -> rusqlite::Result<bool> {
         self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM orchard_received_notes WHERE nf = ?1)",
@@ -363,10 +282,7 @@ impl Db {
     }
 }
 
-// ─── Transparent outputs ─────────────────────────────────────────────────────
-
 impl Db {
-    /// Insert a received transparent output, returning its row id. Ignores duplicates.
     pub fn insert_transparent_output(
         &self,
         o: &TransparentOutputInsert<'_>,
@@ -389,12 +305,6 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Record that the transparent outpoint `(prevout_txid, prevout_index)` was
-    /// spent by transaction `spending_tx`.
-    ///
-    /// Always caches the outpoint in `transparent_spend_map`, and additionally
-    /// links the spend to a known output if we already hold it. Returns the
-    /// number of owned outputs newly marked spent (0 or 1).
     pub fn mark_transparent_spent(
         &self,
         prevout_txid: &[u8],
@@ -418,12 +328,7 @@ impl Db {
     }
 }
 
-// ─── Balance ─────────────────────────────────────────────────────────────────
-
 impl Db {
-    /// Confirmed balance across all pools.
-    ///
-    /// A note/output counts as unspent when no *mined* transaction spends it.
     pub fn balance(&self) -> rusqlite::Result<PoolBalance> {
         let sapling_zat = self.unspent_sum(
             "SELECT COALESCE(SUM(n.value), 0) FROM sapling_received_notes n
@@ -459,21 +364,8 @@ impl Db {
     }
 }
 
-// ─── Reorg rewind ────────────────────────────────────────────────────────────
-
 impl Db {
-    /// Roll the wallet back to `height`, discarding everything above it.
-    ///
-    /// Deleting the mined transactions above `height` cascades to the notes and
-    /// outputs they created and to any spend-junction rows that reference them,
-    /// so spends recorded in rolled-back blocks are automatically undone. The
-    /// cursor is reset to `height` and its seam hash cleared (the store keeps no
-    /// per-block hashes), so the next resume re-verifies forward from there.
     pub fn rewind_to_height(&self, height: u32) -> rusqlite::Result<()> {
-        // `unchecked_transaction` (vs `transaction`) takes `&self`, so a consumer
-        // can drive rewinds through a shared `&Db` alongside its other (`&self`)
-        // store ops — no `&mut` / `RefCell` juggling. Safe here: the sync loop
-        // calls store ops sequentially, never with another transaction open.
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM transactions WHERE mined_height > ?1",
@@ -491,8 +383,6 @@ impl Db {
     }
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,9 +392,21 @@ mod tests {
     }
 
     #[test]
-    fn schema_initializes_to_v1() {
+    fn schema_init_is_idempotent() {
+        // The schema is a rebuildable cache with no version marker; `init`
+        // must build the tables and be safe to re-run on an existing DB.
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(schema::get_version(&db.conn).unwrap(), 1);
+        schema::init(&db.conn).unwrap();
+        let tables: u32 = db
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+                 WHERE type = 'table' AND name = 'transactions'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 1);
     }
 
     #[test]
@@ -562,7 +464,6 @@ mod tests {
         .unwrap();
         assert_eq!(db.balance().unwrap().orchard_zat, 5_000_000);
 
-        // Spend it in a later mined transaction.
         let spend_tx = mined_tx(&db, &[2u8; 32], 101);
         assert_eq!(db.mark_orchard_spent(&[9u8; 32], spend_tx).unwrap(), 1);
         assert_eq!(db.balance().unwrap().orchard_zat, 0);
@@ -585,7 +486,6 @@ mod tests {
         })
         .unwrap();
 
-        // A mempool (unmined) spend should NOT reduce the confirmed balance.
         let mempool_tx = db.upsert_transaction(&[3u8; 32], None, None).unwrap();
         assert_eq!(db.mark_sapling_spent(&[9u8; 32], mempool_tx).unwrap(), 1);
         assert_eq!(db.balance().unwrap().sapling_zat, 3_000_000);
@@ -607,7 +507,6 @@ mod tests {
         assert_eq!(db.balance().unwrap().transparent_zat, 1_000_000);
 
         let spend_tx = mined_tx(&db, &[2u8; 32], 201);
-        // Outpoint references the *creating* tx's txid + output index.
         assert_eq!(
             db.mark_transparent_spent(&[1u8; 32], 0, spend_tx).unwrap(),
             1
@@ -636,12 +535,10 @@ mod tests {
         db.mark_orchard_spent(&[9u8; 32], spend_tx).unwrap();
         assert_eq!(db.balance().unwrap().orchard_zat, 0);
 
-        // Roll back past the spend (but not the note): note returns, spend gone.
         db.rewind_to_height(104).unwrap();
         assert_eq!(db.balance().unwrap().orchard_zat, 9_000_000);
         assert_eq!(db.get_sync_state().unwrap().height, 104);
 
-        // Roll back past the note too: balance empty.
         db.rewind_to_height(99).unwrap();
         assert_eq!(db.balance().unwrap().orchard_zat, 0);
     }

@@ -1,61 +1,12 @@
-//! SQLite schema for seer-sync (feature = "db").
-//!
-//! One database tracks exactly one viewing key — this is a *watch-only* store:
-//! observe notes, never spend them. The schema is a watch-only subset of the
-//! `zcash_client_sqlite` model, carrying none of the spend-only machinery: no
-//! witness / shardtree tables (it never builds a Merkle path), no `scan_queue`
-//! (tip-follow is linear), no `nullifier_map` / `tx_locator_map` (a linear scan
-//! always sees a note before its spend), and no `sent_notes` (it never authors
-//! transactions).
-//!
-//! Spentness follows the same model: every note references the transaction that
-//! created it, and a per-pool junction table links a note to the transaction
-//! that spends it. A note is spent iff that spending transaction is mined.
-//! "Unconfirmed" therefore falls out for free — a transaction with
-//! `mined_height IS NULL` is in the mempool — though mempool ingestion itself is
-//! not wired.
 
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 
-const SCHEMA_VERSION: u32 = 1;
-
-/// Return the stored schema version, or `0` if the database is uninitialized.
-pub fn get_version(conn: &Connection) -> rusqlite::Result<u32> {
-    conn.query_row("SELECT version FROM schema_version WHERE id = 1", [], |row| {
-        row.get(0)
-    })
-    .or_else(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => Ok(0),
-        other => Err(other),
-    })
-}
-
-fn set_version(conn: &Connection, version: u32) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT INTO schema_version(id, version) VALUES (1, ?1) \
-         ON CONFLICT(id) DO UPDATE SET version = excluded.version",
-        params![version],
-    )?;
-    Ok(())
-}
-
-/// Create the database schema (idempotent).
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS schema_version (
-            id      INTEGER PRIMARY KEY NOT NULL,
-            version INTEGER NOT NULL)",
-        [],
-    )?;
-
-    let version = get_version(conn)?;
-
-    if version < 1 {
-        conn.execute_batch(
-            r#"
+    conn.execute_batch(
+        r#"
             -- The single viewing key this database tracks. Exactly one row.
             CREATE TABLE IF NOT EXISTS account (
                 id       INTEGER PRIMARY KEY CHECK (id = 1),
@@ -185,12 +136,7 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 key_scope               INTEGER NOT NULL DEFAULT 0
             );
             "#,
-        )?;
-    }
-
-    if version != SCHEMA_VERSION {
-        set_version(conn, SCHEMA_VERSION)?;
-    }
+    )?;
 
     Ok(())
 }
