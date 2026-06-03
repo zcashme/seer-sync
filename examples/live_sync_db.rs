@@ -22,18 +22,12 @@ use seer_sync::db::sync::sync_to_tip;
 use seer_sync::db::{Account, Db};
 use seer_sync::sync::chain;
 use seer_sync::{keys, Network};
-use zcash_protocol::value::Zatoshis;
 
 /// A unified full viewing key (`uview1…`). Swap in your own.
 const UFVK: &str = "uview1hzzcqccht7226cqmwfxvesey863wzugkdckl4ecyrpy6pmzteum4x75p8gsqqeghfg0ngkhafvjkgzq6u3d2chf9nxlxqldtpfce80renlet8nw6zvkmkt7v2xqf203t63jufh7640kheemmq89u5gha6w6vvjs93gcae7tcswl9glfjwc80afw86y794cuq0rk8mqyylrguq3wcere2lwv4clhxdc76c79et846p6pv69qw40pxjpu8vywwkg440mp46ed97ytcvumj5lzvqf0n3fv7nfze22me7rh07rtzgr6grh3ra6rq9lgcsstvfh7c70nukklnz7a45eauxj70px6tjquklmh7ayryw205zzp7uuxemm4qd8awxc6vsc0l4dc77v5tg";
 
 /// Where to start scanning. Stored on the account as its birthday.
 const BIRTHDAY: u32 = 3_000_000;
-
-/// Render a range-checked `Zatoshis` as fractional ZEC. 1 ZEC = 100_000_000 zatoshi.
-fn zec(amount: Zatoshis) -> f64 {
-    amount.into_u64() as f64 / 1e8
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -84,11 +78,11 @@ async fn main() -> Result<()> {
     println!("│  synced to height {final_height}");
     println!("│");
     println!("│  balance");
-    println!("│    orchard      {:>16.8} ZEC", zec(bal.orchard));
-    println!("│    sapling      {:>16.8} ZEC", zec(bal.sapling));
-    println!("│    transparent  {:>16.8} ZEC", zec(bal.transparent));
+    println!("│    orchard      {:>16} zat", bal.orchard.into_u64());
+    println!("│    sapling      {:>16} zat", bal.sapling.into_u64());
+    println!("│    transparent  {:>16} zat", bal.transparent.into_u64());
     println!("│    ───────────────────────────────");
-    println!("│    total        {:>16.8} ZEC", zec(bal.total()));
+    println!("│    total        {:>16} zat", bal.total().into_u64());
     println!("│  {memos} memo(s) recovered");
     println!("└───────────────────────────────────────────────────");
 
