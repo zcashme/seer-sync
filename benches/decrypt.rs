@@ -2,12 +2,11 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use std::time::Duration;
 use seer_sync::sync::chain::{connect_auto, fetch_range, tip_height};
-use seer_sync::keys::ScanningKeys;
 use seer_sync::sync::scan::scan_compact;
-use zcash_keys::keys::UnifiedIncomingViewingKey;
+use seer_sync::UnifiedFullViewingKey;
 use zcash_protocol::consensus::MainNetwork;
 
-const UIVK: &str = "uivk1gl26qy0xjja7lqhyg3pf0x4j4j66kqwewrjkdcg28eqq4wgtzjmujpee7x9cs2ec9xhnlgrm8ptlw8z80j2aryw8nqtssser2ys778a0s00uvgkdjnfr58sndhfvc3f4zqjs6ywva6";
+const UFVK: &str = "uview1hzzcqccht7226cqmwfxvesey863wzugkdckl4ecyrpy6pmzteum4x75p8gsqqeghfg0ngkhafvjkgzq6u3d2chf9nxlxqldtpfce80renlet8nw6zvkmkt7v2xqf203t63jufh7640kheemmq89u5gha6w6vvjs93gcae7tcswl9glfjwc80afw86y794cuq0rk8mqyylrguq3wcere2lwv4clhxdc76c79et846p6pv69qw40pxjpu8vywwkg440mp46ed97ytcvumj5lzvqf0n3fv7nfze22me7rh07rtzgr6grh3ra6rq9lgcsstvfh7c70nukklnz7a45eauxj70px6tjquklmh7ayryw205zzp7uuxemm4qd8awxc6vsc0l4dc77v5tg";
 #[allow(dead_code)]
 const NU6: u32 = 2_726_400;
 const BENCH_WINDOW: u32 = 5_000;
@@ -26,10 +25,7 @@ fn bench(c: &mut Criterion) {
         fetch_range(client, from, tip).await.expect("fetch_range")
     });
 
-    let uivk_str: String = UIVK.chars().filter(|c| !c.is_whitespace()).collect();
-    let uivk = UnifiedIncomingViewingKey::decode(&MainNetwork, &uivk_str)
-        .expect("decoding hardcoded UIVK");
-    let keys = ScanningKeys::from_uivk(&uivk);
+    let ufvk = UnifiedFullViewingKey::decode(&MainNetwork, UFVK).expect("decoding hardcoded UFVK");
 
     let total_actions: u64 = blocks
         .iter()
@@ -55,9 +51,9 @@ fn bench(c: &mut Criterion) {
         g.measurement_time(Duration::from_secs(180));
     }
     g.throughput(Throughput::Elements(total_actions + total_outputs));
-    g.bench_function("uivk", |b| {
+    g.bench_function("ufvk", |b| {
         b.iter(|| {
-            black_box(scan_compact(&blocks, &keys));
+            black_box(scan_compact(&blocks, &ufvk));
         });
     });
     g.finish();

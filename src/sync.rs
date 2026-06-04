@@ -2,19 +2,19 @@
 pub mod chain;
 pub mod scan;
 
-use crate::keys::ScanningKeys;
 use crate::sync::chain::{DEFAULT_CHUNK_OUTPUTS, LwdClient};
 use crate::sync::scan::{scan, Transactions};
 use crate::BlockHeight;
 use anyhow::Context;
 use futures::StreamExt;
+use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_protocol::consensus::Network;
 
 const MAX_TRANSPORT_RETRIES: usize = 4;
 
 pub async fn run<R, W, F>(
     client: LwdClient,
-    keys: &ScanningKeys,
+    keys: &UnifiedFullViewingKey,
     network: &Network,
     mut resume_point: R,
     mut rewind: W,

@@ -1,9 +1,8 @@
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use zcash_protocol::consensus::Network;
 
 use crate::db::{Db, OrchardNoteInsert, SaplingNoteInsert, SyncState};
-use crate::keys::ScanningKeys;
 use crate::sync::chain::LwdClient;
 use crate::sync::scan::{Transactions, Tx};
 use crate::BlockHeight;
@@ -11,15 +10,25 @@ use crate::BlockHeight;
 pub async fn sync_to_tip(
     db: &Db,
     client: LwdClient,
-    keys: &ScanningKeys,
     mut progress: impl FnMut(BlockHeight),
 ) -> Result<u32> {
-    let network = network_of(db)?;
-    let birthday = db.get_account().context("reading account")?.map_or(0, |a| a.birthday);
+    // The account the store owns is the single source of the key, network, and
+    // birthday — the caller doesn't pass any of them separately.
+    let account = db
+        .get_account()
+        .context("reading account")?
+        .context("no account set; call set_account before syncing")?;
+    let network = match account.network.as_str() {
+        "test" => Network::TestNetwork,
+        _ => Network::MainNetwork,
+    };
+    let ufvk = crate::keys::decode(&network, &account.encoded)
+        .map_err(|e| anyhow!("decoding account viewing key: {e}"))?;
+    let birthday = account.birthday;
 
     crate::sync::run(
         client,
-        keys,
+        &ufvk,
         &network,
         || {
             let st = db.get_sync_state().unwrap_or_default();
@@ -54,7 +63,7 @@ fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], txs: &Transactions) -> Re
                     rho: &r.note.rho().to_bytes(),
                     rseed: r.note.rseed().as_bytes(),
                     nf: r.nf.as_ref().map(|n| n.as_slice()),
-                    is_change: false,
+                    is_change: r.is_change,
                     memo: r.memo.as_deref().map(|m| m.as_slice()),
                     commitment_tree_position: r.position,
                 })?;
@@ -78,7 +87,7 @@ fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], txs: &Transactions) -> Re
                     value: r.note.value().inner(),
                     rcm: &r.note.rcm().to_bytes(),
                     nf: r.nf.as_ref().map(|n| n.as_slice()),
-                    is_change: false,
+                    is_change: r.is_change,
                     memo: r.memo.as_deref().map(|m| m.as_slice()),
                     commitment_tree_position: r.position,
                 })?;
@@ -94,11 +103,4 @@ fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], txs: &Transactions) -> Re
 
     db.set_sync_state(&SyncState { height: u32::from(height), hash: Some(hash) })?;
     Ok(())
-}
-
-fn network_of(db: &Db) -> Result<Network> {
-    Ok(match db.get_account()?.map(|a| a.network).as_deref() {
-        Some("test") => Network::TestNetwork,
-        _ => Network::MainNetwork,
-    })
 }
