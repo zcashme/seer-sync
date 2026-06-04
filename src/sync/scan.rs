@@ -24,8 +24,7 @@ pub struct Note {
     pub txid: [u8; 32],
     pub tx_index: u32,
     pub output_index: u32,
-    pub nullifier: [u8; 32],
-    pub is_change: bool,
+    pub nullifier: Option<[u8; 32]>,
     pub memo: Option<MemoBytes>,
 }
 
@@ -82,12 +81,10 @@ pub fn enrich_memos(
 struct SaplingScope {
     ivk: SaplingPreparedIvk,
     nk: NullifierDerivingKey,
-    is_change: bool,
 }
 
 struct OrchardScope {
     ivk: OrchardPreparedIvk,
-    is_change: bool,
 }
 
 fn sapling_scopes(keys: &UnifiedFullViewingKey) -> Vec<SaplingScope> {
@@ -98,7 +95,6 @@ fn sapling_scopes(keys: &UnifiedFullViewingKey) -> Vec<SaplingScope> {
                 .map(|scope| SaplingScope {
                     ivk: SaplingPreparedIvk::new(&dfvk.to_ivk(scope)),
                     nk: dfvk.to_nk(scope),
-                    is_change: matches!(scope, Scope::Internal),
                 })
                 .collect()
         })
@@ -112,7 +108,6 @@ fn orchard_scopes(keys: &UnifiedFullViewingKey) -> Vec<OrchardScope> {
                 .into_iter()
                 .map(|scope| OrchardScope {
                     ivk: OrchardPreparedIvk::new(&fvk.to_ivk(scope)),
-                    is_change: matches!(scope, Scope::Internal),
                 })
                 .collect()
         })
@@ -181,8 +176,7 @@ fn scan_compact_serial(blocks: &[CompactBlock], keys: &UnifiedFullViewingKey) ->
                             txid,
                             tx_index,
                             output_index,
-                            nullifier,
-                            is_change: scope.is_change,
+                            nullifier: Some(nullifier),
                             memo: None,
                         });
                     }
@@ -217,8 +211,7 @@ fn scan_compact_serial(blocks: &[CompactBlock], keys: &UnifiedFullViewingKey) ->
                             txid,
                             tx_index,
                             output_index,
-                            nullifier,
-                            is_change: scope.is_change,
+                            nullifier: Some(nullifier),
                             memo: None,
                         });
                     }
@@ -228,6 +221,95 @@ fn scan_compact_serial(blocks: &[CompactBlock], keys: &UnifiedFullViewingKey) ->
     }
 
     out
+}
+
+pub fn scan_sent(
+    keys: &UnifiedFullViewingKey,
+    network: &Network,
+    raw_txs: &[([u8; 32], RawTransaction)],
+    notes: &mut Vec<Note>,
+) -> Result<()> {
+    let sapling_ovks: Vec<_> = keys
+        .sapling()
+        .map(|dfvk| {
+            [Scope::External, Scope::Internal]
+                .into_iter()
+                .map(|scope| dfvk.to_ovk(scope))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let orchard_ovks: Vec<_> = keys
+        .orchard()
+        .map(|fvk| {
+            [Scope::External, Scope::Internal]
+                .into_iter()
+                .map(|scope| fvk.to_ovk(scope))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let claimed: std::collections::HashSet<([u8; 32], u32)> =
+        notes.iter().map(|n| (n.txid, n.output_index)).collect();
+
+    for (txid, raw) in raw_txs {
+        let height = BlockHeight::from_u32(raw.height as u32);
+        let tx = match Transaction::read(&raw.data[..], BranchId::for_height(network, height)) {
+            Ok(tx) => tx,
+            Err(_) => continue,
+        };
+
+        if let Some(bundle) = tx.sapling_bundle() {
+            let zip212 = zip212_enforcement(network, height);
+            for (oi, output) in bundle.shielded_outputs().iter().enumerate() {
+                if claimed.contains(&(*txid, oi as u32)) {
+                    continue;
+                }
+                for ovk in &sapling_ovks {
+                    if let Some((note, _, memo)) =
+                        decrypt::try_decrypt_sapling_sent(output, ovk, zip212)
+                    {
+                        notes.push(Note {
+                            note: ShieldedNote::Sapling(note),
+                            height,
+                            txid: *txid,
+                            tx_index: 0,
+                            output_index: oi as u32,
+                            nullifier: None,
+                            memo: Some(memo),
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(bundle) = tx.orchard_bundle() {
+            for (ai, action) in bundle.actions().iter().enumerate() {
+                if claimed.contains(&(*txid, ai as u32)) {
+                    continue;
+                }
+                for ovk in &orchard_ovks {
+                    if let Some((note, _, memo)) =
+                        decrypt::try_decrypt_orchard_sent(action, ovk)
+                    {
+                        notes.push(Note {
+                            note: ShieldedNote::Orchard(note),
+                            height,
+                            txid: *txid,
+                            tx_index: 0,
+                            output_index: ai as u32,
+                            nullifier: None,
+                            memo: Some(memo),
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn txid_of(tx: &CompactTx) -> Option<[u8; 32]> {

@@ -1,15 +1,15 @@
 
 use orchard::{
-    keys::PreparedIncomingViewingKey as OrchardPreparedIvk,
+    keys::{OutgoingViewingKey as OrchardOvk, PreparedIncomingViewingKey as OrchardPreparedIvk},
     note_encryption::{CompactAction, OrchardDomain},
     Action,
 };
 use sapling::{
     bundle::OutputDescription,
-    keys::PreparedIncomingViewingKey as SaplingPreparedIvk,
+    keys::{OutgoingViewingKey as SaplingOvk, PreparedIncomingViewingKey as SaplingPreparedIvk},
     note_encryption::{CompactOutputDescription, SaplingDomain, Zip212Enforcement},
 };
-use zcash_note_encryption::{batch, try_note_decryption, EphemeralKeyBytes};
+use zcash_note_encryption::{batch, try_note_decryption, try_output_recovery_with_ovk, EphemeralKeyBytes};
 use zcash_protocol::memo::MemoBytes;
 
 use crate::proto::{CompactOrchardAction, CompactSaplingOutput};
@@ -76,5 +76,34 @@ pub fn try_decrypt_sapling<Proof>(
 ) -> Option<(sapling::Note, sapling::PaymentAddress, MemoBytes)> {
     let (note, recipient, memo) =
         try_note_decryption(&SaplingDomain::new(zip212), ivk, output)?;
+    Some((note, recipient, MemoBytes::from_bytes(&memo).unwrap()))
+}
+
+pub(crate) fn try_decrypt_orchard_sent<A>(
+    action: &Action<A>,
+    ovk: &OrchardOvk,
+) -> Option<(orchard::Note, orchard::Address, MemoBytes)> {
+    let (note, recipient, memo) = try_output_recovery_with_ovk(
+        &OrchardDomain::for_action(action),
+        ovk,
+        action,
+        action.cv_net(),
+        &action.encrypted_note().out_ciphertext,
+    )?;
+    Some((note, recipient, MemoBytes::from_bytes(&memo).unwrap()))
+}
+
+pub(crate) fn try_decrypt_sapling_sent<Proof>(
+    output: &OutputDescription<Proof>,
+    ovk: &SaplingOvk,
+    zip212: Zip212Enforcement,
+) -> Option<(sapling::Note, sapling::PaymentAddress, MemoBytes)> {
+    let (note, recipient, memo) = try_output_recovery_with_ovk(
+        &SaplingDomain::new(zip212),
+        ovk,
+        output,
+        output.cv(),
+        output.out_ciphertext(),
+    )?;
     Some((note, recipient, MemoBytes::from_bytes(&memo).unwrap()))
 }

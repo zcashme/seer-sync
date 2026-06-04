@@ -50,7 +50,6 @@ pub struct SaplingNoteInsert<'a> {
     pub value: u64,
     pub rcm: &'a [u8],
     pub nf: Option<&'a [u8]>,
-    pub is_change: bool,
     pub memo: Option<&'a [u8]>,
     pub commitment_tree_position: Option<u64>,
 }
@@ -64,7 +63,6 @@ pub struct OrchardNoteInsert<'a> {
     pub rho: &'a [u8],
     pub rseed: &'a [u8],
     pub nf: Option<&'a [u8]>,
-    pub is_change: bool,
     pub memo: Option<&'a [u8]>,
     pub commitment_tree_position: Option<u64>,
 }
@@ -181,8 +179,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO sapling_received_notes(
                 transaction_id, output_index, diversifier, value, rcm, nf,
-                is_change, memo, commitment_tree_position)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                memo, commitment_tree_position)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
              ON CONFLICT(transaction_id, output_index) DO NOTHING",
             params![
                 n.transaction_id,
@@ -191,7 +189,6 @@ impl Db {
                 n.value as i64,
                 n.rcm,
                 n.nf,
-                n.is_change as i64,
                 n.memo,
                 n.commitment_tree_position.map(|p| p as i64),
             ],
@@ -203,8 +200,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO orchard_received_notes(
                 transaction_id, action_index, diversifier, value, rho, rseed, nf,
-                is_change, memo, commitment_tree_position)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                memo, commitment_tree_position)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
              ON CONFLICT(transaction_id, action_index) DO NOTHING",
             params![
                 n.transaction_id,
@@ -214,7 +211,6 @@ impl Db {
                 n.rho,
                 n.rseed,
                 n.nf,
-                n.is_change as i64,
                 n.memo,
                 n.commitment_tree_position.map(|p| p as i64),
             ],

@@ -60,8 +60,7 @@ fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], notes: &[Note]) -> Result
                     value: n.value().inner(),
                     rho: &n.rho().to_bytes(),
                     rseed: n.rseed().as_bytes(),
-                    nf: Some(&note.nullifier),
-                    is_change: note.is_change,
+                    nf: note.nullifier.as_ref().map(|n| n.as_slice()),
                     memo: note.memo.as_ref().map(|m| m.as_slice()),
                     commitment_tree_position: None,
                 })?;
@@ -73,8 +72,7 @@ fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], notes: &[Note]) -> Result
                     diversifier: &n.recipient().diversifier().0,
                     value: n.value().inner(),
                     rcm: &n.rcm().to_bytes(),
-                    nf: Some(&note.nullifier),
-                    is_change: note.is_change,
+                    nf: note.nullifier.as_ref().map(|n| n.as_slice()),
                     memo: note.memo.as_ref().map(|m| m.as_slice()),
                     commitment_tree_position: None,
                 })?;

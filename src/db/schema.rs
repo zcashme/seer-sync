@@ -33,8 +33,7 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 id_tx         INTEGER PRIMARY KEY,
                 txid          BLOB    NOT NULL UNIQUE,
                 mined_height  INTEGER,
-                tx_index      INTEGER,
-                expiry_height INTEGER
+                tx_index      INTEGER
             );
 
             -- ── Sapling ──────────────────────────────────────────────────────
@@ -47,7 +46,6 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 value                    INTEGER NOT NULL,
                 rcm                      BLOB    NOT NULL,
                 nf                       BLOB    UNIQUE,
-                is_change                INTEGER NOT NULL DEFAULT 0,
                 memo                     BLOB,
                 commitment_tree_position INTEGER,
                 UNIQUE (transaction_id, output_index)
@@ -77,7 +75,6 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 rho                      BLOB    NOT NULL,
                 rseed                    BLOB    NOT NULL,
                 nf                       BLOB    UNIQUE,
-                is_change                INTEGER NOT NULL DEFAULT 0,
                 memo                     BLOB,
                 commitment_tree_position INTEGER,
                 UNIQUE (transaction_id, action_index)
@@ -95,11 +92,6 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 UNIQUE (orchard_received_note_id, transaction_id)
             );
 
-            CREATE TABLE IF NOT EXISTS addresses (
-                id        INTEGER PRIMARY KEY,
-                address   TEXT    NOT NULL UNIQUE,
-                key_scope INTEGER NOT NULL DEFAULT 0
-            );
             "#,
     )?;
 
