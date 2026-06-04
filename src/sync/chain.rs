@@ -7,7 +7,7 @@ use tonic::transport::{Channel, ClientTlsConfig};
 
 use crate::proto::{
     compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, ChainSpec,
-    CompactBlock, GetAddressUtxosArg, GetAddressUtxosReply, RawTransaction, TxFilter,
+    CompactBlock, RawTransaction, TxFilter,
 };
 
 pub const DEFAULT_SERVERS: &[&str] = &[
@@ -19,32 +19,6 @@ pub const DEFAULT_SERVERS: &[&str] = &[
 ];
 
 pub type LwdClient = CompactTxStreamerClient<Channel>;
-
-#[derive(Debug, Clone)]
-pub struct TransparentUtxo {
-    pub address: String,
-    pub txid: [u8; 32],
-    pub index: u32,
-    pub script: Vec<u8>,
-    pub value_zat: u64,
-    pub height: u32,
-}
-
-impl TryFrom<GetAddressUtxosReply> for TransparentUtxo {
-    type Error = anyhow::Error;
-
-    fn try_from(r: GetAddressUtxosReply) -> Result<Self> {
-        let txid: [u8; 32] = r.txid.try_into().map_err(|_| anyhow::anyhow!("txid not 32 bytes"))?;
-        Ok(Self {
-            address: r.address,
-            txid,
-            index: r.index as u32,
-            script: r.script,
-            value_zat: r.value_zat as u64,
-            height: r.height as u32,
-        })
-    }
-}
 
 pub async fn connect(url: &str) -> Result<LwdClient> {
     let uri: http::Uri = url.parse().context("parsing LWD url")?;
@@ -190,51 +164,3 @@ pub async fn fetch_raw_transaction(
     Ok(raw)
 }
 
-pub async fn fetch_transparent_utxos(
-    client: &mut LwdClient,
-    addresses: &[String],
-    start_height: u32,
-) -> Result<Vec<TransparentUtxo>> {
-    let req = GetAddressUtxosArg {
-        addresses: addresses.to_vec(),
-        start_height: start_height as u64,
-        max_entries: 0,
-    };
-    let reply = client
-        .get_address_utxos(tonic::Request::new(req))
-        .await
-        .context("GetAddressUtxos")?
-        .into_inner();
-
-    reply
-        .address_utxos
-        .into_iter()
-        .map(TransparentUtxo::try_from)
-        .collect()
-}
-
-pub async fn stream_transparent_utxos(
-    client: &mut LwdClient,
-    addresses: Vec<String>,
-    start_height: u32,
-) -> Result<Vec<TransparentUtxo>> {
-    let req = GetAddressUtxosArg {
-        addresses,
-        start_height: start_height as u64,
-        max_entries: 0,
-    };
-    let mut stream = client
-        .get_address_utxos_stream(tonic::Request::new(req))
-        .await
-        .context("GetAddressUtxosStream")?
-        .into_inner();
-
-    let mut utxos = Vec::new();
-    while let Some(item) = stream.next().await {
-        let r = item.context("streaming UTXO")?;
-        if let Ok(utxo) = TransparentUtxo::try_from(r) {
-            utxos.push(utxo);
-        }
-    }
-    Ok(utxos)
-}

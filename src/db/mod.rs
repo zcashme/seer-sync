@@ -24,7 +24,6 @@ pub struct SyncState {
 pub struct PoolBalance {
     pub orchard: Zatoshis,
     pub sapling: Zatoshis,
-    pub transparent: Zatoshis,
 }
 
 impl Default for PoolBalance {
@@ -32,15 +31,13 @@ impl Default for PoolBalance {
         PoolBalance {
             orchard: Zatoshis::ZERO,
             sapling: Zatoshis::ZERO,
-            transparent: Zatoshis::ZERO,
         }
     }
 }
 
 impl PoolBalance {
     pub fn total(&self) -> Zatoshis {
-
-        (self.orchard + self.sapling + self.transparent)
+        (self.orchard + self.sapling)
             .expect("summed pool balances exceed MAX_MONEY")
     }
 }
@@ -70,16 +67,6 @@ pub struct OrchardNoteInsert<'a> {
     pub is_change: bool,
     pub memo: Option<&'a [u8]>,
     pub commitment_tree_position: Option<u64>,
-}
-
-#[derive(Debug, Clone)]
-pub struct TransparentOutputInsert<'a> {
-    pub transaction_id: i64,
-    pub output_index: u32,
-    pub address: &'a str,
-    pub script: &'a [u8],
-    pub value_zat: u64,
-    pub max_observed_unspent_height: Option<u32>,
 }
 
 pub struct Db {
@@ -285,52 +272,6 @@ impl Db {
 }
 
 impl Db {
-    pub fn insert_transparent_output(
-        &self,
-        o: &TransparentOutputInsert<'_>,
-    ) -> rusqlite::Result<i64> {
-        self.conn.execute(
-            "INSERT INTO transparent_received_outputs(
-                transaction_id, output_index, address, script, value_zat,
-                max_observed_unspent_height)
-             VALUES (?1,?2,?3,?4,?5,?6)
-             ON CONFLICT(transaction_id, output_index) DO NOTHING",
-            params![
-                o.transaction_id,
-                o.output_index,
-                o.address,
-                o.script,
-                o.value_zat as i64,
-                o.max_observed_unspent_height,
-            ],
-        )?;
-        Ok(self.conn.last_insert_rowid())
-    }
-
-    pub fn mark_transparent_spent(
-        &self,
-        prevout_txid: &[u8],
-        prevout_index: u32,
-        spending_tx: i64,
-    ) -> rusqlite::Result<usize> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO transparent_spend_map(
-                spending_transaction_id, prevout_txid, prevout_output_index)
-             VALUES (?1,?2,?3)",
-            params![spending_tx, prevout_txid, prevout_index],
-        )?;
-        self.conn.execute(
-            "INSERT OR IGNORE INTO transparent_received_output_spends(
-                transparent_received_output_id, transaction_id)
-             SELECT o.id, ?3 FROM transparent_received_outputs o
-             JOIN transactions t ON t.id_tx = o.transaction_id
-             WHERE t.txid = ?1 AND o.output_index = ?2",
-            params![prevout_txid, prevout_index, spending_tx],
-        )
-    }
-}
-
-impl Db {
     pub fn balance(&self) -> rusqlite::Result<PoolBalance> {
         let sapling = self.unspent_sum(
             "SELECT COALESCE(SUM(n.value), 0) FROM sapling_received_notes n
@@ -346,18 +287,7 @@ impl Db {
                 JOIN transactions t ON t.id_tx = s.transaction_id
                 WHERE s.orchard_received_note_id = n.id AND t.mined_height IS NOT NULL)",
         )?;
-        let transparent = self.unspent_sum(
-            "SELECT COALESCE(SUM(o.value_zat), 0) FROM transparent_received_outputs o
-             WHERE NOT EXISTS (
-                SELECT 1 FROM transparent_received_output_spends s
-                JOIN transactions t ON t.id_tx = s.transaction_id
-                WHERE s.transparent_received_output_id = o.id AND t.mined_height IS NOT NULL)",
-        )?;
-        Ok(PoolBalance {
-            orchard,
-            sapling,
-            transparent,
-        })
+        Ok(PoolBalance { orchard, sapling })
     }
 
     fn unspent_sum(&self, sql: &str) -> rusqlite::Result<Zatoshis> {
@@ -491,32 +421,6 @@ mod tests {
             db.balance().unwrap().sapling,
             Zatoshis::const_from_u64(3_000_000)
         );
-    }
-
-    #[test]
-    fn transparent_received_then_spent() {
-        let db = Db::open_in_memory().unwrap();
-        let tx = mined_tx(&db, &[1u8; 32], 200);
-        db.insert_transparent_output(&TransparentOutputInsert {
-            transaction_id: tx,
-            output_index: 0,
-            address: "t1abc",
-            script: &[0x76, 0xa9],
-            value_zat: 1_000_000,
-            max_observed_unspent_height: Some(200),
-        })
-        .unwrap();
-        assert_eq!(
-            db.balance().unwrap().transparent,
-            Zatoshis::const_from_u64(1_000_000)
-        );
-
-        let spend_tx = mined_tx(&db, &[2u8; 32], 201);
-        assert_eq!(
-            db.mark_transparent_spent(&[1u8; 32], 0, spend_tx).unwrap(),
-            1
-        );
-        assert_eq!(db.balance().unwrap().transparent, Zatoshis::ZERO);
     }
 
     #[test]

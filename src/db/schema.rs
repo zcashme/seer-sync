@@ -95,45 +95,10 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 UNIQUE (orchard_received_note_id, transaction_id)
             );
 
-            -- ── Transparent ──────────────────────────────────────────────────
-            CREATE TABLE IF NOT EXISTS transparent_received_outputs (
-                id                          INTEGER PRIMARY KEY,
-                transaction_id              INTEGER NOT NULL
-                    REFERENCES transactions(id_tx) ON DELETE CASCADE,
-                output_index                INTEGER NOT NULL,
-                address                     TEXT    NOT NULL,
-                script                      BLOB    NOT NULL,
-                value_zat                   INTEGER NOT NULL,
-                max_observed_unspent_height INTEGER,
-                UNIQUE (transaction_id, output_index)
-            );
-            CREATE INDEX IF NOT EXISTS idx_transparent_received_outputs_tx
-                ON transparent_received_outputs (transaction_id);
-
-            CREATE TABLE IF NOT EXISTS transparent_received_output_spends (
-                transparent_received_output_id INTEGER NOT NULL
-                    REFERENCES transparent_received_outputs(id) ON DELETE CASCADE,
-                transaction_id                 INTEGER NOT NULL
-                    REFERENCES transactions(id_tx) ON DELETE CASCADE,
-                UNIQUE (transparent_received_output_id, transaction_id)
-            );
-
-            -- Cache of (spending tx -> spent outpoint), so a spend can be
-            -- recorded even if we discover the output it spends afterwards.
-            CREATE TABLE IF NOT EXISTS transparent_spend_map (
-                spending_transaction_id INTEGER NOT NULL
-                    REFERENCES transactions(id_tx) ON DELETE CASCADE,
-                prevout_txid            BLOB    NOT NULL,
-                prevout_output_index    INTEGER NOT NULL,
-                UNIQUE (spending_transaction_id, prevout_txid, prevout_output_index)
-            );
-
-            -- Derived transparent addresses, for gap-limit scanning.
             CREATE TABLE IF NOT EXISTS addresses (
-                id                      INTEGER PRIMARY KEY,
-                address                 TEXT    NOT NULL UNIQUE,
-                transparent_child_index INTEGER,
-                key_scope               INTEGER NOT NULL DEFAULT 0
+                id        INTEGER PRIMARY KEY,
+                address   TEXT    NOT NULL UNIQUE,
+                key_scope INTEGER NOT NULL DEFAULT 0
             );
             "#,
     )?;
