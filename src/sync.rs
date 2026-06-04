@@ -3,7 +3,7 @@ pub mod chain;
 pub mod scan;
 
 use crate::sync::chain::{DEFAULT_CHUNK_OUTPUTS, LwdClient};
-use crate::sync::scan::{scan, Transactions};
+use crate::sync::scan::{scan, Note};
 use crate::BlockHeight;
 use anyhow::Context;
 use crate::UnifiedFullViewingKey;
@@ -23,7 +23,7 @@ pub async fn run<R, W, F>(
 where
     R: FnMut() -> (BlockHeight, Option<[u8; 32]>),
     W: FnMut(BlockHeight) -> anyhow::Result<()>,
-    F: FnMut(BlockHeight, [u8; 32], &Transactions) -> anyhow::Result<()>,
+    F: FnMut(BlockHeight, [u8; 32], &[Note]) -> anyhow::Result<()>,
 {
     let mut fetch_client = client.clone();
     let tip = BlockHeight::from_u32(chain::tip_height(&mut fetch_client).await.context("tip height")?);
@@ -52,7 +52,7 @@ where
                     let txs = scan(&mut fetch_client, &batch, keys, network)
                         .await
                         .context("scanning chunk")?;
-                    sink(height, hash, &txs)?;
+                    sink(height, hash, &txs[..])?;
 
                     transport_attempts = 0;
                     rewind_by = 1;

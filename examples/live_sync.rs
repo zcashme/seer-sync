@@ -32,15 +32,14 @@ async fn main() -> Result<()> {
             Ok(())
         },
 
-        |height, _hash, txs| {
-            let n = txs.orchard.len() + txs.sapling.len();
+        |height, _hash, notes| {
+            let n = notes.len();
             if n > 0 {
                 total.set(total.get() + n);
                 println!(
-                    "  height {:>8}: {:>3} orchard, {:>3} sapling   (total {})",
+                    "  height {:>8}: {:>3} notes   (total {})",
                     u32::from(height),
-                    txs.orchard.len(),
-                    txs.sapling.len(),
+                    n,
                     total.get(),
                 );
             }

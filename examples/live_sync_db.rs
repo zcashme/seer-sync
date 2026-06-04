@@ -49,7 +49,6 @@ async fn main() -> Result<()> {
     println!("│  balance");
     println!("│    orchard      {:>16} zat", bal.orchard.into_u64());
     println!("│    sapling      {:>16} zat", bal.sapling.into_u64());
-    println!("│    transparent  {:>16} zat", bal.transparent.into_u64());
     println!("│    ───────────────────────────────");
     println!("│    total        {:>16} zat", bal.total().into_u64());
     println!("│  {memos} memo(s) recovered");
