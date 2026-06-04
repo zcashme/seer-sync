@@ -1,5 +1,5 @@
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use orchard::keys::PreparedIncomingViewingKey as OrchardPreparedIvk;
 use sapling::keys::PreparedIncomingViewingKey as SaplingPreparedIvk;
 use sapling::NullifierDerivingKey;
@@ -11,8 +11,7 @@ use zcash_protocol::memo::MemoBytes;
 use zip32::Scope;
 
 use crate::note::decrypt;
-use crate::proto::{CompactBlock, CompactTx};
-use crate::sync::chain::{self, LwdClient};
+use crate::proto::{CompactBlock, CompactTx, RawTransaction};
 
 pub enum ShieldedNote {
     Sapling(sapling::Note),
@@ -30,21 +29,10 @@ pub struct Note {
     pub memo: Option<MemoBytes>,
 }
 
-pub async fn scan(
-    client: &mut LwdClient,
-    blocks: &[CompactBlock],
+pub fn enrich_memos(
     keys: &UnifiedFullViewingKey,
     network: &Network,
-) -> Result<Vec<Note>> {
-    let mut notes = scan_compact(blocks, keys);
-    complete_memos(client, keys, network, &mut notes).await?;
-    Ok(notes)
-}
-
-async fn complete_memos(
-    client: &mut LwdClient,
-    keys: &UnifiedFullViewingKey,
-    network: &Network,
+    raw_txs: &[([u8; 32], RawTransaction)],
     notes: &mut Vec<Note>,
 ) -> Result<()> {
     let sapling_ivks: Vec<SaplingPreparedIvk> =
@@ -52,19 +40,14 @@ async fn complete_memos(
     let orchard_ivks: Vec<OrchardPreparedIvk> =
         orchard_scopes(keys).into_iter().map(|s| s.ivk).collect();
 
-    let mut txids: Vec<[u8; 32]> = notes.iter().map(|n| n.txid).collect();
-    txids.sort_unstable();
-    txids.dedup();
-
-    for txid in txids {
-        let raw = chain::fetch_raw_transaction(client, &txid)
-            .await
-            .context("fetching full transaction for memo")?;
+    for (txid, raw) in raw_txs {
         let height = BlockHeight::from_u32(raw.height as u32);
-        let tx = Transaction::read(&raw.data[..], BranchId::for_height(network, height))
-            .context("parsing full transaction")?;
+        let tx = match Transaction::read(&raw.data[..], BranchId::for_height(network, height)) {
+            Ok(tx) => tx,
+            Err(_) => continue,
+        };
 
-        for note in notes.iter_mut().filter(|n| n.txid == txid && n.memo.is_none()) {
+        for note in notes.iter_mut().filter(|n| &n.txid == txid && n.memo.is_none()) {
             let is_sapling = matches!(note.note, ShieldedNote::Sapling(_));
             let output_index = note.output_index as usize;
             let note_height = note.height;

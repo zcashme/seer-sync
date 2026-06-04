@@ -3,7 +3,7 @@ pub mod chain;
 pub mod scan;
 
 use crate::sync::chain::{DEFAULT_CHUNK_OUTPUTS, LwdClient};
-use crate::sync::scan::{scan, Note};
+use crate::sync::scan::{enrich_memos, scan_compact, Note};
 use crate::BlockHeight;
 use anyhow::Context;
 use crate::UnifiedFullViewingKey;
@@ -49,10 +49,20 @@ where
                     let height = BlockHeight::from_u32(last.height as u32);
                     let hash: [u8; 32] = last.hash[..].try_into().unwrap_or([0u8; 32]);
 
-                    let txs = scan(&mut fetch_client, &batch, keys, network)
-                        .await
-                        .context("scanning chunk")?;
-                    sink(height, hash, &txs[..])?;
+                    let mut notes = scan_compact(&batch, keys);
+                    let mut txids: Vec<[u8; 32]> = notes.iter().map(|n| n.txid).collect();
+                    txids.sort_unstable();
+                    txids.dedup();
+                    let mut raw_txs = Vec::with_capacity(txids.len());
+                    for txid in txids {
+                        let raw = chain::fetch_raw_transaction(&mut fetch_client, &txid)
+                            .await
+                            .context("fetching transaction for memo")?;
+                        raw_txs.push((txid, raw));
+                    }
+                    enrich_memos(keys, network, &raw_txs, &mut notes)
+                        .context("enriching memos")?;
+                    sink(height, hash, &notes)?;
 
                     transport_attempts = 0;
                     rewind_by = 1;
