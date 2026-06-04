@@ -9,11 +9,11 @@ use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 use zip32::Scope;
 
+use zcash_protocol::memo::MemoBytes;
+
 use crate::note::decrypt;
 use crate::proto::{CompactBlock, CompactTx};
 use crate::sync::chain::{self, LwdClient};
-
-pub type RawMemo = Box<[u8; 512]>;
 
 pub enum Tx<N, A> {
     Receive(Receive<N, A>),
@@ -52,7 +52,7 @@ pub struct Receive<N, A> {
     pub recipient: A,
     pub nf: Option<[u8; 32]>,
     pub position: Option<u64>,
-    pub memo: Option<RawMemo>,
+    pub memo: Option<MemoBytes>,
     /// `true` when the note was found with the internal-scope viewing key, i.e.
     /// it is our own change rather than a payment received from someone else.
     pub is_change: bool,

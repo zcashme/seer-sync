@@ -10,10 +10,9 @@ use sapling::{
     note_encryption::{CompactOutputDescription, SaplingDomain, Zip212Enforcement},
 };
 use zcash_note_encryption::{batch, try_note_decryption, EphemeralKeyBytes};
+use zcash_protocol::memo::MemoBytes;
 
 use crate::proto::{CompactOrchardAction, CompactSaplingOutput};
-
-pub const MEMO_SIZE: usize = 512;
 
 pub(crate) fn try_compact_sapling(
     ivk: &SaplingPreparedIvk,
@@ -64,18 +63,18 @@ pub(crate) fn parse_orchard(p: &CompactOrchardAction) -> Option<CompactAction> {
 pub fn try_decrypt_orchard<A>(
     action: &Action<A>,
     ivk: &OrchardPreparedIvk,
-) -> Option<(orchard::Note, orchard::Address, Box<[u8; MEMO_SIZE]>)> {
+) -> Option<(orchard::Note, orchard::Address, MemoBytes)> {
     let (note, recipient, memo) =
         try_note_decryption(&OrchardDomain::for_action(action), ivk, action)?;
-    Some((note, recipient, Box::new(memo)))
+    Some((note, recipient, MemoBytes::from_bytes(&memo).unwrap()))
 }
 
 pub fn try_decrypt_sapling<Proof>(
     output: &OutputDescription<Proof>,
     ivk: &SaplingPreparedIvk,
     zip212: Zip212Enforcement,
-) -> Option<(sapling::Note, sapling::PaymentAddress, Box<[u8; MEMO_SIZE]>)> {
+) -> Option<(sapling::Note, sapling::PaymentAddress, MemoBytes)> {
     let (note, recipient, memo) =
         try_note_decryption(&SaplingDomain::new(zip212), ivk, output)?;
-    Some((note, recipient, Box::new(memo)))
+    Some((note, recipient, MemoBytes::from_bytes(&memo).unwrap()))
 }
