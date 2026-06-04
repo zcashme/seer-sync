@@ -6,8 +6,6 @@ pub use zcash_protocol::consensus::Network;
 
 pub use zcash_keys::keys::UnifiedFullViewingKey;
 
-#[cfg(feature = "db")]
-pub(crate) mod keys;
 pub mod note;
 
 pub mod sync;

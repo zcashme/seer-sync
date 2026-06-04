@@ -1,4 +1,3 @@
-
 use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use std::time::Duration;
 use seer_sync::sync::chain::{connect_auto, fetch_range, tip_height};

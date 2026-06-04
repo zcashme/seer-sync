@@ -1,19 +1,19 @@
-
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use zcash_protocol::consensus::Network;
 
 use crate::db::{Db, OrchardNoteInsert, SaplingNoteInsert, SyncState};
 use crate::sync::chain::LwdClient;
 use crate::sync::scan::{Transactions, Tx};
-use crate::BlockHeight;
+use crate::{BlockHeight, UnifiedFullViewingKey};
 
 pub async fn sync_to_tip(
     db: &Db,
     client: LwdClient,
+    keys: &UnifiedFullViewingKey,
     mut progress: impl FnMut(BlockHeight),
 ) -> Result<u32> {
-    // The account the store owns is the single source of the key, network, and
-    // birthday — the caller doesn't pass any of them separately.
+    // The store fixes the chain and the birthday; the viewing key is a caller
+    // input, never persisted, so the DB never touches key material.
     let account = db
         .get_account()
         .context("reading account")?
@@ -22,13 +22,11 @@ pub async fn sync_to_tip(
         "test" => Network::TestNetwork,
         _ => Network::MainNetwork,
     };
-    let ufvk = crate::keys::decode(&network, &account.encoded)
-        .map_err(|e| anyhow!("decoding account viewing key: {e}"))?;
     let birthday = account.birthday;
 
     crate::sync::run(
         client,
-        &ufvk,
+        keys,
         &network,
         || {
             let st = db.get_sync_state().unwrap_or_default();

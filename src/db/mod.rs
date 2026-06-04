@@ -10,8 +10,6 @@ pub use schema::init;
 
 #[derive(Debug, Clone)]
 pub struct Account {
-    pub encoded: String,
-    pub key_type: String,
     pub network: String,
     pub birthday: u32,
 }
@@ -29,8 +27,6 @@ pub struct PoolBalance {
     pub transparent: Zatoshis,
 }
 
-// `Zatoshis` is range-checked and so has no `Default`; an empty balance is zero
-// in every pool.
 impl Default for PoolBalance {
     fn default() -> Self {
         PoolBalance {
@@ -43,8 +39,7 @@ impl Default for PoolBalance {
 
 impl PoolBalance {
     pub fn total(&self) -> Zatoshis {
-        // `Zatoshis + Zatoshis` is checked against MAX_MONEY and yields an
-        // `Option`; three sub-cap pool balances can never overflow the cap.
+
         (self.orchard + self.sapling + self.transparent)
             .expect("summed pool balances exceed MAX_MONEY")
     }
@@ -111,19 +106,12 @@ impl Db {
 impl Db {
     pub fn set_account(&self, account: &Account) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO account(id, encoded, key_type, network, birthday)
-             VALUES (1, ?1, ?2, ?3, ?4)
+            "INSERT INTO account(id, network, birthday)
+             VALUES (1, ?1, ?2)
              ON CONFLICT(id) DO UPDATE SET
-                encoded = excluded.encoded,
-                key_type = excluded.key_type,
                 network = excluded.network,
                 birthday = excluded.birthday",
-            params![
-                account.encoded,
-                account.key_type,
-                account.network,
-                account.birthday
-            ],
+            params![account.network, account.birthday],
         )?;
         Ok(())
     }
@@ -131,14 +119,12 @@ impl Db {
     pub fn get_account(&self) -> rusqlite::Result<Option<Account>> {
         self.conn
             .query_row(
-                "SELECT encoded, key_type, network, birthday FROM account WHERE id = 1",
+                "SELECT network, birthday FROM account WHERE id = 1",
                 [],
                 |row| {
                     Ok(Account {
-                        encoded: row.get(0)?,
-                        key_type: row.get(1)?,
-                        network: row.get(2)?,
-                        birthday: row.get(3)?,
+                        network: row.get(0)?,
+                        birthday: row.get(1)?,
                     })
                 },
             )
@@ -374,8 +360,6 @@ impl Db {
         })
     }
 
-    /// Sums a pool's unspent values into a `Zatoshis` — the conversion boundary
-    /// where raw SQL integers become a range-checked amount.
     fn unspent_sum(&self, sql: &str) -> rusqlite::Result<Zatoshis> {
         let v: i64 = self.conn.query_row(sql, [], |row| row.get(0))?;
         Ok(Zatoshis::from_u64(v as u64).expect("pool balance exceeds MAX_MONEY"))
@@ -411,8 +395,7 @@ mod tests {
 
     #[test]
     fn schema_init_is_idempotent() {
-        // The schema is a rebuildable cache with no version marker; `init`
-        // must build the tables and be safe to re-run on an existing DB.
+
         let db = Db::open_in_memory().unwrap();
         schema::init(&db.conn).unwrap();
         let tables: u32 = db
@@ -431,15 +414,10 @@ mod tests {
     fn account_roundtrip() {
         let db = Db::open_in_memory().unwrap();
         assert!(db.get_account().unwrap().is_none());
-        let acct = Account {
-            encoded: "uview1...".into(),
-            key_type: "ufvk".into(),
-            network: "main".into(),
-            birthday: 419_200,
-        };
+        let acct = Account { network: "main".into(), birthday: 419_200 };
         db.set_account(&acct).unwrap();
         let got = db.get_account().unwrap().unwrap();
-        assert_eq!(got.encoded, acct.encoded);
+        assert_eq!(got.network, "main");
         assert_eq!(got.birthday, 419_200);
     }
 

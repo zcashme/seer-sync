@@ -1,4 +1,3 @@
-
 use rusqlite::Connection;
 
 pub fn init(conn: &Connection) -> rusqlite::Result<()> {
@@ -7,11 +6,12 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
 
     conn.execute_batch(
         r#"
-            -- The single viewing key this database tracks. Exactly one row.
+            -- The single account this database tracks. Exactly one row. The
+            -- viewing key is not stored here: it is a scan input the caller
+            -- supplies, never persisted. This row only fixes which chain the
+            -- account is on and where its history begins.
             CREATE TABLE IF NOT EXISTS account (
                 id       INTEGER PRIMARY KEY CHECK (id = 1),
-                encoded  TEXT    NOT NULL,
-                key_type TEXT    NOT NULL CHECK (key_type IN ('uivk','ufvk')),
                 network  TEXT    NOT NULL CHECK (network IN ('main','test')),
                 birthday INTEGER NOT NULL DEFAULT 0
             );
