@@ -4,3 +4,9 @@ Cargo.lock
 /zcash-sync/
 /zcash_note_encryption/
 /zingolib/
+/pepper-sync/
+
+# Example output (live_sync_db writes here)
+*.db
+*.db-shm
+*.db-wal

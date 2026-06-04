@@ -1,9 +1,3 @@
-//! Bench trial-decrypt against live blocks fetched from zec.rocks.
-//!
-//! Blocks are fetched once during setup and reused across iterations so
-//! network latency is not measured — only the decrypt loop is timed.
-//!
-//!     cargo bench --bench decrypt
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use std::time::Duration;
@@ -14,10 +8,8 @@ use zcash_keys::keys::UnifiedIncomingViewingKey;
 use zcash_protocol::consensus::MainNetwork;
 
 const UIVK: &str = "uivk1gl26qy0xjja7lqhyg3pf0x4j4j66kqwewrjkdcg28eqq4wgtzjmujpee7x9cs2ec9xhnlgrm8ptlw8z80j2aryw8nqtssser2ys778a0s00uvgkdjnfr58sndhfvc3f4zqjs6ywva6";
-/// NU6 mainnet activation height — set `BENCH_FROM=2726400` to bench the full post-NU6 range.
 #[allow(dead_code)]
 const NU6: u32 = 2_726_400;
-/// Default window when BENCH_FROM is not set.
 const BENCH_WINDOW: u32 = 5_000;
 
 fn bench(c: &mut Criterion) {

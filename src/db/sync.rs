@@ -1,10 +1,3 @@
-//! The reference consumer: drive the engine and persist what it finds into the
-//! SQLite store (`feature = "lwd"` + `feature = "db"`).
-//!
-//! This is "consumer zero" — proof the engine's persistence-free seam works. It
-//! owns its cursor (the `sync_state` row) and its reorg seam (block hashes), and
-//! plugs them into [`crate::sync::run`] as three closures. The engine knows none
-//! of it.
 
 use anyhow::{Context, Result};
 use zcash_protocol::consensus::Network;
@@ -15,17 +8,12 @@ use crate::sync::chain::LwdClient;
 use crate::sync::scan::{Transactions, Tx};
 use crate::BlockHeight;
 
-/// Sync the database forward to the current chain tip, returning the height it
-/// reached.
-///
-/// Resumes from the stored cursor; on a cold start it begins at the tracked
-/// account's birthday (or genesis if none is set). Reorgs are handled by the
-/// engine's walk-back driving this consumer's [`Db::rewind_to_height`].
-///
-/// Every store op is `&self` (rusqlite mutates through `&self`), so the three
-/// closures the engine needs — `resume_point`, `rewind`, `sink` — all just share
-/// `&Db`. No `&mut` to juggle, no `RefCell`.
-pub async fn sync_to_tip(db: &Db, client: LwdClient, keys: &ScanningKeys) -> Result<u32> {
+pub async fn sync_to_tip(
+    db: &Db,
+    client: LwdClient,
+    keys: &ScanningKeys,
+    mut progress: impl FnMut(BlockHeight),
+) -> Result<u32> {
     let network = network_of(db)?;
     let birthday = db.get_account().context("reading account")?.map_or(0, |a| a.birthday);
 
@@ -33,7 +21,6 @@ pub async fn sync_to_tip(db: &Db, client: LwdClient, keys: &ScanningKeys) -> Res
         client,
         keys,
         &network,
-        // resume_point: where to start, and the seam hash to check continuity.
         || {
             let st = db.get_sync_state().unwrap_or_default();
             if st.height == 0 {
@@ -42,24 +29,19 @@ pub async fn sync_to_tip(db: &Db, client: LwdClient, keys: &ScanningKeys) -> Res
                 (BlockHeight::from_u32(st.height + 1), st.hash)
             }
         },
-        // rewind: drop everything above the fork; resets the cursor too.
         |to| db.rewind_to_height(u32::from(to)).context("rewinding after reorg"),
-        // sink: apply one chunk and advance the cursor.
-        |height, hash, txs| apply(db, height, hash, txs),
+        |height, hash, txs| {
+            apply(db, height, hash, txs)?;
+            progress(height);
+            Ok(())
+        },
     )
     .await?;
 
     Ok(db.get_sync_state().context("reading final cursor")?.height)
 }
 
-/// Apply one chunk's findings, then advance the cursor — the consumer's half of
-/// the boundary contract.
 fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], txs: &Transactions) -> Result<()> {
-    // No block row to write: an observer tracks notes by height, and the cursor
-    // (set at the end) is the only chain-position state. Receives first (a note
-    // must exist before a spend can link to it), then spends — and a spend is
-    // recorded only when its nullifier matches a note we already own, so the
-    // store fills with the wallet's transactions, not every spend on chain.
     for tx in &txs.orchard {
         match tx {
             Tx::Receive(r) => {
@@ -110,13 +92,10 @@ fn apply(db: &Db, height: BlockHeight, hash: [u8; 32], txs: &Transactions) -> Re
         }
     }
 
-    // Advance the cursor to this chunk's tip, recording the seam hash.
     db.set_sync_state(&SyncState { height: u32::from(height), hash: Some(hash) })?;
     Ok(())
 }
 
-/// The network the tracked account is on, for transaction parsing and ZIP-212
-/// enforcement. Defaults to mainnet when no account is set.
 fn network_of(db: &Db) -> Result<Network> {
     Ok(match db.get_account()?.map(|a| a.network).as_deref() {
         Some("test") => Network::TestNetwork,

@@ -1,73 +1,36 @@
-//! Syncing: keep current with the chain.
-//!
-//! - [`scan`](scan::scan) (`lwd`, async) scans a slice of blocks into the
-//!   *complete* [`Transactions`](scan::Transactions) relevant to a key: phase 1
-//!   compact-decrypts to find them (via [`crate::note`]), phase 2 fetches each
-//!   owning full transaction (via [`chain`]) and full-decrypts it to recover the
-//!   memo. [`scan::scan_compact`] is the sans-IO phase-1 half on its own.
-//! - [`chain`] fetches compact blocks and full transactions from lightwalletd.
-//! - [`run`] is the loop that keeps a consumer current.
-//!
-//! [`run`] is persistence-free: the consumer supplies three closures over its
-//! own store — `resume_point` (where to start + the seam hash), `rewind` (drop
-//! state above a height), and `sink` (apply a chunk) — and `run` drives the
-//! sweep, handling transport faults and reorgs inline. The engine reads no
-//! consumer state and exposes no outcome to match: it returns when synced.
 
-#[cfg(feature = "lwd")]
 pub mod chain;
-#[cfg(feature = "lwd")]
 pub mod scan;
 
-/// Transient transport failures to absorb (reconnect + resume) before giving up.
-#[cfg(feature = "lwd")]
+use crate::keys::ScanningKeys;
+use crate::sync::chain::{DEFAULT_CHUNK_OUTPUTS, LwdClient};
+use crate::sync::scan::{scan, Transactions};
+use crate::BlockHeight;
+use anyhow::Context;
+use futures::StreamExt;
+use zcash_protocol::consensus::Network;
+
 const MAX_TRANSPORT_RETRIES: usize = 4;
 
-/// Sync a consumer forward to the chain tip.
-///
-/// `resume_point` reports `(start, seam)` from the consumer's persisted cursor
-/// (the seam is the hash of the block before `start`, for continuity across the
-/// resume boundary; `None` on a cold start). `sink` applies one chunk — given
-/// the chunk's last height (the new scanned watermark), that block's hash (the
-/// seam to record), and the [`scan::Transactions`] found (usually empty, but
-/// still applied so the cursor advances). `rewind` drops everything above a
-/// height when a reorg is detected.
-///
-/// Both faults are handled inline: a dropped stream reconnects and resumes from
-/// the consumer's cursor; a reorg calls `rewind` with a doubling walk-back
-/// (1, 2, 4, … blocks until the seam reconnects) and re-resumes. Returns once
-/// the tip is reached.
-#[cfg(feature = "lwd")]
 pub async fn run<R, W, F>(
-    client: crate::sync::chain::LwdClient,
-    keys: &crate::keys::ScanningKeys,
-    network: &zcash_protocol::consensus::Network,
+    client: LwdClient,
+    keys: &ScanningKeys,
+    network: &Network,
     mut resume_point: R,
     mut rewind: W,
     mut sink: F,
 ) -> anyhow::Result<()>
 where
-    R: FnMut() -> (crate::BlockHeight, Option<[u8; 32]>),
-    W: FnMut(crate::BlockHeight) -> anyhow::Result<()>,
-    F: FnMut(crate::BlockHeight, [u8; 32], &crate::sync::scan::Transactions) -> anyhow::Result<()>,
+    R: FnMut() -> (BlockHeight, Option<[u8; 32]>),
+    W: FnMut(BlockHeight) -> anyhow::Result<()>,
+    F: FnMut(BlockHeight, [u8; 32], &Transactions) -> anyhow::Result<()>,
 {
-    use crate::sync::chain::{self, DEFAULT_CHUNK_OUTPUTS};
-    use crate::sync::scan::scan;
-    use crate::BlockHeight;
-    use anyhow::Context;
-    use futures::StreamExt;
-
-    // A cheap clone sharing the gRPC channel, used for the tip query and for
-    // scan's phase-2 full-transaction fetches, while the block stream owns its
-    // own client.
     let mut fetch_client = client.clone();
     let tip = BlockHeight::from_u32(chain::tip_height(&mut fetch_client).await.context("tip height")?);
 
     let mut rewind_by: u32 = 1;
     let mut transport_attempts: usize = 0;
 
-    // Outer loop: (re-)resume from the consumer's cursor. Re-entered after a
-    // reorg rewind or a transport reconnect.
     loop {
         let (start, seam) = resume_point();
         if start > tip {
@@ -76,10 +39,8 @@ where
         let mut stream =
             chain::blocks(client.clone(), u32::from(start), u32::from(tip), DEFAULT_CHUNK_OUTPUTS, seam);
 
-        // Inner loop: consume chunks until the stream ends, a reorg, or a fault.
         loop {
             let Some(item) = stream.next().await else {
-                // Stream drained cleanly — reached the tip.
                 return Ok(());
             };
             match item {
@@ -93,20 +54,15 @@ where
                         .context("scanning chunk")?;
                     sink(height, hash, &txs)?;
 
-                    // Forward progress clears both backoffs.
                     transport_attempts = 0;
                     rewind_by = 1;
                 }
-                // Reorg: only the consumer can rewind its store. Walk back and
-                // re-resume; double the step until the seam reconnects.
                 Err(e) if e.downcast_ref::<chain::Reorg>().is_some() => {
                     let chain::Reorg(at) = e.downcast::<chain::Reorg>().expect("downcast checked");
                     rewind(BlockHeight::from_u32(at.saturating_sub(rewind_by)))?;
                     rewind_by = rewind_by.saturating_mul(2);
                     break;
                 }
-                // Transport fault: reconnect and resume from the consumer's
-                // cursor (which reflects the last applied chunk).
                 Err(e) => {
                     if transport_attempts < MAX_TRANSPORT_RETRIES {
                         transport_attempts += 1;

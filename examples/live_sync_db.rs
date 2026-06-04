@@ -33,9 +33,11 @@ const BIRTHDAY: u32 = 3_000_000;
 async fn main() -> Result<()> {
     let network = Network::MainNetwork;
 
-    // The store owns everything stateful. In-memory here so the example is
-    // self-contained; swap `Db::open("wallet.db")` to keep it across runs.
-    let db = Db::open_in_memory()?;
+    // The store owns everything stateful, including the scan cursor. A file DB
+    // keeps that cursor on disk, so a crash or Ctrl-C resumes from where it left
+    // off instead of restarting at the birthday. (Use `Db::open_in_memory()` for
+    // a throwaway run that intentionally keeps nothing.)
+    let db = Db::open("wallet.db")?;
     db.set_account(&Account {
         encoded: UFVK.into(),
         key_type: "ufvk".into(),
@@ -54,7 +56,7 @@ async fn main() -> Result<()> {
     println!("│  network    mainnet");
     println!("│  birthday   {BIRTHDAY}");
     println!("│  tip        {tip}");
-    println!("│  store      in-memory SQLite");
+    println!("│  store      wallet.db (on disk)");
     println!("├───────────────────────────────────────────────────");
 
     // The store holds the cursor, so this is the whole sync. It reads the

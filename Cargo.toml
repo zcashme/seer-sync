@@ -11,25 +11,11 @@ keywords = ["zcash", "sync", "lightwalletd", "viewing-key", "orchard"]
 publish = false
 
 [features]
-# Default to the lightwalletd client so `cargo add seer-sync` can sync out of the
-# box. The DB is opt-in persistence; the bare crate (no features) is a pure,
-# sans-IO decryptor.
-default = ["lwd"]
-# "Talk to lightwalletd": the gRPC client, memo enrichment, and the live
-# orchestration engine — everything that reaches the network. Pulls the async +
-# gRPC + full-transaction-parsing cluster.
-lwd = [
-    "dep:tonic",
-    "dep:tonic-prost",
-    "dep:tokio",
-    "dep:tokio-stream",
-    "dep:http",
-    "dep:futures",
-    "dep:zcash_primitives",
-    "dep:anyhow",
-    "dep:thiserror",
-]
-# "Remember across runs": the reference SQLite consumer.
+# `cargo add seer-sync` syncs against lightwalletd out of the box — the gRPC
+# client and live engine are core. `db` is the only knob: opt-in persistence via
+# the reference SQLite consumer. Without it you bring your own store and consume
+# the engine's notes directly.
+default = []
 db = ["dep:rusqlite"]
 
 [dependencies]
@@ -42,23 +28,23 @@ sapling = { package = "sapling-crypto", version = "0.7", default-features = fals
 zcash_protocol = { version = "0.8", default-features = false, features = ["std"] }
 zcash_keys = { version = "0.13", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
 zip32 = "0.2"
-# Decoder for the generated proto *message* types (always present; the gRPC
-# client is generated only under `lwd`, see build.rs).
+# Decoder for the generated proto *message* types (the gRPC client is generated
+# alongside them; see build.rs).
 prost = "0.14"
 
-# ── `lwd` cluster (network / async, optional) ────────────────────────────────
+# ── Network / async cluster (the live layer) ─────────────────────────────────
 # Full-transaction parsing for memo enrichment (a note's memo lives in the full
 # ciphertext that compact blocks truncate).
-zcash_primitives = { version = "0.27", default-features = false, optional = true }
+zcash_primitives = { version = "0.27", default-features = false }
 # gRPC + async (driver layer).
-tonic = { version = "0.14", default-features = false, features = ["transport", "tls-ring", "tls-webpki-roots", "codegen"], optional = true }
-tonic-prost = { version = "0.14", optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
-tokio-stream = { version = "0.1", optional = true }
-http = { version = "1", optional = true }
-futures = { version = "0.3", optional = true }
-anyhow = { version = "1", optional = true }
-thiserror = { version = "2", optional = true }
+tonic = { version = "0.14", default-features = false, features = ["transport", "tls-ring", "tls-webpki-roots", "codegen"] }
+tonic-prost = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio-stream = "0.1"
+http = "1"
+futures = "0.3"
+anyhow = "1"
+thiserror = "2"
 
 # ── `db` (persistence, optional) ─────────────────────────────────────────────
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
@@ -76,3 +62,8 @@ tokio-test = "0.4"
 [[bench]]
 name = "decrypt"
 harness = false
+
+# Persists into a Db, so it needs the `db` feature.
+[[example]]
+name = "live_sync_db"
+required-features = ["db"]

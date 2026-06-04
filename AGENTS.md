@@ -41,15 +41,16 @@ schema lives in its `src/wallet/db.rs`). It is not a dependency.
   memos, so its findings come back complete.
 - `src/sync/chain.rs` — the one lightwalletd block producer (`blocks()` streams
   compact blocks; `fetch_raw_transaction` serves phase 2). The only IO.
-- `src/sync.rs` — the persistence-free `run()` loop (`feature = "lwd"`). Drives
+- `src/sync.rs` — the persistence-free `run()` loop. Drives
   fetch → `scan()` → consumer over three closures (`resume_point`, `rewind`,
   `sink`), handling transport faults and reorgs inline. Reads no consumer state.
   See **Sync architecture**.
-- `src/db/` — raw rusqlite (`feature = "db"`). `schema.rs` is a stripped
-  descendant of `zcash_client_sqlite`. `sync.rs` is **consumer zero**:
-  `sync_to_tip()` wires the `Db` into `run()`'s three closures. The sans-IO core
-  builds with `--no-default-features`.
-- `proto/` — vendored lightwalletd `.proto`; `build.rs` generates client stubs.
+- `src/db/` — raw rusqlite (`feature = "db"`, the crate's only feature).
+  `schema.rs` is a stripped descendant of `zcash_client_sqlite`. `sync.rs` is
+  **consumer zero**: `sync_to_tip()` wires the `Db` into `run()`'s three closures
+  (plus a `progress` callback ticked per chunk).
+- `proto/` — vendored lightwalletd `.proto`; `build.rs` always generates client
+  stubs (server stubs off — we only ever call lightwalletd, never serve it).
 
 ## Sync architecture
 
@@ -60,10 +61,14 @@ state above a height), `sink` (apply one chunk) — and `run` drives the sweep.
 `src/db/sync.rs::sync_to_tip` is the reference wiring.
 
 - **One stream to the tip.** `run` opens a single `GetBlockRange` for
-  `[start, tip]`. `chain::blocks`/`download` chunks it by output-cost into a
-  `channel(1)`-backpressured stream; the spawned downloader stays one batch
-  ahead, so network fetch overlaps CPU decrypt for free. Memory is bounded by the
-  chunk size, not the range.
+  `[start, tip]`. `chain::blocks`/`download` chunks it by output-cost *or* block
+  count — `DEFAULT_CHUNK_OUTPUTS` / `DEFAULT_CHUNK_BLOCKS`, whichever trips first —
+  into a `channel(1)`-backpressured stream; the spawned downloader stays one batch
+  ahead, so network fetch overlaps CPU decrypt for free. The two caps guard
+  different axes: outputs bound scan work + memory per chunk; the block cap keeps
+  progress + cursor checkpoints regular in sparse regions (near height 3M density
+  is ~1 output/block, so an output-only chunk would span ~95k blocks). Memory is
+  bounded by the chunk size, not the range.
 - **Crash-safe by the cursor.** `sink` advances the consumer's cursor after
   *every* batch. A dropped stream is retried (`MAX_TRANSPORT_RETRIES`) and
   re-resumes from `resume_point`; nothing is re-fetched.
@@ -137,6 +142,13 @@ tx into the `memo` columns).
   `BENCH_FROM=2726400` to sweep the full post-NU6 range. Uses a UIVK with **zero
   mainnet notes** (confirmed across recent + 4 post-NU6 windows — don't re-hunt),
   so it measures the decrypt hot path itself, not hit-handling.
+- **Examples** (`examples/`): `live_sync.rs` drives the bare `run()` loop with an
+  in-memory `Cell` cursor (no store); `live_sync_db.rs` (`--features db`) is the
+  store path — one `sync_to_tip()` call with a `%`-progress closure, then a
+  balance/memo report. Both are live and pin `na.zec.rocks` directly:
+  `connect_auto()` health-checks liveness only and tends to land on `zec.rocks`,
+  whose block *streaming* is ~9× slower (a flaw worth fixing — probe throughput,
+  not just liveness; `DEFAULT_SERVERS` also has dead/timing-out entries).
 
 ## Conventions
 
