@@ -1,7 +1,5 @@
 mod schema;
 
-pub mod sync;
-
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
 use zcash_protocol::value::Zatoshis;

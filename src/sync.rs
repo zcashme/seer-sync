@@ -3,10 +3,10 @@ pub mod chain;
 pub mod scan;
 
 use crate::sync::chain::{DEFAULT_CHUNK_OUTPUTS, LwdClient};
-use crate::sync::scan::{enrich_memos, scan_compact, Note};
+use crate::sync::scan::{enrich_memos, scan_compact, scan_sent, Note};
 use crate::BlockHeight;
+use crate::ViewKey;
 use anyhow::Context;
-use crate::UnifiedFullViewingKey;
 use futures::StreamExt;
 use zcash_protocol::consensus::Network;
 
@@ -14,7 +14,7 @@ const MAX_TRANSPORT_RETRIES: usize = 4;
 
 pub async fn run<R, W, F>(
     client: LwdClient,
-    keys: &UnifiedFullViewingKey,
+    keys: &ViewKey,
     network: &Network,
     mut resume_point: R,
     mut rewind: W,
@@ -62,6 +62,8 @@ where
                     }
                     enrich_memos(keys, network, &raw_txs, &mut notes)
                         .context("enriching memos")?;
+                    scan_sent(keys, network, &raw_txs, &mut notes)
+                        .context("scanning sent")?;
                     sink(height, hash, &notes)?;
 
                     transport_attempts = 0;

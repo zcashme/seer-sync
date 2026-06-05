@@ -1,17 +1,14 @@
 
 use anyhow::Result;
-use orchard::keys::PreparedIncomingViewingKey as OrchardPreparedIvk;
-use sapling::keys::PreparedIncomingViewingKey as SaplingPreparedIvk;
-use sapling::NullifierDerivingKey;
-use zcash_keys::keys::UnifiedFullViewingKey;
 use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 use zcash_protocol::memo::MemoBytes;
-use zip32::Scope;
 
-use crate::note::decrypt;
+use crate::key::{OrchardIncoming, SaplingIncoming};
+use crate::decrypt;
 use crate::proto::{CompactBlock, CompactTx, RawTransaction};
+use crate::ViewKey;
 
 pub enum ShieldedNote {
     Sapling(sapling::Note),
@@ -28,16 +25,14 @@ pub struct Note {
     pub memo: Option<MemoBytes>,
 }
 
-pub fn enrich_memos(
-    keys: &UnifiedFullViewingKey,
+pub(crate) fn enrich_memos(
+    keys: &ViewKey,
     network: &Network,
     raw_txs: &[([u8; 32], RawTransaction)],
     notes: &mut Vec<Note>,
 ) -> Result<()> {
-    let sapling_ivks: Vec<SaplingPreparedIvk> =
-        sapling_scopes(keys).into_iter().map(|s| s.ivk).collect();
-    let orchard_ivks: Vec<OrchardPreparedIvk> =
-        orchard_scopes(keys).into_iter().map(|s| s.ivk).collect();
+    let sapling = keys.sapling_incoming();
+    let orchard = keys.orchard_incoming();
 
     for (txid, raw) in raw_txs {
         let height = BlockHeight::from_u32(raw.height as u32);
@@ -55,8 +50,8 @@ pub fn enrich_memos(
                 if let Some(bundle) = tx.sapling_bundle() {
                     if let Some(output) = bundle.shielded_outputs().get(output_index) {
                         let zip212 = zip212_enforcement(network, note_height);
-                        for ivk in &sapling_ivks {
-                            if let Some((.., memo)) = decrypt::try_decrypt_sapling(output, ivk, zip212) {
+                        for s in &sapling {
+                            if let Some((.., memo)) = decrypt::try_decrypt_sapling(output, &s.ivk, zip212) {
                                 note.memo = Some(memo);
                                 break;
                             }
@@ -65,8 +60,8 @@ pub fn enrich_memos(
                 }
             } else if let Some(bundle) = tx.orchard_bundle() {
                 if let Some(action) = bundle.actions().get(output_index) {
-                    for ivk in &orchard_ivks {
-                        if let Some((.., memo)) = decrypt::try_decrypt_orchard(action, ivk) {
+                    for o in &orchard {
+                        if let Some((.., memo)) = decrypt::try_decrypt_orchard(action, &o.ivk) {
                             note.memo = Some(memo);
                             break;
                         }
@@ -78,61 +73,32 @@ pub fn enrich_memos(
     Ok(())
 }
 
-struct SaplingScope {
-    ivk: SaplingPreparedIvk,
-    nk: NullifierDerivingKey,
-}
+pub fn scan_compact(blocks: &[CompactBlock], keys: &ViewKey) -> Vec<Note> {
+    let sapling = keys.sapling_incoming();
+    let orchard = keys.orchard_incoming();
+    let sapling = sapling.as_slice();
+    let orchard = orchard.as_slice();
 
-struct OrchardScope {
-    ivk: OrchardPreparedIvk,
-}
-
-fn sapling_scopes(keys: &UnifiedFullViewingKey) -> Vec<SaplingScope> {
-    keys.sapling()
-        .map(|dfvk| {
-            [Scope::External, Scope::Internal]
-                .into_iter()
-                .map(|scope| SaplingScope {
-                    ivk: SaplingPreparedIvk::new(&dfvk.to_ivk(scope)),
-                    nk: dfvk.to_nk(scope),
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn orchard_scopes(keys: &UnifiedFullViewingKey) -> Vec<OrchardScope> {
-    keys.orchard()
-        .map(|fvk| {
-            [Scope::External, Scope::Internal]
-                .into_iter()
-                .map(|scope| OrchardScope {
-                    ivk: OrchardPreparedIvk::new(&fvk.to_ivk(scope)),
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-pub fn scan_compact(blocks: &[CompactBlock], keys: &UnifiedFullViewingKey) -> Vec<Note> {
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     if threads <= 1 || blocks.len() < 64 {
-        return scan_compact_serial(blocks, keys);
+        return scan_compact_serial(blocks, sapling, orchard);
     }
 
     let chunk = blocks.len().div_ceil(threads);
     std::thread::scope(|s| {
-        let handles: Vec<_> =
-            blocks.chunks(chunk).map(|c| s.spawn(move || scan_compact_serial(c, keys))).collect();
+        let handles: Vec<_> = blocks
+            .chunks(chunk)
+            .map(|c| s.spawn(move || scan_compact_serial(c, sapling, orchard)))
+            .collect();
         handles.into_iter().flat_map(|h| h.join().expect("scan thread panicked")).collect()
     })
 }
 
-fn scan_compact_serial(blocks: &[CompactBlock], keys: &UnifiedFullViewingKey) -> Vec<Note> {
-    let sapling = sapling_scopes(keys);
-    let orchard = orchard_scopes(keys);
-    let orchard_fvk = keys.orchard();
-
+fn scan_compact_serial(
+    blocks: &[CompactBlock],
+    sapling: &[SaplingIncoming],
+    orchard: &[OrchardIncoming],
+) -> Vec<Note> {
     let mut out = Vec::new();
 
     for block in blocks {
@@ -161,7 +127,7 @@ fn scan_compact_serial(blocks: &[CompactBlock], keys: &UnifiedFullViewingKey) ->
                 }
             }
 
-            for scope in &sapling {
+            for scope in sapling {
                 for (i, hit) in
                     decrypt::try_compact_sapling(&scope.ivk, descs.clone()).into_iter().enumerate()
                 {
@@ -184,7 +150,7 @@ fn scan_compact_serial(blocks: &[CompactBlock], keys: &UnifiedFullViewingKey) ->
             }
         }
 
-        if let Some(fvk) = orchard_fvk {
+        if !orchard.is_empty() {
             let mut actions = Vec::new();
             let mut meta: Vec<([u8; 32], u32, u32)> = Vec::new();
             for tx in &block.vtx {
@@ -198,13 +164,13 @@ fn scan_compact_serial(blocks: &[CompactBlock], keys: &UnifiedFullViewingKey) ->
                 }
             }
 
-            for scope in &orchard {
+            for scope in orchard {
                 for (i, hit) in
                     decrypt::try_compact_orchard(&scope.ivk, actions.clone()).into_iter().enumerate()
                 {
                     if let Some((note, _recipient)) = hit {
                         let (txid, tx_index, output_index) = meta[i];
-                        let nullifier = note.nullifier(fvk).to_bytes();
+                        let nullifier = note.nullifier(&scope.fvk).to_bytes();
                         out.push(Note {
                             note: ShieldedNote::Orchard(note),
                             height,
@@ -224,30 +190,13 @@ fn scan_compact_serial(blocks: &[CompactBlock], keys: &UnifiedFullViewingKey) ->
 }
 
 pub fn scan_sent(
-    keys: &UnifiedFullViewingKey,
+    keys: &ViewKey,
     network: &Network,
     raw_txs: &[([u8; 32], RawTransaction)],
     notes: &mut Vec<Note>,
 ) -> Result<()> {
-    let sapling_ovks: Vec<_> = keys
-        .sapling()
-        .map(|dfvk| {
-            [Scope::External, Scope::Internal]
-                .into_iter()
-                .map(|scope| dfvk.to_ovk(scope))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    let orchard_ovks: Vec<_> = keys
-        .orchard()
-        .map(|fvk| {
-            [Scope::External, Scope::Internal]
-                .into_iter()
-                .map(|scope| fvk.to_ovk(scope))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let sapling_ovks = keys.sapling_ovks();
+    let orchard_ovks = keys.orchard_ovks();
 
     let claimed: std::collections::HashSet<([u8; 32], u32)> =
         notes.iter().map(|n| (n.txid, n.output_index)).collect();
