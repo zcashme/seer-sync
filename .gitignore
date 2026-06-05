@@ -5,6 +5,7 @@ Cargo.lock
 /zcash_note_encryption/
 /zingolib/
 /pepper-sync/
+/librustzcash/
 
 # Example output (live_sync_db writes here)
 *.db
