@@ -63,6 +63,9 @@ tokio-test = "0.4"
 name = "decrypt"
 harness = false
 
+[[example]]
+name = "live_sync"
+
 # Persists into a Db, so it needs the `db` feature.
 [[example]]
 name = "live_sync_db"

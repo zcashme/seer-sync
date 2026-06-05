@@ -49,6 +49,9 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 memo                     BLOB,
                 commitment_tree_position INTEGER,
                 spent_height             INTEGER,
+                -- 0 = a note you received (spendable, counts toward balance);
+                -- 1 = an output you sent, recovered via OVK (display only).
+                is_outgoing              INTEGER NOT NULL DEFAULT 0,
                 UNIQUE (transaction_id, output_index)
             );
             CREATE INDEX IF NOT EXISTS idx_sapling_received_notes_tx
@@ -70,6 +73,9 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 memo                     BLOB,
                 commitment_tree_position INTEGER,
                 spent_height             INTEGER,
+                -- 0 = a note you received (spendable, counts toward balance);
+                -- 1 = an output you sent, recovered via OVK (display only).
+                is_outgoing              INTEGER NOT NULL DEFAULT 0,
                 UNIQUE (transaction_id, action_index)
             );
             CREATE INDEX IF NOT EXISTS idx_orchard_received_notes_tx
