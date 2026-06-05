@@ -5,8 +5,8 @@ use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 use zcash_protocol::memo::MemoBytes;
 
-use crate::key::{OrchardIncoming, SaplingIncoming};
 use crate::decrypt;
+use crate::key::{OrchardIncoming, SaplingIncoming};
 use crate::proto::{CompactBlock, CompactTx, RawTransaction};
 use crate::ViewKey;
 
@@ -34,8 +34,8 @@ pub(crate) fn enrich_memos(
     raw_txs: &[([u8; 32], RawTransaction)],
     notes: &mut Vec<Note>,
 ) -> Result<()> {
-    let sapling = keys.sapling_incoming();
-    let orchard = keys.orchard_incoming();
+    let sapling = &keys.sapling_incoming;
+    let orchard = &keys.orchard_incoming;
 
     for (txid, raw) in raw_txs {
         let height = BlockHeight::from_u32(raw.height as u32);
@@ -53,8 +53,10 @@ pub(crate) fn enrich_memos(
                 if let Some(bundle) = tx.sapling_bundle() {
                     if let Some(output) = bundle.shielded_outputs().get(output_index) {
                         let zip212 = zip212_enforcement(network, note_height);
-                        for s in &sapling {
-                            if let Some((.., memo)) = decrypt::try_decrypt_sapling(output, &s.ivk, zip212) {
+                        for s in sapling {
+                            if let Some((.., memo)) =
+                                decrypt::try_decrypt_sapling(output, &s.ivk, zip212)
+                            {
                                 note.memo = Some(memo);
                                 break;
                             }
@@ -63,7 +65,7 @@ pub(crate) fn enrich_memos(
                 }
             } else if let Some(bundle) = tx.orchard_bundle() {
                 if let Some(action) = bundle.actions().get(output_index) {
-                    for o in &orchard {
+                    for o in orchard {
                         if let Some((.., memo)) = decrypt::try_decrypt_orchard(action, &o.ivk) {
                             note.memo = Some(memo);
                             break;
@@ -77,10 +79,8 @@ pub(crate) fn enrich_memos(
 }
 
 pub fn scan_compact(blocks: &[CompactBlock], keys: &ViewKey) -> Vec<Note> {
-    let sapling = keys.sapling_incoming();
-    let orchard = keys.orchard_incoming();
-    let sapling = sapling.as_slice();
-    let orchard = orchard.as_slice();
+    let sapling = keys.sapling_incoming.as_slice();
+    let orchard = keys.orchard_incoming.as_slice();
 
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     if threads <= 1 || blocks.len() < 64 {
@@ -200,8 +200,8 @@ pub fn scan_sent(
     raw_txs: &[([u8; 32], RawTransaction)],
     notes: &mut Vec<Note>,
 ) -> Result<()> {
-    let sapling_ovks = keys.sapling_ovks();
-    let orchard_ovks = keys.orchard_ovks();
+    let sapling_ovks = &keys.sapling_ovks;
+    let orchard_ovks = &keys.orchard_ovks;
 
     let claimed: std::collections::HashSet<([u8; 32], u32)> =
         notes.iter().map(|n| (n.txid, n.output_index)).collect();
@@ -219,7 +219,7 @@ pub fn scan_sent(
                 if claimed.contains(&(*txid, oi as u32)) {
                     continue;
                 }
-                for ovk in &sapling_ovks {
+                for ovk in sapling_ovks {
                     if let Some((note, _, memo)) =
                         decrypt::try_decrypt_sapling_sent(output, ovk, zip212)
                     {
@@ -244,10 +244,8 @@ pub fn scan_sent(
                 if claimed.contains(&(*txid, ai as u32)) {
                     continue;
                 }
-                for ovk in &orchard_ovks {
-                    if let Some((note, _, memo)) =
-                        decrypt::try_decrypt_orchard_sent(action, ovk)
-                    {
+                for ovk in orchard_ovks {
+                    if let Some((note, _, memo)) = decrypt::try_decrypt_orchard_sent(action, ovk) {
                         notes.push(Note {
                             note: ShieldedNote::Orchard(note),
                             height,

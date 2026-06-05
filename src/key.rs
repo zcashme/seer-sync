@@ -1,9 +1,9 @@
 //! The crate's view-key boundary.
 //!
-//! [`ViewKey`] seals a Unified Full Viewing Key behind this crate's own type, so
-//! `zcash_keys` never appears in the public API. Callers construct a `ViewKey`
-//! from its string encoding; the rest of the crate consumes only the *derived*
-//! keys this module produces — it never sees the UFVK itself.
+//! [`ViewKey`] pre-derives all keys the scan engine needs from a Unified Full
+//! Viewing Key and then drops it. `zcash_keys` only appears inside the
+//! [`ViewKey::decode`] constructor — it never touches the struct definition or
+//! any other public surface.
 
 use orchard::keys::{
     FullViewingKey as OrchardFvk, OutgoingViewingKey as OrchardOvk,
@@ -19,10 +19,13 @@ use zip32::Scope;
 
 /// A Zcash view-only key — the only key material the sync engine needs.
 ///
-/// Wraps a Unified Full Viewing Key so that `zcash_keys` stays an implementation
-/// detail. Construct one with [`ViewKey::decode`].
+/// All protocol-specific keys are pre-derived at construction; the UFVK is
+/// dropped immediately after. Construct one with [`ViewKey::decode`].
 pub struct ViewKey {
-    ufvk: UnifiedFullViewingKey,
+    pub(crate) sapling_incoming: Vec<SaplingIncoming>,
+    pub(crate) orchard_incoming: Vec<OrchardIncoming>,
+    pub(crate) sapling_ovks: Vec<SaplingOvk>,
+    pub(crate) orchard_ovks: Vec<OrchardOvk>,
 }
 
 /// A Sapling incoming viewing key paired with the nullifier-deriving key that
@@ -41,37 +44,22 @@ pub(crate) struct OrchardIncoming {
 }
 
 impl ViewKey {
-    /// Decodes a Unified Full Viewing Key from its `uview…` string encoding.
+    /// Decodes a Unified Full Viewing Key from its `uview…` string encoding,
+    /// pre-derives all scan keys, and drops the UFVK.
     pub fn decode(network: &Network, encoding: &str) -> Result<Self, String> {
-        Ok(Self { ufvk: UnifiedFullViewingKey::decode(network, encoding)? })
-    }
-
-    /// Sapling incoming keys, one per scope (external, internal). Empty if the
-    /// UFVK carries no Sapling key.
-    pub(crate) fn sapling_incoming(&self) -> Vec<SaplingIncoming> {
-        per_scope(self.ufvk.sapling(), |dfvk, scope| SaplingIncoming {
-            ivk: SaplingPreparedIvk::new(&dfvk.to_ivk(scope)),
-            nk: dfvk.to_nk(scope),
+        let ufvk = UnifiedFullViewingKey::decode(network, encoding)?;
+        Ok(Self {
+            sapling_incoming: per_scope(ufvk.sapling(), |dfvk, scope| SaplingIncoming {
+                ivk: SaplingPreparedIvk::new(&dfvk.to_ivk(scope)),
+                nk: dfvk.to_nk(scope),
+            }),
+            orchard_incoming: per_scope(ufvk.orchard(), |fvk, scope| OrchardIncoming {
+                ivk: OrchardPreparedIvk::new(&fvk.to_ivk(scope)),
+                fvk: fvk.clone(),
+            }),
+            sapling_ovks: per_scope(ufvk.sapling(), |dfvk, scope| dfvk.to_ovk(scope)),
+            orchard_ovks: per_scope(ufvk.orchard(), |fvk, scope| fvk.to_ovk(scope)),
         })
-    }
-
-    /// Orchard incoming keys, one per scope (external, internal). Empty if the
-    /// UFVK carries no Orchard key.
-    pub(crate) fn orchard_incoming(&self) -> Vec<OrchardIncoming> {
-        per_scope(self.ufvk.orchard(), |fvk, scope| OrchardIncoming {
-            ivk: OrchardPreparedIvk::new(&fvk.to_ivk(scope)),
-            fvk: fvk.clone(),
-        })
-    }
-
-    /// Sapling outgoing viewing keys, one per scope — for recovering sent notes.
-    pub(crate) fn sapling_ovks(&self) -> Vec<SaplingOvk> {
-        per_scope(self.ufvk.sapling(), |dfvk, scope| dfvk.to_ovk(scope))
-    }
-
-    /// Orchard outgoing viewing keys, one per scope — for recovering sent notes.
-    pub(crate) fn orchard_ovks(&self) -> Vec<OrchardOvk> {
-        per_scope(self.ufvk.orchard(), |fvk, scope| fvk.to_ovk(scope))
     }
 }
 

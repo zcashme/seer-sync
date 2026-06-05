@@ -1,3 +1,17 @@
+// No-db example: use sync::run directly with in-memory state.
+//
+// seer_sync::scan() (the db convenience API) handles connection and key
+// decoding internally. sync::run is the raw engine beneath it — you wire
+// those yourself and supply three callbacks:
+//
+//   resume_point  where to start (or resume after a reorg)
+//   rewind        called when a reorg is detected; drop state above that height
+//   sink          called per batch with the notes found in that batch
+//
+// This example accumulates gross received balance. It ignores spends — for
+// a true balance you would also need to check compact block nullifiers against
+// your own and subtract spent notes.
+
 use anyhow::{anyhow, Result};
 use seer_sync::sync::chain;
 use seer_sync::sync::scan::ShieldedNote;
@@ -9,6 +23,8 @@ const BIRTHDAY: u32 = 3_000_000;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // sync::run takes a client; seer_sync::scan() calls connect_auto internally.
+    // Here we're below that layer so we do it ourselves.
     let key = ViewKey::decode(&Network::MainNetwork, UFVK).map_err(|e| anyhow!(e))?;
     let client = chain::connect_auto().await?;
 
@@ -18,8 +34,8 @@ async fn main() -> Result<()> {
         client,
         &key,
         &Network::MainNetwork,
-        || (BlockHeight::from_u32(BIRTHDAY), None),
-        |_| Ok(()),
+        || (BlockHeight::from_u32(BIRTHDAY), None), // no persisted resume point
+        |_| Ok(()),                                  // no state to rewind
         |_height, _hash, notes| {
             for note in notes {
                 if !note.outgoing {
