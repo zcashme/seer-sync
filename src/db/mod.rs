@@ -232,21 +232,17 @@ impl Db {
         Ok(out)
     }
 
-    pub fn mark_sapling_spent(&self, nf: &[u8], spending_tx: i64) -> rusqlite::Result<usize> {
+    pub fn mark_sapling_spent(&self, nf: &[u8], height: u32) -> rusqlite::Result<usize> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO sapling_received_note_spends(
-                sapling_received_note_id, transaction_id)
-             SELECT id, ?2 FROM sapling_received_notes WHERE nf = ?1",
-            params![nf, spending_tx],
+            "UPDATE sapling_received_notes SET spent_height = ?2 WHERE nf = ?1",
+            params![nf, height],
         )
     }
 
-    pub fn mark_orchard_spent(&self, nf: &[u8], spending_tx: i64) -> rusqlite::Result<usize> {
+    pub fn mark_orchard_spent(&self, nf: &[u8], height: u32) -> rusqlite::Result<usize> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO orchard_received_note_spends(
-                orchard_received_note_id, transaction_id)
-             SELECT id, ?2 FROM orchard_received_notes WHERE nf = ?1",
-            params![nf, spending_tx],
+            "UPDATE orchard_received_notes SET spent_height = ?2 WHERE nf = ?1",
+            params![nf, height],
         )
     }
 
@@ -270,18 +266,10 @@ impl Db {
 impl Db {
     pub fn balance(&self) -> rusqlite::Result<PoolBalance> {
         let sapling = self.unspent_sum(
-            "SELECT COALESCE(SUM(n.value), 0) FROM sapling_received_notes n
-             WHERE NOT EXISTS (
-                SELECT 1 FROM sapling_received_note_spends s
-                JOIN transactions t ON t.id_tx = s.transaction_id
-                WHERE s.sapling_received_note_id = n.id AND t.mined_height IS NOT NULL)",
+            "SELECT COALESCE(SUM(value), 0) FROM sapling_received_notes WHERE spent_height IS NULL",
         )?;
         let orchard = self.unspent_sum(
-            "SELECT COALESCE(SUM(n.value), 0) FROM orchard_received_notes n
-             WHERE NOT EXISTS (
-                SELECT 1 FROM orchard_received_note_spends s
-                JOIN transactions t ON t.id_tx = s.transaction_id
-                WHERE s.orchard_received_note_id = n.id AND t.mined_height IS NOT NULL)",
+            "SELECT COALESCE(SUM(value), 0) FROM orchard_received_notes WHERE spent_height IS NULL",
         )?;
         Ok(PoolBalance { orchard, sapling })
     }
@@ -297,6 +285,14 @@ impl Db {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM transactions WHERE mined_height > ?1",
+            params![height],
+        )?;
+        tx.execute(
+            "UPDATE sapling_received_notes SET spent_height = NULL WHERE spent_height > ?1",
+            params![height],
+        )?;
+        tx.execute(
+            "UPDATE orchard_received_notes SET spent_height = NULL WHERE spent_height > ?1",
             params![height],
         )?;
         tx.execute(
@@ -379,7 +375,6 @@ mod tests {
             rho: &[1u8; 32],
             rseed: &[2u8; 32],
             nf: Some(&[9u8; 32]),
-            is_change: false,
             memo: None,
             commitment_tree_position: Some(7),
         })
@@ -389,34 +384,8 @@ mod tests {
             Zatoshis::const_from_u64(5_000_000)
         );
 
-        let spend_tx = mined_tx(&db, &[2u8; 32], 101);
-        assert_eq!(db.mark_orchard_spent(&[9u8; 32], spend_tx).unwrap(), 1);
+        assert_eq!(db.mark_orchard_spent(&[9u8; 32], 101).unwrap(), 1);
         assert_eq!(db.balance().unwrap().orchard, Zatoshis::ZERO);
-    }
-
-    #[test]
-    fn unmined_spend_does_not_reduce_balance() {
-        let db = Db::open_in_memory().unwrap();
-        let tx = mined_tx(&db, &[1u8; 32], 100);
-        db.insert_sapling_note(&SaplingNoteInsert {
-            transaction_id: tx,
-            output_index: 0,
-            diversifier: &[0u8; 11],
-            value: 3_000_000,
-            rcm: &[2u8; 32],
-            nf: Some(&[9u8; 32]),
-            is_change: false,
-            memo: None,
-            commitment_tree_position: Some(5),
-        })
-        .unwrap();
-
-        let mempool_tx = db.upsert_transaction(&[3u8; 32], None, None).unwrap();
-        assert_eq!(db.mark_sapling_spent(&[9u8; 32], mempool_tx).unwrap(), 1);
-        assert_eq!(
-            db.balance().unwrap().sapling,
-            Zatoshis::const_from_u64(3_000_000)
-        );
     }
 
     #[test]
@@ -431,13 +400,11 @@ mod tests {
             rho: &[1u8; 32],
             rseed: &[2u8; 32],
             nf: Some(&[9u8; 32]),
-            is_change: false,
             memo: None,
             commitment_tree_position: Some(0),
         })
         .unwrap();
-        let spend_tx = mined_tx(&db, &[2u8; 32], 105);
-        db.mark_orchard_spent(&[9u8; 32], spend_tx).unwrap();
+        db.mark_orchard_spent(&[9u8; 32], 105).unwrap();
         assert_eq!(db.balance().unwrap().orchard, Zatoshis::ZERO);
 
         db.rewind_to_height(104).unwrap();

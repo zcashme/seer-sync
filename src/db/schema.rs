@@ -48,21 +48,13 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 nf                       BLOB    UNIQUE,
                 memo                     BLOB,
                 commitment_tree_position INTEGER,
+                spent_height             INTEGER,
                 UNIQUE (transaction_id, output_index)
             );
             CREATE INDEX IF NOT EXISTS idx_sapling_received_notes_tx
                 ON sapling_received_notes (transaction_id);
             CREATE INDEX IF NOT EXISTS idx_sapling_received_notes_nf
                 ON sapling_received_notes (nf) WHERE nf IS NOT NULL;
-
-            -- Junction: a Sapling note and the transaction that spends it.
-            CREATE TABLE IF NOT EXISTS sapling_received_note_spends (
-                sapling_received_note_id INTEGER NOT NULL
-                    REFERENCES sapling_received_notes(id) ON DELETE CASCADE,
-                transaction_id           INTEGER NOT NULL
-                    REFERENCES transactions(id_tx) ON DELETE CASCADE,
-                UNIQUE (sapling_received_note_id, transaction_id)
-            );
 
             -- ── Orchard ──────────────────────────────────────────────────────
             CREATE TABLE IF NOT EXISTS orchard_received_notes (
@@ -77,20 +69,13 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 nf                       BLOB    UNIQUE,
                 memo                     BLOB,
                 commitment_tree_position INTEGER,
+                spent_height             INTEGER,
                 UNIQUE (transaction_id, action_index)
             );
             CREATE INDEX IF NOT EXISTS idx_orchard_received_notes_tx
                 ON orchard_received_notes (transaction_id);
             CREATE INDEX IF NOT EXISTS idx_orchard_received_notes_nf
                 ON orchard_received_notes (nf) WHERE nf IS NOT NULL;
-
-            CREATE TABLE IF NOT EXISTS orchard_received_note_spends (
-                orchard_received_note_id INTEGER NOT NULL
-                    REFERENCES orchard_received_notes(id) ON DELETE CASCADE,
-                transaction_id           INTEGER NOT NULL
-                    REFERENCES transactions(id_tx) ON DELETE CASCADE,
-                UNIQUE (orchard_received_note_id, transaction_id)
-            );
 
             "#,
     )?;

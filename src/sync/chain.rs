@@ -1,4 +1,3 @@
-
 use anyhow::{Context, Result};
 use futures::{Stream, StreamExt, TryStreamExt};
 use tokio::sync::mpsc;
@@ -15,7 +14,6 @@ pub const DEFAULT_SERVERS: &[&str] = &[
     "https://na.zec.rocks:443",
     "https://eu.zec.rocks:443",
     "https://ap.zec.rocks:443",
-    "https://mainnet.lightwalletd.com:9067",
 ];
 
 pub type LwdClient = CompactTxStreamerClient<Channel>;
@@ -62,10 +60,6 @@ pub async fn tip_height(client: &mut LwdClient) -> Result<u32> {
 
 pub const DEFAULT_CHUNK_OUTPUTS: usize = 100_000;
 
-/// Cap chunks by block count too. Output-based chunking alone is pathological in
-/// sparse regions: near height 3M density is ~1 output/block, so a 100k-output
-/// chunk spans ~95k blocks — and progress + the cursor checkpoint only advance
-/// per chunk. Capping blocks keeps both regular regardless of density.
 pub const DEFAULT_CHUNK_BLOCKS: usize = 1_000;
 
 pub fn blocks(
@@ -85,7 +79,9 @@ pub fn blocks(
 }
 
 pub async fn fetch_range(client: LwdClient, from: u32, to: u32) -> Result<Vec<CompactBlock>> {
-    blocks(client, from, to, usize::MAX, None).try_concat().await
+    blocks(client, from, to, usize::MAX, None)
+        .try_concat()
+        .await
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -101,8 +97,14 @@ async fn download(
     tx: &mpsc::Sender<Result<Vec<CompactBlock>>>,
 ) -> Result<()> {
     let req = BlockRange {
-        start: Some(BlockId { height: from as u64, hash: vec![] }),
-        end: Some(BlockId { height: to as u64, hash: vec![] }),
+        start: Some(BlockId {
+            height: from as u64,
+            hash: vec![],
+        }),
+        end: Some(BlockId {
+            height: to as u64,
+            hash: vec![],
+        }),
         pool_types: vec![],
     };
     let mut stream = client
@@ -125,11 +127,14 @@ async fn download(
         }
         prev_hash = Some(block.hash.clone());
 
-        let block_outputs: usize =
-            block.vtx.iter().map(|t| t.outputs.len() + t.actions.len()).sum();
+        let block_outputs: usize = block
+            .vtx
+            .iter()
+            .map(|t| t.outputs.len() + t.actions.len())
+            .sum();
 
-        let chunk_full = output_count + block_outputs > max_outputs
-            || chunk.len() >= DEFAULT_CHUNK_BLOCKS;
+        let chunk_full =
+            output_count + block_outputs > max_outputs || chunk.len() >= DEFAULT_CHUNK_BLOCKS;
         if chunk_full && !chunk.is_empty() {
             if tx.send(Ok(std::mem::take(&mut chunk))).await.is_err() {
                 return Ok(());
@@ -163,4 +168,3 @@ pub async fn fetch_raw_transaction(
         .into_inner();
     Ok(raw)
 }
-
