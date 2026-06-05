@@ -23,9 +23,6 @@ pub struct Note {
     pub output_index: u32,
     pub nullifier: Option<[u8; 32]>,
     pub memo: Option<MemoBytes>,
-    /// `true` if this is an output you sent, recovered via OVK — not a note you
-    /// own. Display only; never counts toward balance.
-    pub outgoing: bool,
 }
 
 pub(crate) fn enrich_memos(
@@ -147,7 +144,6 @@ fn scan_compact_serial(
                             output_index,
                             nullifier: Some(nullifier),
                             memo: None,
-                            outgoing: false,
                         });
                     }
                 }
@@ -183,7 +179,6 @@ fn scan_compact_serial(
                             output_index,
                             nullifier: Some(nullifier),
                             memo: None,
-                            outgoing: false,
                         });
                     }
                 }
@@ -231,7 +226,6 @@ pub fn scan_sent(
                             output_index: oi as u32,
                             nullifier: None,
                             memo: Some(memo),
-                            outgoing: true,
                         });
                         break;
                     }
@@ -254,7 +248,6 @@ pub fn scan_sent(
                             output_index: ai as u32,
                             nullifier: None,
                             memo: Some(memo),
-                            outgoing: true,
                         });
                         break;
                     }

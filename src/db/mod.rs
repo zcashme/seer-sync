@@ -51,7 +51,7 @@ pub struct SaplingNoteInsert<'a> {
     pub memo: Option<&'a [u8]>,
     pub commitment_tree_position: Option<u64>,
     /// `true` for an OVK-recovered output you sent (excluded from balance).
-    pub is_outgoing: bool,
+    pub is_sent: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -66,7 +66,7 @@ pub struct OrchardNoteInsert<'a> {
     pub memo: Option<&'a [u8]>,
     pub commitment_tree_position: Option<u64>,
     /// `true` for an OVK-recovered output you sent (excluded from balance).
-    pub is_outgoing: bool,
+    pub is_sent: bool,
 }
 
 pub struct Db {
@@ -181,7 +181,7 @@ impl Db {
         self.conn.execute(
             "INSERT INTO sapling_received_notes(
                 transaction_id, output_index, diversifier, value, rcm, nf,
-                memo, commitment_tree_position, is_outgoing)
+                memo, commitment_tree_position, is_sent)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
              ON CONFLICT(transaction_id, output_index) DO NOTHING",
             params![
@@ -193,7 +193,7 @@ impl Db {
                 n.nf,
                 n.memo,
                 n.commitment_tree_position.map(|p| p as i64),
-                n.is_outgoing,
+                n.is_sent,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -203,7 +203,7 @@ impl Db {
         self.conn.execute(
             "INSERT INTO orchard_received_notes(
                 transaction_id, action_index, diversifier, value, rho, rseed, nf,
-                memo, commitment_tree_position, is_outgoing)
+                memo, commitment_tree_position, is_sent)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
              ON CONFLICT(transaction_id, action_index) DO NOTHING",
             params![
@@ -216,7 +216,7 @@ impl Db {
                 n.nf,
                 n.memo,
                 n.commitment_tree_position.map(|p| p as i64),
-                n.is_outgoing,
+                n.is_sent,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -271,11 +271,11 @@ impl Db {
     pub fn balance(&self) -> rusqlite::Result<PoolBalance> {
         let sapling = self.unspent_sum(
             "SELECT COALESCE(SUM(value), 0) FROM sapling_received_notes
-             WHERE spent_height IS NULL AND is_outgoing = 0",
+             WHERE spent_height IS NULL AND is_sent = 0",
         )?;
         let orchard = self.unspent_sum(
             "SELECT COALESCE(SUM(value), 0) FROM orchard_received_notes
-             WHERE spent_height IS NULL AND is_outgoing = 0",
+             WHERE spent_height IS NULL AND is_sent = 0",
         )?;
         Ok(PoolBalance { orchard, sapling })
     }
@@ -383,6 +383,7 @@ mod tests {
             nf: Some(&[9u8; 32]),
             memo: None,
             commitment_tree_position: Some(7),
+            is_sent: false,
         })
         .unwrap();
         assert_eq!(
@@ -408,6 +409,7 @@ mod tests {
             nf: Some(&[9u8; 32]),
             memo: None,
             commitment_tree_position: Some(0),
+            is_sent: false,
         })
         .unwrap();
         db.mark_orchard_spent(&[9u8; 32], 105).unwrap();

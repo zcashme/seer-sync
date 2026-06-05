@@ -38,7 +38,9 @@ async fn main() -> Result<()> {
         |_| Ok(()),                                  // no state to rewind
         |_height, _hash, notes| {
             for note in notes {
-                if !note.outgoing {
+                // A note we own (and can spend) is one we can derive a nullifier
+                // for; OVK-recovered outputs we sent have none.
+                if note.nullifier.is_some() {
                     let value = match &note.note {
                         ShieldedNote::Sapling(n) => n.value().inner(),
                         ShieldedNote::Orchard(n) => n.value().inner(),

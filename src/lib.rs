@@ -62,7 +62,7 @@ fn apply(
         let id = db
             .upsert_transaction(&note.txid, Some(u32::from(note.height)), Some(note.tx_index))
             .context("upserting transaction")?;
-        let is_outgoing = note.nullifier.is_none();
+        let is_sent = note.nullifier.is_none();
         match &note.note {
             ShieldedNote::Orchard(n) => {
                 db.insert_orchard_note(&OrchardNoteInsert {
@@ -75,7 +75,7 @@ fn apply(
                     nf: note.nullifier.as_ref().map(|n| n.as_slice()),
                     memo: note.memo.as_ref().map(|m| m.as_slice()),
                     commitment_tree_position: None,
-                    is_outgoing,
+                    is_sent,
                 })
                 .context("inserting orchard note")?;
             }
@@ -89,7 +89,7 @@ fn apply(
                     nf: note.nullifier.as_ref().map(|n| n.as_slice()),
                     memo: note.memo.as_ref().map(|m| m.as_slice()),
                     commitment_tree_position: None,
-                    is_outgoing,
+                    is_sent,
                 })
                 .context("inserting sapling note")?;
             }
