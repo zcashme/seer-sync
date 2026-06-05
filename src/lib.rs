@@ -10,22 +10,23 @@ pub(crate) mod proto;
 #[cfg(feature = "db")]
 pub mod db;
 
-/// Scan the chain for notes belonging to `key` from `birthday` and persist them to `db`.
+/// Scan the chain for notes belonging to `ufvk` from `birthday` and persist them to `db`.
 ///
 /// Returns the final synced height.
 #[cfg(feature = "db")]
-pub async fn scan_to_tip(
-    key: &ViewKey,
+pub async fn scan(
+    ufvk: &str,
     network: &Network,
     birthday: u32,
     db: &db::Db,
-    client: sync::chain::LwdClient,
     mut progress: impl FnMut(BlockHeight),
 ) -> anyhow::Result<u32> {
     use anyhow::Context;
+    let key = ViewKey::decode(network, ufvk).map_err(|e| anyhow::anyhow!(e))?;
+    let client = sync::chain::connect_auto().await.context("connecting to lightwalletd")?;
     sync::run(
         client,
-        key,
+        &key,
         network,
         || {
             let st = db.get_sync_state().unwrap_or_default();
