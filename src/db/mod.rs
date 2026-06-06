@@ -6,12 +6,6 @@ use zcash_protocol::value::Zatoshis;
 
 pub use schema::init;
 
-#[derive(Debug, Clone)]
-pub struct Account {
-    pub network: String,
-    pub birthday: u32,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncState {
     pub height: u32,
@@ -87,35 +81,6 @@ impl Db {
         let conn = Connection::open_in_memory()?;
         init(&conn)?;
         Ok(Self { conn })
-    }
-}
-
-impl Db {
-    pub fn set_account(&self, account: &Account) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "INSERT INTO account(id, network, birthday)
-             VALUES (1, ?1, ?2)
-             ON CONFLICT(id) DO UPDATE SET
-                network = excluded.network,
-                birthday = excluded.birthday",
-            params![account.network, account.birthday],
-        )?;
-        Ok(())
-    }
-
-    pub fn get_account(&self) -> rusqlite::Result<Option<Account>> {
-        self.conn
-            .query_row(
-                "SELECT network, birthday FROM account WHERE id = 1",
-                [],
-                |row| {
-                    Ok(Account {
-                        network: row.get(0)?,
-                        birthday: row.get(1)?,
-                    })
-                },
-            )
-            .optional()
     }
 }
 
@@ -336,17 +301,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(tables, 1);
-    }
-
-    #[test]
-    fn account_roundtrip() {
-        let db = Db::open_in_memory().unwrap();
-        assert!(db.get_account().unwrap().is_none());
-        let acct = Account { network: "main".into(), birthday: 419_200 };
-        db.set_account(&acct).unwrap();
-        let got = db.get_account().unwrap().unwrap();
-        assert_eq!(got.network, "main");
-        assert_eq!(got.birthday, 419_200);
     }
 
     #[test]
