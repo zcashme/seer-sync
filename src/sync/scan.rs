@@ -31,8 +31,8 @@ pub(crate) fn enrich_memos(
     raw_txs: &[([u8; 32], RawTransaction)],
     notes: &mut Vec<Note>,
 ) -> Result<()> {
-    let sapling = &keys.sapling_incoming;
-    let orchard = &keys.orchard_incoming;
+    let sapling = &keys.sapling;
+    let orchard = &keys.orchard;
 
     for (txid, raw) in raw_txs {
         let height = BlockHeight::from_u32(raw.height as u32);
@@ -76,8 +76,8 @@ pub(crate) fn enrich_memos(
 }
 
 pub fn scan_compact(blocks: &[CompactBlock], keys: &ViewKey) -> Vec<Note> {
-    let sapling = keys.sapling_incoming.as_slice();
-    let orchard = keys.orchard_incoming.as_slice();
+    let sapling = keys.sapling.as_slice();
+    let orchard = keys.orchard.as_slice();
 
     let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     if threads <= 1 || blocks.len() < 64 {
@@ -133,8 +133,9 @@ fn scan_compact_serial(
                 {
                     if let Some((note, _recipient)) = hit {
                         let (txid, tx_index, output_index, position) = meta[i];
-                        let Some(nullifier) = position.map(|pos| note.nf(&scope.nk, pos).0) else {
-                            continue;
+                        let nullifier = match (scope.nk.as_ref(), position) {
+                            (Some(nk), Some(pos)) => Some(note.nf(nk, pos).0),
+                            _ => None,
                         };
                         out.push(Note {
                             note: ShieldedNote::Sapling(note),
@@ -142,7 +143,7 @@ fn scan_compact_serial(
                             txid,
                             tx_index,
                             output_index,
-                            nullifier: Some(nullifier),
+                            nullifier,
                             memo: None,
                         });
                     }
@@ -170,14 +171,15 @@ fn scan_compact_serial(
                 {
                     if let Some((note, _recipient)) = hit {
                         let (txid, tx_index, output_index) = meta[i];
-                        let nullifier = note.nullifier(&scope.fvk).to_bytes();
+                        let nullifier =
+                            scope.fvk.as_ref().map(|fvk| note.nullifier(fvk).to_bytes());
                         out.push(Note {
                             note: ShieldedNote::Orchard(note),
                             height,
                             txid,
                             tx_index,
                             output_index,
-                            nullifier: Some(nullifier),
+                            nullifier,
                             memo: None,
                         });
                     }
