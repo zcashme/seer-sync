@@ -62,7 +62,7 @@ fn apply(
         let id = db
             .upsert_transaction(&note.txid, Some(u32::from(note.height)), Some(note.tx_index))
             .context("upserting transaction")?;
-        let is_sent = note.nullifier.is_none();
+        let is_sent = note.is_sent;
         match &note.note {
             ShieldedNote::Orchard(n) => {
                 db.insert_orchard_note(&OrchardNoteInsert {
