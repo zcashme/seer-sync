@@ -28,6 +28,43 @@ pub async fn connect(url: &str) -> Result<LwdClient> {
     Ok(CompactTxStreamerClient::new(endpoint))
 }
 
+/// Connect to a lightwalletd endpoint without TLS.
+///
+/// Use this for local regtest or plaintext (`http://`) endpoints where
+/// [`connect`] would fail because it unconditionally applies a TLS config.
+pub async fn connect_plaintext(url: &str) -> Result<LwdClient> {
+    let uri: http::Uri = url.parse().context("parsing LWD url")?;
+    let channel = Channel::builder(uri)
+        .connect()
+        .await
+        .context("connecting to lightwalletd (plaintext)")?;
+    Ok(CompactTxStreamerClient::new(channel))
+}
+
+/// Broadcast a raw serialized transaction to the connected lightwalletd node.
+///
+/// Calls the `SendTransaction` RPC with `height = 0` (mempool submission).
+/// Returns an error if the node rejects the transaction (`errorCode != 0`).
+pub async fn broadcast_transaction(client: &mut LwdClient, raw_tx: Vec<u8>) -> Result<()> {
+    let resp = client
+        .send_transaction(tonic::Request::new(RawTransaction {
+            data: raw_tx,
+            height: 0,
+        }))
+        .await
+        .context("SendTransaction RPC")?
+        .into_inner();
+
+    if resp.error_code != 0 {
+        anyhow::bail!(
+            "SendTransaction rejected (code {}): {}",
+            resp.error_code,
+            resp.error_message
+        );
+    }
+    Ok(())
+}
+
 pub async fn connect_auto() -> Result<LwdClient> {
     let mut errors = Vec::new();
     for &url in DEFAULT_SERVERS {
