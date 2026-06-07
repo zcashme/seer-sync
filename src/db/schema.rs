@@ -42,6 +42,11 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 -- 0 = a note you received (spendable, counts toward balance);
                 -- 1 = an output you sent, recovered via OVK (display only).
                 is_sent                  INTEGER NOT NULL DEFAULT 0,
+                -- The destination, encoded as a unified address (`u1…`). Only an
+                -- output you sent (is_sent = 1) has one; NULL for received notes,
+                -- whose recipient is your own address. Recovered via OVK, so it is
+                -- absent for UIVK-only syncs.
+                recipient_address        TEXT,
                 UNIQUE (transaction_id, output_index)
             );
             CREATE INDEX IF NOT EXISTS idx_sapling_received_notes_tx
@@ -66,6 +71,11 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 -- 0 = a note you received (spendable, counts toward balance);
                 -- 1 = an output you sent, recovered via OVK (display only).
                 is_sent                  INTEGER NOT NULL DEFAULT 0,
+                -- The destination, encoded as a unified address (`u1…`). Only an
+                -- output you sent (is_sent = 1) has one; NULL for received notes,
+                -- whose recipient is your own address. Recovered via OVK, so it is
+                -- absent for UIVK-only syncs.
+                recipient_address        TEXT,
                 UNIQUE (transaction_id, action_index)
             );
             CREATE INDEX IF NOT EXISTS idx_orchard_received_notes_tx

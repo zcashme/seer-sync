@@ -46,6 +46,8 @@ pub struct SaplingNoteInsert<'a> {
     pub commitment_tree_position: Option<u64>,
     /// `true` for an OVK-recovered output you sent (excluded from balance).
     pub is_sent: bool,
+    /// Destination as a unified address; `Some` only for a sent output.
+    pub recipient_address: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +63,8 @@ pub struct OrchardNoteInsert<'a> {
     pub commitment_tree_position: Option<u64>,
     /// `true` for an OVK-recovered output you sent (excluded from balance).
     pub is_sent: bool,
+    /// Destination as a unified address; `Some` only for a sent output.
+    pub recipient_address: Option<&'a str>,
 }
 
 pub struct Db {
@@ -146,8 +150,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO sapling_received_notes(
                 transaction_id, output_index, diversifier, value, rcm, nf,
-                memo, commitment_tree_position, is_sent)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                memo, commitment_tree_position, is_sent, recipient_address)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
              ON CONFLICT(transaction_id, output_index) DO NOTHING",
             params![
                 n.transaction_id,
@@ -159,6 +163,7 @@ impl Db {
                 n.memo,
                 n.commitment_tree_position.map(|p| p as i64),
                 n.is_sent,
+                n.recipient_address,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -168,8 +173,8 @@ impl Db {
         self.conn.execute(
             "INSERT INTO orchard_received_notes(
                 transaction_id, action_index, diversifier, value, rho, rseed, nf,
-                memo, commitment_tree_position, is_sent)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                memo, commitment_tree_position, is_sent, recipient_address)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
              ON CONFLICT(transaction_id, action_index) DO NOTHING",
             params![
                 n.transaction_id,
@@ -182,6 +187,7 @@ impl Db {
                 n.memo,
                 n.commitment_tree_position.map(|p| p as i64),
                 n.is_sent,
+                n.recipient_address,
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -338,6 +344,7 @@ mod tests {
             memo: None,
             commitment_tree_position: Some(7),
             is_sent: false,
+            recipient_address: None,
         })
         .unwrap();
         assert_eq!(
@@ -347,6 +354,68 @@ mod tests {
 
         assert_eq!(db.mark_orchard_spent(&[9u8; 32], 101).unwrap(), 1);
         assert_eq!(db.balance().unwrap().orchard, Zatoshis::ZERO);
+    }
+
+    #[test]
+    fn sent_note_persists_recipient_and_is_excluded_from_balance() {
+        let db = Db::open_in_memory().unwrap();
+        let tx = mined_tx(&db, &[2u8; 32], 200);
+        db.insert_sapling_note(&SaplingNoteInsert {
+            transaction_id: tx,
+            output_index: 0,
+            diversifier: &[0u8; 11],
+            value: 3_000_000,
+            rcm: &[3u8; 32],
+            nf: None,
+            memo: None,
+            commitment_tree_position: None,
+            is_sent: true,
+            recipient_address: Some("u1recipientaddress"),
+        })
+        .unwrap();
+
+        // A sent output never counts toward spendable balance.
+        assert_eq!(db.balance().unwrap().sapling, Zatoshis::ZERO);
+
+        // …but its destination is persisted for display.
+        let recipient: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT recipient_address FROM sapling_received_notes WHERE is_sent = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recipient.as_deref(), Some("u1recipientaddress"));
+    }
+
+    #[test]
+    fn received_note_has_null_recipient() {
+        let db = Db::open_in_memory().unwrap();
+        let tx = mined_tx(&db, &[3u8; 32], 300);
+        db.insert_orchard_note(&OrchardNoteInsert {
+            transaction_id: tx,
+            action_index: 0,
+            diversifier: &[0u8; 11],
+            value: 1_000_000,
+            rho: &[1u8; 32],
+            rseed: &[2u8; 32],
+            nf: Some(&[8u8; 32]),
+            memo: None,
+            commitment_tree_position: Some(1),
+            is_sent: false,
+            recipient_address: None,
+        })
+        .unwrap();
+        let recipient: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT recipient_address FROM orchard_received_notes WHERE is_sent = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recipient, None);
     }
 
     #[test]
@@ -364,6 +433,7 @@ mod tests {
             memo: None,
             commitment_tree_position: Some(0),
             is_sent: false,
+            recipient_address: None,
         })
         .unwrap();
         db.mark_orchard_spent(&[9u8; 32], 105).unwrap();

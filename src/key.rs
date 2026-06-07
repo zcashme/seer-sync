@@ -13,8 +13,10 @@
 //!   recovery is unavailable. This is a cryptographic limit of the key, not a
 //!   missing feature.
 //!
-//! `zcash_keys` only appears inside the [`ViewKey::decode`] constructor — it
-//! never touches the struct definition or any other public surface.
+//! `zcash_keys` is confined to this module: it backs the [`ViewKey::decode`]
+//! constructor and the recipient-address encoders ([`encode_sapling_recipient`],
+//! [`encode_orchard_recipient`]). It never touches the struct definition or any
+//! other public surface.
 
 use orchard::keys::{
     FullViewingKey as OrchardFvk, OutgoingViewingKey as OrchardOvk,
@@ -24,6 +26,7 @@ use sapling::keys::{
     OutgoingViewingKey as SaplingOvk, PreparedIncomingViewingKey as SaplingPreparedIvk,
 };
 use sapling::NullifierDerivingKey;
+use zcash_keys::address::UnifiedAddress;
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 use zcash_protocol::consensus::Network;
 use zip32::Scope;
@@ -93,6 +96,14 @@ impl ViewKey {
         }
     }
 
+    /// Whether this key can derive the nullifiers of the notes it detects, and
+    /// so recognize their spends. True for a UFVK (carries `nk`/`fvk`), false
+    /// for a UIVK. Spend detection and no-change-send recovery hinge on this.
+    pub(crate) fn can_derive_nullifiers(&self) -> bool {
+        self.sapling.iter().any(|s| s.nk.is_some())
+            || self.orchard.iter().any(|o| o.fvk.is_some())
+    }
+
     /// Derives the incoming-only scan keys from a Unified Incoming Viewing Key.
     ///
     /// A UIVK carries a single (external) incoming key per pool and no
@@ -121,6 +132,29 @@ impl ViewKey {
 fn per_scope<K, T>(key: Option<&K>, derive: impl Fn(&K, Scope) -> T) -> Vec<T> {
     key.map(|k| [Scope::External, Scope::Internal].into_iter().map(|s| derive(k, s)).collect())
         .unwrap_or_default()
+}
+
+/// Encodes an OVK-recovered Sapling recipient as a unified address (`u1…`).
+///
+/// What recovery yields is a single diversified Sapling receiver, so the
+/// resulting unified address carries that one receiver — not the original
+/// multi-receiver address the payee may have handed out.
+pub(crate) fn encode_sapling_recipient(
+    network: &Network,
+    addr: sapling::PaymentAddress,
+) -> Option<String> {
+    UnifiedAddress::from_receivers(None, Some(addr), None).map(|ua| ua.encode(network))
+}
+
+/// Encodes an OVK-recovered Orchard recipient as a unified address (`u1…`).
+///
+/// As with Sapling, this wraps the single recovered Orchard receiver; Orchard
+/// receivers have no standalone encoding, so a unified address is the only form.
+pub(crate) fn encode_orchard_recipient(
+    network: &Network,
+    addr: orchard::Address,
+) -> Option<String> {
+    UnifiedAddress::from_receivers(Some(addr), None, None).map(|ua| ua.encode(network))
 }
 
 #[cfg(test)]

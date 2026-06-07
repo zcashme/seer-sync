@@ -10,19 +10,23 @@ pub(crate) mod proto;
 #[cfg(feature = "db")]
 pub mod db;
 
-/// Scan the chain for notes belonging to `ufvk` from `birthday` and persist them to `db`.
+/// Scan the chain for notes belonging to `view_key` from `birthday` and persist
+/// them to `db`. `view_key` is a unified viewing key — a UFVK (`uview1…`) or a
+/// UIVK (`uivk1…`); the kind is detected automatically. A UFVK additionally
+/// recovers sent outputs and detects spends; a UIVK sees incoming notes only.
 ///
 /// Returns the final synced height.
 #[cfg(feature = "db")]
 pub async fn scan(
-    ufvk: &str,
+    view_key: &str,
     network: &Network,
     birthday: u32,
     db: &db::Db,
     mut progress: impl FnMut(BlockHeight),
 ) -> anyhow::Result<u32> {
     use anyhow::Context;
-    let key = ViewKey::decode(network, ufvk).map_err(|e| anyhow::anyhow!(e))?;
+    use sync::scan::Pool;
+    let key = ViewKey::decode(network, view_key).map_err(|e| anyhow::anyhow!(e))?;
     let client = sync::chain::connect_auto().await.context("connecting to lightwalletd")?;
     sync::run(
         client,
@@ -37,8 +41,15 @@ pub async fn scan(
             }
         },
         |to| db.rewind_to_height(u32::from(to)).context("rewinding after reorg"),
-        |height, hash, notes| {
-            apply(db, height, hash, notes)?;
+        |pool, nf| {
+            match pool {
+                Pool::Sapling => db.owns_sapling_nf(nf),
+                Pool::Orchard => db.owns_orchard_nf(nf),
+            }
+            .context("querying owned nullifier")
+        },
+        |height, hash, notes, spends| {
+            apply(db, height, hash, notes, spends)?;
             progress(height);
             Ok(())
         },
@@ -53,10 +64,21 @@ fn apply(
     height: BlockHeight,
     hash: [u8; 32],
     notes: &[sync::scan::Note],
+    spends: &[sync::scan::Spend],
 ) -> anyhow::Result<()> {
     use anyhow::Context;
     use db::{OrchardNoteInsert, SaplingNoteInsert, SyncState};
-    use sync::scan::ShieldedNote;
+    use sync::scan::{Pool, ShieldedNote};
+
+    // Record spends of our own notes first, so balance reflects them.
+    for spend in spends {
+        let h = u32::from(spend.height);
+        match spend.pool {
+            Pool::Sapling => db.mark_sapling_spent(&spend.nf, h),
+            Pool::Orchard => db.mark_orchard_spent(&spend.nf, h),
+        }
+        .context("marking note spent")?;
+    }
 
     for note in notes {
         let id = db
@@ -76,6 +98,7 @@ fn apply(
                     memo: note.memo.as_ref().map(|m| m.as_slice()),
                     commitment_tree_position: None,
                     is_sent,
+                    recipient_address: note.recipient.as_deref(),
                 })
                 .context("inserting orchard note")?;
             }
@@ -90,6 +113,7 @@ fn apply(
                     memo: note.memo.as_ref().map(|m| m.as_slice()),
                     commitment_tree_position: None,
                     is_sent,
+                    recipient_address: note.recipient.as_deref(),
                 })
                 .context("inserting sapling note")?;
             }

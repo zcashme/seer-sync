@@ -2,15 +2,17 @@
 //
 // seer_sync::scan() (the db convenience API) handles connection and key
 // decoding internally. sync::run is the raw engine beneath it — you wire
-// those yourself and supply three callbacks:
+// those yourself and supply four callbacks:
 //
 //   resume_point  where to start (or resume after a reorg)
 //   rewind        called when a reorg is detected; drop state above that height
-//   sink          called per batch with the notes found in that batch
+//   owns_nf       does a note with this nullifier belong to us? (consulted to
+//                 recognize spends; here we keep no store, so always false)
+//   sink          called per batch with the notes and our spends in that batch
 //
-// This example accumulates gross received balance. It ignores spends — for
-// a true balance you would also need to check compact block nullifiers against
-// your own and subtract spent notes.
+// This example accumulates gross received balance. It ignores spends: it answers
+// `owns_nf` with false (so no spends are recognized) and sums received notes —
+// for a true balance you would track your notes' nullifiers and subtract spends.
 
 use anyhow::{anyhow, Result};
 use seer_sync::sync::chain;
@@ -36,7 +38,8 @@ async fn main() -> Result<()> {
         &Network::MainNetwork,
         || (BlockHeight::from_u32(BIRTHDAY), None), // no persisted resume point
         |_| Ok(()),                                  // no state to rewind
-        |_height, _hash, notes| {
+        |_pool, _nf| Ok(false),                      // no store: recognize no spends
+        |_height, _hash, notes, _spends| {
             for note in notes {
                 // A note we own (and can spend) is one we can derive a nullifier
                 // for; OVK-recovered outputs we sent have none.
