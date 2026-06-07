@@ -28,19 +28,6 @@ pub async fn connect(url: &str) -> Result<LwdClient> {
     Ok(CompactTxStreamerClient::new(endpoint))
 }
 
-/// Connect to a lightwalletd endpoint without TLS.
-///
-/// Use this for local regtest or plaintext (`http://`) endpoints where
-/// [`connect`] would fail because it unconditionally applies a TLS config.
-pub async fn connect_plaintext(url: &str) -> Result<LwdClient> {
-    let uri: http::Uri = url.parse().context("parsing LWD url")?;
-    let channel = Channel::builder(uri)
-        .connect()
-        .await
-        .context("connecting to lightwalletd (plaintext)")?;
-    Ok(CompactTxStreamerClient::new(channel))
-}
-
 /// Broadcast a raw serialized transaction to the connected lightwalletd node.
 ///
 /// Calls the `SendTransaction` RPC with `height = 0` (mempool submission).
