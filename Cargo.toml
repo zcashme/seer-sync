@@ -62,15 +62,3 @@ tokio-test = "0.4"
 [[bench]]
 name = "decrypt"
 harness = false
-
-[[example]]
-name = "live_sync"
-
-# Persist into a Db, so they need the `db` feature.
-[[example]]
-name = "live_sync_db"
-required-features = ["db"]
-
-[[example]]
-name = "live_uivk_sync_db"
-required-features = ["db"]

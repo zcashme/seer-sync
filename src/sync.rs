@@ -1,4 +1,3 @@
-
 pub mod chain;
 pub mod scan;
 
@@ -13,30 +12,25 @@ use zcash_protocol::consensus::Network;
 
 const MAX_TRANSPORT_RETRIES: usize = 4;
 
-/// Drives a linear sync over `client`.
-///
-/// The four closures are the engine's only contact with the outside world:
-/// * `resume_point` — where to (re)start, and the seam hash to check for reorgs.
-/// * `rewind` — undo state down to a height after a reorg.
-/// * `owns_nf` — does a note with this nullifier belong to us? Answered against
-///   the caller's store, so a spend of a note received in an earlier batch is
-///   still recognized. Spends seen within the current batch are matched locally.
-/// * `sink` — persist a batch: the notes found and the spends of our own notes.
-pub async fn run<R, W, O, F>(
+pub struct Cursor {
+    pub height: BlockHeight,
+    pub hash: Option<[u8; 32]>,
+}
+
+pub trait Account {
+    fn checkpoint(&self) -> Option<Cursor>;
+    fn rewind(&self, to: BlockHeight) -> anyhow::Result<()>;
+    fn owns_nf(&self, pool: Pool, nf: &[u8; 32]) -> anyhow::Result<bool>;
+    fn apply(&self, at: Cursor, notes: &[Note], spends: &[Spend]) -> anyhow::Result<()>;
+}
+
+pub async fn run<A: Account>(
     client: LwdClient,
     keys: &ViewKey,
     network: &Network,
-    mut resume_point: R,
-    mut rewind: W,
-    mut owns_nf: O,
-    mut sink: F,
-) -> anyhow::Result<()>
-where
-    R: FnMut() -> (BlockHeight, Option<[u8; 32]>),
-    W: FnMut(BlockHeight) -> anyhow::Result<()>,
-    O: FnMut(Pool, &[u8; 32]) -> anyhow::Result<bool>,
-    F: FnMut(BlockHeight, [u8; 32], &[Note], &[Spend]) -> anyhow::Result<()>,
-{
+    birthday: u32,
+    account: &A,
+) -> anyhow::Result<()> {
     let mut fetch_client = client.clone();
     let tip = BlockHeight::from_u32(chain::tip_height(&mut fetch_client).await.context("tip height")?);
 
@@ -44,7 +38,10 @@ where
     let mut transport_attempts: usize = 0;
 
     loop {
-        let (start, seam) = resume_point();
+        let (start, seam) = match account.checkpoint() {
+            Some(c) => (BlockHeight::from_u32(u32::from(c.height) + 1), c.hash),
+            None => (BlockHeight::from_u32(birthday), None),
+        };
         if start > tip {
             return Ok(());
         }
@@ -63,9 +60,6 @@ where
 
                     let CompactScan { notes: incoming, spends } = scan_compact(&batch, keys);
 
-                    // Recognize spends of our own notes: match each revealed
-                    // nullifier against this batch's incoming notes, then against
-                    // the caller's store for notes received in earlier batches.
                     let batch_nfs: HashSet<(Pool, [u8; 32])> = incoming
                         .iter()
                         .filter_map(|n| n.nullifier.map(|nf| (n.pool(), nf)))
@@ -73,15 +67,12 @@ where
                     let mut owned_spends = Vec::new();
                     for s in &spends {
                         let mine = batch_nfs.contains(&(s.pool, s.nf))
-                            || owns_nf(s.pool, &s.nf).context("checking nullifier ownership")?;
+                            || account.owns_nf(s.pool, &s.nf).context("checking nullifier ownership")?;
                         if mine {
                             owned_spends.push(s.clone());
                         }
                     }
 
-                    // Fetch full transactions for every tx that touches us — one
-                    // that pays us (an incoming note) or one that spends our notes
-                    // (the latter catches a send that returns no change).
                     let mut txids: Vec<[u8; 32]> = incoming
                         .iter()
                         .map(|n| n.txid)
@@ -108,24 +99,25 @@ where
                     let incoming = enrich_memos(keys, network, &raw_txs, incoming);
                     let sent = scan_sent(keys, network, &raw_txs, &incoming, &tx_index);
                     let notes: Vec<Note> = incoming.into_iter().chain(sent).collect();
-                    sink(height, hash, &notes, &owned_spends)?;
+                    account.apply(Cursor { height, hash: Some(hash) }, &notes, &owned_spends)?;
 
                     transport_attempts = 0;
                     rewind_by = 1;
                 }
-                Err(e) if e.downcast_ref::<chain::Reorg>().is_some() => {
-                    let chain::Reorg(at) = e.downcast::<chain::Reorg>().expect("downcast checked");
-                    rewind(BlockHeight::from_u32(at.saturating_sub(rewind_by)))?;
-                    rewind_by = rewind_by.saturating_mul(2);
-                    break;
-                }
-                Err(e) => {
-                    if transport_attempts < MAX_TRANSPORT_RETRIES {
-                        transport_attempts += 1;
+                Err(e) => match e.downcast::<chain::Reorg>() {
+                    Ok(chain::Reorg(at)) => {
+                        account.rewind(BlockHeight::from_u32(at.saturating_sub(rewind_by)))?;
+                        rewind_by = rewind_by.saturating_mul(2);
                         break;
                     }
-                    return Err(e).context("streaming blocks");
-                }
+                    Err(e) => {
+                        if transport_attempts < MAX_TRANSPORT_RETRIES {
+                            transport_attempts += 1;
+                            break;
+                        }
+                        return Err(e).context("streaming blocks");
+                    }
+                },
             }
         }
     }
