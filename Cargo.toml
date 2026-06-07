@@ -1,7 +1,7 @@
 [package]
 name = "seer-sync"
 description = "View-key-only Zcash chain sync"
-version = "0.0.1"
+version = "0.0.2"
 authors = ["Julian Abraham <julesverne505@gmail.com>"]
 edition = "2021"
 rust-version = "1.85.1"
