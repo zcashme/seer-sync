@@ -1,3 +1,17 @@
+//! Persist a UFVK sync to SQLite via the high-level `scan()` entry point.
+//!
+//! `scan()` connects to lightwalletd, decodes the key, and drives the engine
+//! into `db`. With a UFVK the sync is full:
+//!
+//!   * spends are detected, so `balance()` is net (it drops when you spend);
+//!   * outputs you sent are recovered and their destination stored in the
+//!     `recipient_address` column (a unified address) of each note table.
+//!
+//! There is no Rust getter for sent payments by design — the SQLite file is the
+//! API. Query it directly, e.g.:
+//!
+//!   SELECT value, recipient_address FROM orchard_received_notes WHERE is_sent = 1;
+
 use anyhow::Result;
 use seer_sync::db::Db;
 use seer_sync::Network;
@@ -10,11 +24,20 @@ const BIRTHDAY: u32 = 3_000_000;
 async fn main() -> Result<()> {
     let db = Db::open("wallet.db")?;
 
-    seer_sync::scan(UFVK, &Network::MainNetwork, BIRTHDAY, &db, |_| {}).await?;
+    let height = seer_sync::scan(UFVK, &Network::MainNetwork, BIRTHDAY, &db, |h| {
+        eprint!("\rsynced to {}", u32::from(h));
+    })
+    .await?;
+    eprintln!();
 
     let bal = db.balance()?;
-    println!("orchard {} zat  sapling {} zat  total {} zat",
-        bal.orchard.into_u64(), bal.sapling.into_u64(), bal.total().into_u64());
+    println!("synced to {height}");
+    println!(
+        "orchard {} zat  sapling {} zat  total {} zat (net of spends)",
+        bal.orchard.into_u64(),
+        bal.sapling.into_u64(),
+        bal.total().into_u64()
+    );
     println!("{} memo(s)", db.memos()?.len());
 
     Ok(())

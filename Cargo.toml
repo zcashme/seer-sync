@@ -66,7 +66,11 @@ harness = false
 [[example]]
 name = "live_sync"
 
-# Persists into a Db, so it needs the `db` feature.
+# Persist into a Db, so they need the `db` feature.
 [[example]]
 name = "live_sync_db"
+required-features = ["db"]
+
+[[example]]
+name = "live_uivk_sync_db"
 required-features = ["db"]
