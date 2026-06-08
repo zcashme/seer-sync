@@ -1,4 +1,3 @@
-use anyhow::{Context, Result};
 use futures::{Stream, StreamExt, TryStreamExt};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -18,68 +17,75 @@ pub const DEFAULT_SERVERS: &[&str] = &[
 
 pub type LwdClient = CompactTxStreamerClient<Channel>;
 
-pub async fn connect(url: &str) -> Result<LwdClient> {
-    let uri: http::Uri = url.parse().context("parsing LWD url")?;
+#[derive(thiserror::Error, Debug)]
+pub enum ChainError {
+    #[error("chain reorg at height {0}")]
+    Reorg(u32),
+    #[error("lightwalletd RPC: {0}")]
+    Rpc(#[from] tonic::Status),
+    #[error("connecting to lightwalletd: {0}")]
+    Connect(#[from] tonic::transport::Error),
+    #[error("invalid lightwalletd url: {0}")]
+    Url(#[from] http::uri::InvalidUri),
+    #[error("transaction rejected (code {code}): {message}")]
+    Rejected { code: i32, message: String },
+    #[error("tip height overflowed u32")]
+    TipOverflow,
+    #[error("all {tried} lightwalletd servers failed:\n{detail}")]
+    NoServer { tried: usize, detail: String },
+}
+
+pub async fn connect(url: &str) -> Result<LwdClient, ChainError> {
+    let uri: http::Uri = url.parse()?;
     let endpoint = Channel::builder(uri)
         .tls_config(ClientTlsConfig::new().with_webpki_roots())?
         .connect()
-        .await
-        .context("connecting to lightwalletd")?;
+        .await?;
     Ok(CompactTxStreamerClient::new(endpoint))
 }
 
-/// Broadcast a raw serialized transaction to the connected lightwalletd node.
-///
-/// Calls the `SendTransaction` RPC with `height = 0` (mempool submission).
-/// Returns an error if the node rejects the transaction (`errorCode != 0`).
-pub async fn broadcast_transaction(client: &mut LwdClient, raw_tx: Vec<u8>) -> Result<()> {
+pub async fn broadcast_transaction(client: &mut LwdClient, raw_tx: Vec<u8>) -> Result<(), ChainError> {
     let resp = client
         .send_transaction(tonic::Request::new(RawTransaction {
             data: raw_tx,
             height: 0,
         }))
-        .await
-        .context("SendTransaction RPC")?
+        .await?
         .into_inner();
 
     if resp.error_code != 0 {
-        anyhow::bail!(
-            "SendTransaction rejected (code {}): {}",
-            resp.error_code,
-            resp.error_message
-        );
+        return Err(ChainError::Rejected {
+            code: resp.error_code,
+            message: resp.error_message,
+        });
     }
     Ok(())
 }
 
-pub async fn connect_auto() -> Result<LwdClient> {
+pub async fn connect_auto() -> Result<LwdClient, ChainError> {
     let mut errors = Vec::new();
     for &url in DEFAULT_SERVERS {
         match connect(url).await {
             Ok(mut client) => match tip_height(&mut client).await {
                 Ok(_) => return Ok(client),
-                Err(e) => errors.push(format!("  {url}: connected but not serving gRPC: {e:#}")),
+                Err(e) => errors.push(format!("  {url}: connected but not serving gRPC: {e}")),
             },
-            Err(e) => errors.push(format!("  {url}: {e:#}")),
+            Err(e) => errors.push(format!("  {url}: {e}")),
         }
     }
-    anyhow::bail!(
-        "all {} default lightwalletd servers failed:\n{}",
-        DEFAULT_SERVERS.len(),
-        errors.join("\n")
-    )
+    Err(ChainError::NoServer {
+        tried: DEFAULT_SERVERS.len(),
+        detail: errors.join("\n"),
+    })
 }
 
-pub async fn tip_height(client: &mut LwdClient) -> Result<u32> {
-    u32::try_from(
-        client
-            .get_latest_block(tonic::Request::new(ChainSpec {}))
-            .await
-            .context("GetLatestBlock")?
-            .into_inner()
-            .height,
-    )
-    .context("tip height overflowed u32")
+pub async fn tip_height(client: &mut LwdClient) -> Result<u32, ChainError> {
+    let height = client
+        .get_latest_block(tonic::Request::new(ChainSpec {}))
+        .await?
+        .into_inner()
+        .height;
+    u32::try_from(height).map_err(|_| ChainError::TipOverflow)
 }
 
 pub const DEFAULT_CHUNK_OUTPUTS: usize = 100_000;
@@ -92,7 +98,7 @@ pub fn blocks(
     to: u32,
     max_outputs: usize,
     prev_hash: Option<[u8; 32]>,
-) -> impl Stream<Item = Result<Vec<CompactBlock>>> {
+) -> impl Stream<Item = Result<Vec<CompactBlock>, ChainError>> {
     let (tx, rx) = mpsc::channel(1);
     tokio::spawn(async move {
         if let Err(e) = download(client, from, to, max_outputs, prev_hash, &tx).await {
@@ -102,15 +108,9 @@ pub fn blocks(
     ReceiverStream::new(rx)
 }
 
-pub async fn fetch_range(client: LwdClient, from: u32, to: u32) -> Result<Vec<CompactBlock>> {
-    blocks(client, from, to, usize::MAX, None)
-        .try_concat()
-        .await
+pub async fn fetch_range(client: LwdClient, from: u32, to: u32) -> Result<Vec<CompactBlock>, ChainError> {
+    blocks(client, from, to, usize::MAX, None).try_concat().await
 }
-
-#[derive(thiserror::Error, Debug)]
-#[error("chain reorg at height {0}")]
-pub struct Reorg(pub u32);
 
 async fn download(
     mut client: LwdClient,
@@ -118,8 +118,8 @@ async fn download(
     to: u32,
     max_outputs: usize,
     prev_hash: Option<[u8; 32]>,
-    tx: &mpsc::Sender<Result<Vec<CompactBlock>>>,
-) -> Result<()> {
+    tx: &mpsc::Sender<Result<Vec<CompactBlock>, ChainError>>,
+) -> Result<(), ChainError> {
     let req = BlockRange {
         start: Some(BlockId {
             height: from as u64,
@@ -133,8 +133,7 @@ async fn download(
     };
     let mut stream = client
         .get_block_range(tonic::Request::new(req))
-        .await
-        .context("GetBlockRange")?
+        .await?
         .into_inner();
 
     let mut chunk: Vec<CompactBlock> = Vec::new();
@@ -142,11 +141,11 @@ async fn download(
     let mut prev_hash: Option<Vec<u8>> = prev_hash.map(|h| h.to_vec());
 
     while let Some(block_result) = stream.next().await {
-        let block = block_result.context("streaming CompactBlock")?;
+        let block = block_result?;
 
         if let Some(ref ph) = prev_hash {
             if !block.prev_hash.is_empty() && &block.prev_hash != ph {
-                anyhow::bail!(Reorg(block.height as u32));
+                return Err(ChainError::Reorg(block.height as u32));
             }
         }
         prev_hash = Some(block.hash.clone());
@@ -179,7 +178,7 @@ async fn download(
 pub async fn fetch_raw_transaction(
     client: &mut LwdClient,
     txid: &[u8; 32],
-) -> Result<RawTransaction> {
+) -> Result<RawTransaction, ChainError> {
     let filter = TxFilter {
         block: None,
         index: 0,
@@ -187,8 +186,7 @@ pub async fn fetch_raw_transaction(
     };
     let raw = client
         .get_transaction(tonic::Request::new(filter))
-        .await
-        .context("GetTransaction")?
+        .await?
         .into_inner();
     Ok(raw)
 }

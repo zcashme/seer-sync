@@ -11,23 +11,21 @@ pub(crate) mod proto;
 pub mod db;
 
 #[cfg(feature = "db")]
-use anyhow::Context;
-#[cfg(feature = "db")]
 use sync::scan::{Note, Pool, ShieldedNote, Spend};
 #[cfg(feature = "db")]
-use sync::{Account, Cursor};
+use sync::{Account, AccountError, Cursor, SyncError};
 
 #[cfg(feature = "db")]
 pub async fn scan(
-    view_key: &str,
+    key: &ViewKey,
     network: &Network,
     birthday: u32,
     db: &db::Db,
-) -> anyhow::Result<u32> {
-    let key = ViewKey::decode(network, view_key).map_err(|e| anyhow::anyhow!(e))?;
-    let client = sync::chain::connect_auto().await.context("connecting to lightwalletd")?;
-    sync::run(client, &key, network, birthday, db).await?;
-    Ok(db.get_sync_state().context("reading final sync height")?.height)
+) -> Result<u32, SyncError> {
+    let client = sync::chain::connect_auto().await?;
+    sync::run(client, key, network, birthday, db).await?;
+    let height = db.get_sync_state().map_err(|e| SyncError::Account(Box::new(e)))?.height;
+    Ok(height)
 }
 
 #[cfg(feature = "db")]
@@ -37,19 +35,19 @@ impl Account for db::Db {
         (st.height != 0).then(|| Cursor { height: BlockHeight::from_u32(st.height), hash: st.hash })
     }
 
-    fn rewind(&self, to: BlockHeight) -> anyhow::Result<()> {
-        self.rewind_to_height(u32::from(to)).context("rewinding after reorg")
+    fn rewind(&self, to: BlockHeight) -> Result<(), AccountError> {
+        self.rewind_to_height(u32::from(to))?;
+        Ok(())
     }
 
-    fn owns_nf(&self, pool: Pool, nf: &[u8; 32]) -> anyhow::Result<bool> {
-        match pool {
+    fn owns_nf(&self, pool: Pool, nf: &[u8; 32]) -> Result<bool, AccountError> {
+        Ok(match pool {
             Pool::Sapling => self.owns_sapling_nf(nf),
             Pool::Orchard => self.owns_orchard_nf(nf),
-        }
-        .context("querying owned nullifier")
+        }?)
     }
 
-    fn apply(&self, at: Cursor, notes: &[Note], spends: &[Spend]) -> anyhow::Result<()> {
+    fn apply(&self, at: Cursor, notes: &[Note], spends: &[Spend]) -> Result<(), AccountError> {
         use db::{OrchardNoteInsert, SaplingNoteInsert, SyncState};
 
         for spend in spends {
@@ -57,14 +55,15 @@ impl Account for db::Db {
             match spend.pool {
                 Pool::Sapling => self.mark_sapling_spent(&spend.nf, h),
                 Pool::Orchard => self.mark_orchard_spent(&spend.nf, h),
-            }
-            .context("marking note spent")?;
+            }?;
         }
 
         for note in notes {
-            let id = self
-                .upsert_transaction(&note.txid, Some(u32::from(note.height)), Some(note.tx_index))
-                .context("upserting transaction")?;
+            let id = self.upsert_transaction(
+                &note.txid,
+                Some(u32::from(note.height)),
+                Some(note.tx_index),
+            )?;
             let is_sent = note.is_sent;
             match &note.note {
                 ShieldedNote::Orchard(n) => {
@@ -80,8 +79,7 @@ impl Account for db::Db {
                         commitment_tree_position: None,
                         is_sent,
                         recipient_address: note.recipient.as_deref(),
-                    })
-                    .context("inserting orchard note")?;
+                    })?;
                 }
                 ShieldedNote::Sapling(n) => {
                     self.insert_sapling_note(&SaplingNoteInsert {
@@ -95,13 +93,12 @@ impl Account for db::Db {
                         commitment_tree_position: None,
                         is_sent,
                         recipient_address: note.recipient.as_deref(),
-                    })
-                    .context("inserting sapling note")?;
+                    })?;
                 }
             }
         }
 
-        self.set_sync_state(&SyncState { height: u32::from(at.height), hash: at.hash })
-            .context("updating sync state")
+        self.set_sync_state(&SyncState { height: u32::from(at.height), hash: at.hash })?;
+        Ok(())
     }
 }

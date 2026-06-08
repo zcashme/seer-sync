@@ -1,16 +1,25 @@
 pub mod chain;
 pub mod scan;
 
-use crate::sync::chain::{DEFAULT_CHUNK_OUTPUTS, LwdClient};
+use crate::sync::chain::{ChainError, DEFAULT_CHUNK_OUTPUTS, LwdClient};
 use crate::sync::scan::{enrich_memos, scan_compact, scan_sent, CompactScan, Note, Pool, Spend};
 use crate::BlockHeight;
 use crate::ViewKey;
-use anyhow::Context;
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use zcash_protocol::consensus::Network;
 
 const MAX_TRANSPORT_RETRIES: usize = 4;
+
+pub type AccountError = Box<dyn std::error::Error + Send + Sync>;
+
+#[derive(thiserror::Error, Debug)]
+pub enum SyncError {
+    #[error(transparent)]
+    Chain(#[from] ChainError),
+    #[error("wallet: {0}")]
+    Account(#[source] AccountError),
+}
 
 pub struct Cursor {
     pub height: BlockHeight,
@@ -19,9 +28,9 @@ pub struct Cursor {
 
 pub trait Account {
     fn checkpoint(&self) -> Option<Cursor>;
-    fn rewind(&self, to: BlockHeight) -> anyhow::Result<()>;
-    fn owns_nf(&self, pool: Pool, nf: &[u8; 32]) -> anyhow::Result<bool>;
-    fn apply(&self, at: Cursor, notes: &[Note], spends: &[Spend]) -> anyhow::Result<()>;
+    fn rewind(&self, to: BlockHeight) -> Result<(), AccountError>;
+    fn owns_nf(&self, pool: Pool, nf: &[u8; 32]) -> Result<bool, AccountError>;
+    fn apply(&self, at: Cursor, notes: &[Note], spends: &[Spend]) -> Result<(), AccountError>;
 }
 
 pub async fn run<A: Account>(
@@ -30,9 +39,9 @@ pub async fn run<A: Account>(
     network: &Network,
     birthday: u32,
     account: &A,
-) -> anyhow::Result<()> {
+) -> Result<(), SyncError> {
     let mut fetch_client = client.clone();
-    let tip = BlockHeight::from_u32(chain::tip_height(&mut fetch_client).await.context("tip height")?);
+    let tip = BlockHeight::from_u32(chain::tip_height(&mut fetch_client).await?);
 
     let mut rewind_by: u32 = 1;
     let mut transport_attempts: usize = 0;
@@ -67,7 +76,7 @@ pub async fn run<A: Account>(
                     let mut owned_spends = Vec::new();
                     for s in &spends {
                         let mine = batch_nfs.contains(&(s.pool, s.nf))
-                            || account.owns_nf(s.pool, &s.nf).context("checking nullifier ownership")?;
+                            || account.owns_nf(s.pool, &s.nf).map_err(SyncError::Account)?;
                         if mine {
                             owned_spends.push(s.clone());
                         }
@@ -82,9 +91,7 @@ pub async fn run<A: Account>(
                     txids.dedup();
                     let mut raw_txs = Vec::with_capacity(txids.len());
                     for txid in txids {
-                        let raw = chain::fetch_raw_transaction(&mut fetch_client, &txid)
-                            .await
-                            .context("fetching transaction for memo")?;
+                        let raw = chain::fetch_raw_transaction(&mut fetch_client, &txid).await?;
                         raw_txs.push((txid, raw));
                     }
 
@@ -99,25 +106,27 @@ pub async fn run<A: Account>(
                     let incoming = enrich_memos(keys, network, &raw_txs, incoming);
                     let sent = scan_sent(keys, network, &raw_txs, &incoming, &tx_index);
                     let notes: Vec<Note> = incoming.into_iter().chain(sent).collect();
-                    account.apply(Cursor { height, hash: Some(hash) }, &notes, &owned_spends)?;
+                    account
+                        .apply(Cursor { height, hash: Some(hash) }, &notes, &owned_spends)
+                        .map_err(SyncError::Account)?;
 
                     transport_attempts = 0;
                     rewind_by = 1;
                 }
-                Err(e) => match e.downcast::<chain::Reorg>() {
-                    Ok(chain::Reorg(at)) => {
-                        account.rewind(BlockHeight::from_u32(at.saturating_sub(rewind_by)))?;
-                        rewind_by = rewind_by.saturating_mul(2);
+                Err(ChainError::Reorg(at)) => {
+                    account
+                        .rewind(BlockHeight::from_u32(at.saturating_sub(rewind_by)))
+                        .map_err(SyncError::Account)?;
+                    rewind_by = rewind_by.saturating_mul(2);
+                    break;
+                }
+                Err(e) => {
+                    if transport_attempts < MAX_TRANSPORT_RETRIES {
+                        transport_attempts += 1;
                         break;
                     }
-                    Err(e) => {
-                        if transport_attempts < MAX_TRANSPORT_RETRIES {
-                            transport_attempts += 1;
-                            break;
-                        }
-                        return Err(e).context("streaming blocks");
-                    }
-                },
+                    return Err(SyncError::Chain(e));
+                }
             }
         }
     }
