@@ -1,23 +1,3 @@
-//! The crate's view-key boundary.
-//!
-//! [`ViewKey`] pre-derives all keys the scan engine needs from a unified
-//! viewing key and then drops it. It accepts either a Unified **Full** Viewing
-//! Key (`uview1…`) or a Unified **Incoming** Viewing Key (`uivk1…`):
-//!
-//! * From a UFVK it derives, per scope, the incoming viewing key, the
-//!   nullifier-deriving material (`nk`/`fvk`), and the outgoing viewing key —
-//!   so it can detect received notes, compute their nullifiers, and recover
-//!   outputs you sent.
-//! * From a UIVK it derives only the incoming viewing key. A UIVK carries no
-//!   `nk`/`fvk` and no OVK, so notes it finds have no nullifier and sent-output
-//!   recovery is unavailable. This is a cryptographic limit of the key, not a
-//!   missing feature.
-//!
-//! `zcash_keys` is confined to this module: it backs the [`ViewKey::decode`]
-//! constructor and the recipient-address encoders ([`encode_sapling_recipient`],
-//! [`encode_orchard_recipient`]). It never touches the struct definition or any
-//! other public surface.
-
 use orchard::keys::{
     FullViewingKey as OrchardFvk, OutgoingViewingKey as OrchardOvk,
     PreparedIncomingViewingKey as OrchardPreparedIvk,
@@ -31,12 +11,6 @@ use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 use zcash_protocol::consensus::Network;
 use zip32::Scope;
 
-/// A Zcash view-only key — the only key material the sync engine needs.
-///
-/// All protocol-specific keys are pre-derived at construction; the unified key
-/// is dropped immediately after. Construct one with [`ViewKey::decode`]. An
-/// empty `Vec` means the pool (or capability) is absent: a sapling-less key has
-/// an empty `sapling`, and an incoming-only key has empty `*_ovks`.
 pub struct ViewKey {
     pub(crate) sapling: Vec<SaplingIncoming>,
     pub(crate) orchard: Vec<OrchardIncoming>,
@@ -44,43 +18,34 @@ pub struct ViewKey {
     pub(crate) orchard_ovks: Vec<OrchardOvk>,
 }
 
-/// A Sapling incoming viewing key paired with the nullifier-deriving key that
-/// spots the spend of any note it detects. `nk` is `None` for an incoming-only
-/// (UIVK) key, which cannot derive nullifiers.
 pub(crate) struct SaplingIncoming {
     pub ivk: SaplingPreparedIvk,
     pub nk: Option<NullifierDerivingKey>,
 }
 
-/// An Orchard incoming viewing key paired with the full viewing key its detected
-/// notes need for nullifier derivation. `fvk` is `None` for an incoming-only
-/// (UIVK) key.
 pub(crate) struct OrchardIncoming {
     pub ivk: OrchardPreparedIvk,
     pub fvk: Option<OrchardFvk>,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("not a recognized unified viewing key (as UFVK: {ufvk}; as UIVK: {uivk})")]
+pub struct KeyError {
+    ufvk: String,
+    uivk: String,
+}
+
 impl ViewKey {
-    /// Decodes a unified viewing key from its string encoding, pre-derives all
-    /// scan keys, and drops the unified key.
-    ///
-    /// Accepts a UFVK (`uview1…`) or a UIVK (`uivk1…`); the kind is detected
-    /// automatically. Returns an error only if the input parses as neither.
-    pub fn decode(network: &Network, encoding: &str) -> Result<Self, String> {
+    pub fn decode(network: &Network, encoding: &str) -> Result<Self, KeyError> {
         match UnifiedFullViewingKey::decode(network, encoding) {
             Ok(ufvk) => Ok(Self::from_ufvk(&ufvk)),
-            Err(ufvk_err) => match UnifiedIncomingViewingKey::decode(network, encoding) {
+            Err(ufvk) => match UnifiedIncomingViewingKey::decode(network, encoding) {
                 Ok(uivk) => Ok(Self::from_uivk(&uivk)),
-                Err(uivk_err) => Err(format!(
-                    "not a recognized unified viewing key \
-                     (as UFVK: {ufvk_err}; as UIVK: {uivk_err})"
-                )),
+                Err(uivk) => Err(KeyError { ufvk: ufvk.to_string(), uivk: uivk.to_string() }),
             },
         }
     }
 
-    /// Derives the full set of scan keys (incoming, nullifier, outgoing) from a
-    /// Unified Full Viewing Key, one entry per scope (external, internal).
     fn from_ufvk(ufvk: &UnifiedFullViewingKey) -> Self {
         Self {
             sapling: per_scope(ufvk.sapling(), |dfvk, scope| SaplingIncoming {
@@ -96,19 +61,11 @@ impl ViewKey {
         }
     }
 
-    /// Whether this key can derive the nullifiers of the notes it detects, and
-    /// so recognize their spends. True for a UFVK (carries `nk`/`fvk`), false
-    /// for a UIVK. Spend detection and no-change-send recovery hinge on this.
     pub(crate) fn can_derive_nullifiers(&self) -> bool {
         self.sapling.iter().any(|s| s.nk.is_some())
             || self.orchard.iter().any(|o| o.fvk.is_some())
     }
 
-    /// Derives the incoming-only scan keys from a Unified Incoming Viewing Key.
-    ///
-    /// A UIVK carries a single (external) incoming key per pool and no
-    /// nullifier or outgoing material, so `nk`/`fvk` are `None` and the OVK
-    /// lists are empty.
     fn from_uivk(uivk: &UnifiedIncomingViewingKey) -> Self {
         Self {
             sapling: uivk
@@ -127,18 +84,11 @@ impl ViewKey {
     }
 }
 
-/// Derives one value per scope (external, internal) from an optional pool key,
-/// returning an empty `Vec` when the pool is absent.
 fn per_scope<K, T>(key: Option<&K>, derive: impl Fn(&K, Scope) -> T) -> Vec<T> {
     key.map(|k| [Scope::External, Scope::Internal].into_iter().map(|s| derive(k, s)).collect())
         .unwrap_or_default()
 }
 
-/// Encodes an OVK-recovered Sapling recipient as a unified address (`u1…`).
-///
-/// What recovery yields is a single diversified Sapling receiver, so the
-/// resulting unified address carries that one receiver — not the original
-/// multi-receiver address the payee may have handed out.
 pub(crate) fn encode_sapling_recipient(
     network: &Network,
     addr: sapling::PaymentAddress,
@@ -146,10 +96,6 @@ pub(crate) fn encode_sapling_recipient(
     UnifiedAddress::from_receivers(None, Some(addr), None).map(|ua| ua.encode(network))
 }
 
-/// Encodes an OVK-recovered Orchard recipient as a unified address (`u1…`).
-///
-/// As with Sapling, this wraps the single recovered Orchard receiver; Orchard
-/// receivers have no standalone encoding, so a unified address is the only form.
 pub(crate) fn encode_orchard_recipient(
     network: &Network,
     addr: orchard::Address,
@@ -161,11 +107,8 @@ pub(crate) fn encode_orchard_recipient(
 mod tests {
     use super::*;
 
-    /// A mainnet UFVK with both sapling and orchard pools.
     const UFVK: &str = "uview1hzzcqccht7226cqmwfxvesey863wzugkdckl4ecyrpy6pmzteum4x75p8gsqqeghfg0ngkhafvjkgzq6u3d2chf9nxlxqldtpfce80renlet8nw6zvkmkt7v2xqf203t63jufh7640kheemmq89u5gha6w6vvjs93gcae7tcswl9glfjwc80afw86y794cuq0rk8mqyylrguq3wcere2lwv4clhxdc76c79et846p6pv69qw40pxjpu8vywwkg440mp46ed97ytcvumj5lzvqf0n3fv7nfze22me7rh07rtzgr6grh3ra6rq9lgcsstvfh7c70nukklnz7a45eauxj70px6tjquklmh7ayryw205zzp7uuxemm4qd8awxc6vsc0l4dc77v5tg";
 
-    /// A UFVK has both pools, derives a nullifier key per scope (two scopes),
-    /// and carries outgoing keys for sent-output recovery.
     #[test]
     fn ufvk_has_full_capability() {
         let key = ViewKey::decode(&Network::MainNetwork, UFVK).expect("decode UFVK");
@@ -178,9 +121,6 @@ mod tests {
         assert!(!key.orchard_ovks.is_empty());
     }
 
-    /// The UIVK derived from the same key keeps incoming detection but loses
-    /// nullifier derivation and outgoing recovery — one incoming key per pool,
-    /// no `nk`/`fvk`, no OVKs.
     #[test]
     fn uivk_is_incoming_only() {
         let ufvk = UnifiedFullViewingKey::decode(&Network::MainNetwork, UFVK).unwrap();
@@ -202,6 +142,7 @@ mod tests {
             Ok(_) => panic!("expected a decode error"),
             Err(e) => e,
         };
+        let err = err.to_string();
         assert!(err.contains("UFVK") && err.contains("UIVK"), "got: {err}");
     }
 }

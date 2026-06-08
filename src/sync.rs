@@ -17,6 +17,8 @@ pub type AccountError = Box<dyn std::error::Error + Send + Sync>;
 pub enum SyncError {
     #[error(transparent)]
     Chain(#[from] ChainError),
+    #[error(transparent)]
+    Key(#[from] crate::key::KeyError),
     #[error("wallet: {0}")]
     Account(#[source] AccountError),
 }

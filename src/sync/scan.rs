@@ -1,4 +1,3 @@
-
 use std::collections::{HashMap, HashSet};
 
 use zcash_primitives::transaction::components::sapling::zip212_enforcement;
@@ -16,7 +15,6 @@ pub enum ShieldedNote {
     Orchard(orchard::Note),
 }
 
-/// Which shielded pool a note or spend belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pool {
     Sapling,
@@ -32,13 +30,10 @@ pub struct Note {
     pub nullifier: Option<[u8; 32]>,
     pub memo: Option<MemoBytes>,
     pub is_sent: bool,
-    /// Destination of a sent output, as a unified address (`u1…`). `Some` only
-    /// when `is_sent`; recovered alongside the note via the OVK.
     pub recipient: Option<String>,
 }
 
 impl Note {
-    /// The pool this note belongs to.
     pub fn pool(&self) -> Pool {
         match self.note {
             ShieldedNote::Sapling(_) => Pool::Sapling,
@@ -47,9 +42,6 @@ impl Note {
     }
 }
 
-/// A nullifier revealed by a block, identifying the note it spends. We keep the
-/// `txid` so a spend of one of our notes can flag its transaction for sent-output
-/// recovery, and the `height` so the spend can be recorded against the note.
 #[derive(Debug, Clone)]
 pub struct Spend {
     pub txid: [u8; 32],
@@ -58,9 +50,6 @@ pub struct Spend {
     pub height: BlockHeight,
 }
 
-/// What a compact-block scan yields: the incoming notes detected, plus every
-/// spend nullifier seen (used to recognize spends of our own notes). `spends` is
-/// empty for a key that cannot derive nullifiers (a UIVK).
 pub struct CompactScan {
     pub notes: Vec<Note>,
     pub spends: Vec<Spend>,
@@ -154,8 +143,6 @@ fn scan_compact_serial(
     for block in blocks {
         let height = BlockHeight::from_u32(block.height as u32);
 
-        // Every nullifier the block reveals, so a spend of one of our notes can
-        // be recognized later by matching against the notes we've recorded.
         if collect_spends {
             for tx in &block.vtx {
                 let Some(txid) = txid_of(tx) else { continue };
@@ -263,11 +250,6 @@ fn scan_compact_serial(
     CompactScan { notes: out, spends }
 }
 
-/// Recovers, via the OVK, the outputs *you* sent in `raw_txs`, skipping any
-/// output already detected as incoming (`claimed_notes`). `tx_index` maps each
-/// txid to its position in the block so a recovered note records its real index.
-///
-/// Returns the sent notes; the caller appends them to the incoming ones.
 pub fn scan_sent(
     keys: &ViewKey,
     network: &Network,

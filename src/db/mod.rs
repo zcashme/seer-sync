@@ -44,9 +44,7 @@ pub struct SaplingNoteInsert<'a> {
     pub nf: Option<&'a [u8]>,
     pub memo: Option<&'a [u8]>,
     pub commitment_tree_position: Option<u64>,
-    /// `true` for an OVK-recovered output you sent (excluded from balance).
     pub is_sent: bool,
-    /// Destination as a unified address; `Some` only for a sent output.
     pub recipient_address: Option<&'a str>,
 }
 
@@ -61,9 +59,7 @@ pub struct OrchardNoteInsert<'a> {
     pub nf: Option<&'a [u8]>,
     pub memo: Option<&'a [u8]>,
     pub commitment_tree_position: Option<u64>,
-    /// `true` for an OVK-recovered output you sent (excluded from balance).
     pub is_sent: bool,
-    /// Destination as a unified address; `Some` only for a sent output.
     pub recipient_address: Option<&'a str>,
 }
 
@@ -374,10 +370,8 @@ mod tests {
         })
         .unwrap();
 
-        // A sent output never counts toward spendable balance.
         assert_eq!(db.balance().unwrap().sapling, Zatoshis::ZERO);
 
-        // …but its destination is persisted for display.
         let recipient: Option<String> = db
             .conn
             .query_row(

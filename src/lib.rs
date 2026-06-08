@@ -1,7 +1,7 @@
 pub use zcash_protocol::consensus::{BlockHeight, Network};
 
 mod key;
-pub use key::ViewKey;
+pub use key::{KeyError, ViewKey};
 
 pub(crate) mod decrypt;
 pub mod sync;
@@ -21,11 +21,20 @@ pub async fn scan(
     network: &Network,
     birthday: u32,
     db: &db::Db,
-) -> Result<u32, SyncError> {
+) -> Result<(), SyncError> {
     let client = sync::chain::connect_auto().await?;
-    sync::run(client, key, network, birthday, db).await?;
-    let height = db.get_sync_state().map_err(|e| SyncError::Account(Box::new(e)))?.height;
-    Ok(height)
+    sync::run(client, key, network, birthday, db).await
+}
+
+#[cfg(feature = "db")]
+pub async fn scan_str(
+    encoding: &str,
+    network: &Network,
+    birthday: u32,
+    db: &db::Db,
+) -> Result<(), SyncError> {
+    let key = ViewKey::decode(network, encoding)?;
+    scan(&key, network, birthday, db).await
 }
 
 #[cfg(feature = "db")]

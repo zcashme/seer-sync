@@ -1,4 +1,3 @@
-
 use orchard::{
     keys::{OutgoingViewingKey as OrchardOvk, PreparedIncomingViewingKey as OrchardPreparedIvk},
     note_encryption::{CompactAction, OrchardDomain},
