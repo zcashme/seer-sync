@@ -228,28 +228,25 @@ fn scan_compact_serial(
                 }
             }
 
-            for scope in sapling {
-                for (i, hit) in
-                    decrypt::try_compact_sapling(&scope.ivk, descs.clone()).into_iter().enumerate()
-                {
-                    if let Some((note, _recipient)) = hit {
-                        let (txid, tx_index, output_index, position) = meta[i];
-                        let nullifier = match (scope.nk.as_ref(), position) {
-                            (Some(nk), Some(pos)) => Some(note.nf(nk, pos).0),
-                            _ => None,
-                        };
-                        out.push(Note {
-                            note: ShieldedNote::Sapling(note),
-                            height,
-                            txid,
-                            tx_index,
-                            output_index,
-                            nullifier,
-                            memo: None,
-                            is_sent: false,
-                            recipient: None,
-                        });
-                    }
+            let ivks: Vec<_> = sapling.iter().map(|s| s.ivk.clone()).collect();
+            for (i, hit) in decrypt::try_compact_sapling(&ivks, descs).into_iter().enumerate() {
+                if let Some((note, _recipient, scope)) = hit {
+                    let (txid, tx_index, output_index, position) = meta[i];
+                    let nullifier = match (sapling[scope].nk.as_ref(), position) {
+                        (Some(nk), Some(pos)) => Some(note.nf(nk, pos).0),
+                        _ => None,
+                    };
+                    out.push(Note {
+                        note: ShieldedNote::Sapling(note),
+                        height,
+                        txid,
+                        tx_index,
+                        output_index,
+                        nullifier,
+                        memo: None,
+                        is_sent: false,
+                        recipient: None,
+                    });
                 }
             }
         }
@@ -268,26 +265,23 @@ fn scan_compact_serial(
                 }
             }
 
-            for scope in orchard {
-                for (i, hit) in
-                    decrypt::try_compact_orchard(&scope.ivk, actions.clone()).into_iter().enumerate()
-                {
-                    if let Some((note, _recipient)) = hit {
-                        let (txid, tx_index, output_index) = meta[i];
-                        let nullifier =
-                            scope.fvk.as_ref().map(|fvk| note.nullifier(fvk).to_bytes());
-                        out.push(Note {
-                            note: ShieldedNote::Orchard(note),
-                            height,
-                            txid,
-                            tx_index,
-                            output_index,
-                            nullifier,
-                            memo: None,
-                            is_sent: false,
-                            recipient: None,
-                        });
-                    }
+            let ivks: Vec<_> = orchard.iter().map(|o| o.ivk.clone()).collect();
+            for (i, hit) in decrypt::try_compact_orchard(&ivks, actions).into_iter().enumerate() {
+                if let Some((note, _recipient, scope)) = hit {
+                    let (txid, tx_index, output_index) = meta[i];
+                    let nullifier =
+                        orchard[scope].fvk.as_ref().map(|fvk| note.nullifier(fvk).to_bytes());
+                    out.push(Note {
+                        note: ShieldedNote::Orchard(note),
+                        height,
+                        txid,
+                        tx_index,
+                        output_index,
+                        nullifier,
+                        memo: None,
+                        is_sent: false,
+                        recipient: None,
+                    });
                 }
             }
         }

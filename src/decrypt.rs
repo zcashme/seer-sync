@@ -13,31 +13,33 @@ use zcash_protocol::memo::MemoBytes;
 
 use crate::proto::{CompactOrchardAction, CompactSaplingOutput};
 
+/// One batch pass over all ivks at once; the returned index says which ivk
+/// (i.e. which key scope) decrypted each hit.
 pub(crate) fn try_compact_sapling(
-    ivk: &SaplingPreparedIvk,
+    ivks: &[SaplingPreparedIvk],
     descs: Vec<CompactOutputDescription>,
-) -> Vec<Option<(sapling::Note, sapling::PaymentAddress)>> {
+) -> Vec<Option<(sapling::Note, sapling::PaymentAddress, usize)>> {
     let inputs: Vec<(SaplingDomain, CompactOutputDescription)> = descs
         .into_iter()
         .map(|d| (SaplingDomain::new(Zip212Enforcement::On), d))
         .collect();
-    batch::try_compact_note_decryption(std::slice::from_ref(ivk), &inputs)
+    batch::try_compact_note_decryption(ivks, &inputs)
         .into_iter()
-        .map(|hit| hit.map(|((note, recipient), _)| (note, recipient)))
+        .map(|hit| hit.map(|((note, recipient), ivk)| (note, recipient, ivk)))
         .collect()
 }
 
 pub(crate) fn try_compact_orchard(
-    ivk: &OrchardPreparedIvk,
+    ivks: &[OrchardPreparedIvk],
     actions: Vec<CompactAction>,
-) -> Vec<Option<(orchard::Note, orchard::Address)>> {
+) -> Vec<Option<(orchard::Note, orchard::Address, usize)>> {
     let inputs: Vec<(OrchardDomain, CompactAction)> = actions
         .into_iter()
         .map(|a| (OrchardDomain::for_compact_action(&a), a))
         .collect();
-    batch::try_compact_note_decryption(std::slice::from_ref(ivk), &inputs)
+    batch::try_compact_note_decryption(ivks, &inputs)
         .into_iter()
-        .map(|hit| hit.map(|((note, recipient), _)| (note, recipient)))
+        .map(|hit| hit.map(|((note, recipient), ivk)| (note, recipient, ivk)))
         .collect()
 }
 
