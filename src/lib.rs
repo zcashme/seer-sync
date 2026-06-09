@@ -4,7 +4,7 @@ mod key;
 pub use key::{KeyError, ViewKey};
 
 pub(crate) mod decrypt;
-pub(crate) mod proto;
+pub mod proto;
 pub mod sync;
 
 pub use proto::{
@@ -70,10 +70,7 @@ impl Account for db::Db {
     }
 
     fn owns_nf(&self, pool: Pool, nf: &[u8; 32]) -> Result<bool, AccountError> {
-        Ok(match pool {
-            Pool::Sapling => self.owns_sapling_nf(nf),
-            Pool::Orchard => self.owns_orchard_nf(nf),
-        }?)
+        Ok(db::Db::owns_nf(self, pool, nf)?)
     }
 
     fn apply(&self, at: Cursor, notes: &[Note], spends: &[Spend]) -> Result<(), AccountError> {
@@ -82,10 +79,7 @@ impl Account for db::Db {
         for spend in spends {
             let h = u32::from(spend.height);
             self.upsert_transaction(&spend.txid, Some(h), None)?;
-            match spend.pool {
-                Pool::Sapling => self.mark_sapling_spent(&spend.nf, h, &spend.txid),
-                Pool::Orchard => self.mark_orchard_spent(&spend.nf, h, &spend.txid),
-            }?;
+            self.mark_spent(spend.pool, &spend.nf, h, &spend.txid)?;
         }
 
         for note in notes {

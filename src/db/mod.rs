@@ -73,6 +73,22 @@ pub struct OrchardNoteInsert<'a> {
     pub recipient_address: Option<&'a str>,
 }
 
+const POOLS: [Pool; 2] = [Pool::Sapling, Pool::Orchard];
+
+fn note_table(pool: Pool) -> &'static str {
+    match pool {
+        Pool::Sapling => "sapling_received_notes",
+        Pool::Orchard => "orchard_received_notes",
+    }
+}
+
+fn index_col(pool: Pool) -> &'static str {
+    match pool {
+        Pool::Sapling => "output_index",
+        Pool::Orchard => "action_index",
+    }
+}
+
 pub struct Db {
     pub(crate) conn: Connection,
 }
@@ -199,31 +215,25 @@ impl Db {
         Ok(())
     }
 
-    pub fn mark_sapling_spent(&self, nf: &[u8], height: u32, txid: &[u8]) -> rusqlite::Result<usize> {
+    pub fn mark_spent(
+        &self,
+        pool: Pool,
+        nf: &[u8],
+        height: u32,
+        txid: &[u8],
+    ) -> rusqlite::Result<usize> {
         self.conn.execute(
-            "UPDATE sapling_received_notes SET spent_height = ?2, spent_txid = ?3 WHERE nf = ?1",
+            &format!(
+                "UPDATE {} SET spent_height = ?2, spent_txid = ?3 WHERE nf = ?1",
+                note_table(pool)
+            ),
             params![nf, height, txid],
         )
     }
 
-    pub fn mark_orchard_spent(&self, nf: &[u8], height: u32, txid: &[u8]) -> rusqlite::Result<usize> {
-        self.conn.execute(
-            "UPDATE orchard_received_notes SET spent_height = ?2, spent_txid = ?3 WHERE nf = ?1",
-            params![nf, height, txid],
-        )
-    }
-
-    pub fn owns_sapling_nf(&self, nf: &[u8]) -> rusqlite::Result<bool> {
+    pub fn owns_nf(&self, pool: Pool, nf: &[u8]) -> rusqlite::Result<bool> {
         self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sapling_received_notes WHERE nf = ?1)",
-            params![nf],
-            |row| row.get(0),
-        )
-    }
-
-    pub fn owns_orchard_nf(&self, nf: &[u8]) -> rusqlite::Result<bool> {
-        self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM orchard_received_notes WHERE nf = ?1)",
+            &format!("SELECT EXISTS(SELECT 1 FROM {} WHERE nf = ?1)", note_table(pool)),
             params![nf],
             |row| row.get(0),
         )
@@ -232,19 +242,21 @@ impl Db {
 
 impl Db {
     pub fn balance(&self) -> rusqlite::Result<PoolBalance> {
-        let sapling = self.unspent_sum(
-            "SELECT COALESCE(SUM(value), 0) FROM sapling_received_notes
-             WHERE spent_height IS NULL AND is_sent = 0",
-        )?;
-        let orchard = self.unspent_sum(
-            "SELECT COALESCE(SUM(value), 0) FROM orchard_received_notes
-             WHERE spent_height IS NULL AND is_sent = 0",
-        )?;
-        let transparent = self.unspent_sum(
-            "SELECT COALESCE(SUM(value), 0) FROM transparent_received_outputs
-             WHERE spent_height IS NULL",
-        )?;
-        Ok(PoolBalance { orchard, sapling, transparent })
+        let shielded = |pool| {
+            self.unspent_sum(&format!(
+                "SELECT COALESCE(SUM(value), 0) FROM {}
+                 WHERE spent_height IS NULL AND is_sent = 0",
+                note_table(pool)
+            ))
+        };
+        Ok(PoolBalance {
+            sapling: shielded(Pool::Sapling)?,
+            orchard: shielded(Pool::Orchard)?,
+            transparent: self.unspent_sum(
+                "SELECT COALESCE(SUM(value), 0) FROM transparent_received_outputs
+                 WHERE spent_height IS NULL",
+            )?,
+        })
     }
 
     fn unspent_sum(&self, sql: &str) -> rusqlite::Result<Zatoshis> {
@@ -355,19 +367,15 @@ pub struct TxRow {
 
 impl Db {
     pub fn notes(&self) -> rusqlite::Result<Vec<NoteRow>> {
-        let sql = |table: &str, index: &str| {
-            format!(
+        let mut out = Vec::new();
+        for pool in POOLS {
+            let mut stmt = self.conn.prepare(&format!(
                 "SELECT t.txid, t.mined_height, n.{index}, n.value, n.memo,
                         n.spent_height, n.is_sent, n.recipient_address
-                 FROM {table} n JOIN transactions t ON t.id_tx = n.transaction_id"
-            )
-        };
-        let mut out = Vec::new();
-        for (pool, table, index) in [
-            (Pool::Sapling, "sapling_received_notes", "output_index"),
-            (Pool::Orchard, "orchard_received_notes", "action_index"),
-        ] {
-            let mut stmt = self.conn.prepare(&sql(table, index))?;
+                 FROM {table} n JOIN transactions t ON t.id_tx = n.transaction_id",
+                table = note_table(pool),
+                index = index_col(pool),
+            ))?;
             let rows = stmt.query_map([], |row| note_row(pool, row))?;
             for row in rows {
                 out.push(row?);
@@ -378,25 +386,29 @@ impl Db {
     }
 
     pub fn transactions(&self) -> rusqlite::Result<Vec<TxRow>> {
-        let mut stmt = self.conn.prepare(
+        let shielded_sum = |pred: &str| {
+            POOLS
+                .map(|pool| {
+                    format!(
+                        "(SELECT COALESCE(SUM(value), 0) FROM {} WHERE {pred})",
+                        note_table(pool)
+                    )
+                })
+                .join(" + ")
+        };
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT t.txid, t.mined_height, t.tx_index,
-                (SELECT COALESCE(SUM(value), 0) FROM sapling_received_notes
-                 WHERE transaction_id = t.id_tx AND is_sent = 0)
-              + (SELECT COALESCE(SUM(value), 0) FROM orchard_received_notes
-                 WHERE transaction_id = t.id_tx AND is_sent = 0)
+                {received}
               + (SELECT COALESCE(SUM(value), 0) FROM transparent_received_outputs
                  WHERE transaction_id = t.id_tx),
-                (SELECT COALESCE(SUM(value), 0) FROM sapling_received_notes
-                 WHERE transaction_id = t.id_tx AND is_sent = 1)
-              + (SELECT COALESCE(SUM(value), 0) FROM orchard_received_notes
-                 WHERE transaction_id = t.id_tx AND is_sent = 1),
-                (SELECT COALESCE(SUM(value), 0) FROM sapling_received_notes
-                 WHERE spent_txid = t.txid)
-              + (SELECT COALESCE(SUM(value), 0) FROM orchard_received_notes
-                 WHERE spent_txid = t.txid)
+                {sent},
+                {spent}
              FROM transactions t
              ORDER BY t.mined_height IS NULL, t.mined_height, t.tx_index",
-        )?;
+            received = shielded_sum("transaction_id = t.id_tx AND is_sent = 0"),
+            sent = shielded_sum("transaction_id = t.id_tx AND is_sent = 1"),
+            spent = shielded_sum("spent_txid = t.txid"),
+        ))?;
         let rows = stmt.query_map([], |row| {
             Ok(TxRow {
                 txid: row.get(0)?,
@@ -436,16 +448,16 @@ impl Db {
             "DELETE FROM transactions WHERE mined_height > ?1",
             params![height],
         )?;
-        tx.execute(
-            "UPDATE sapling_received_notes SET spent_height = NULL, spent_txid = NULL
-             WHERE spent_height > ?1",
-            params![height],
-        )?;
-        tx.execute(
-            "UPDATE orchard_received_notes SET spent_height = NULL, spent_txid = NULL
-             WHERE spent_height > ?1",
-            params![height],
-        )?;
+        for pool in POOLS {
+            tx.execute(
+                &format!(
+                    "UPDATE {} SET spent_height = NULL, spent_txid = NULL
+                     WHERE spent_height > ?1",
+                    note_table(pool)
+                ),
+                params![height],
+            )?;
+        }
         tx.execute(
             "UPDATE transparent_received_outputs SET spent_height = NULL
              WHERE spent_height > ?1",
@@ -531,7 +543,7 @@ mod tests {
             Zatoshis::const_from_u64(5_000_000)
         );
 
-        assert_eq!(db.mark_orchard_spent(&[9u8; 32], 101, &[4u8; 32]).unwrap(), 1);
+        assert_eq!(db.mark_spent(Pool::Orchard, &[9u8; 32], 101, &[4u8; 32]).unwrap(), 1);
         assert_eq!(db.balance().unwrap().orchard, Zatoshis::ZERO);
     }
 
@@ -616,7 +628,7 @@ mod tests {
         .unwrap();
 
         let spend = mined_tx(&db, &[2u8; 32], 105);
-        db.mark_orchard_spent(&[9u8; 32], 105, &[2u8; 32]).unwrap();
+        db.mark_spent(Pool::Orchard, &[9u8; 32], 105, &[2u8; 32]).unwrap();
         db.insert_sapling_note(&SaplingNoteInsert {
             transaction_id: spend,
             output_index: 1,
@@ -706,7 +718,7 @@ mod tests {
             recipient_address: None,
         })
         .unwrap();
-        db.mark_orchard_spent(&[9u8; 32], 105, &[4u8; 32]).unwrap();
+        db.mark_spent(Pool::Orchard, &[9u8; 32], 105, &[4u8; 32]).unwrap();
         assert_eq!(db.balance().unwrap().orchard, Zatoshis::ZERO);
 
         db.rewind_to_height(104).unwrap();
