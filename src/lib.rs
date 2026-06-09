@@ -4,22 +4,14 @@ mod key;
 pub use key::{KeyError, ViewKey};
 
 pub(crate) mod decrypt;
-pub mod sync;
 pub(crate) mod proto;
+pub mod sync;
 
-// The lightwalletd compact-block *data* types (not the gRPC client or the RPC
-// request/response messages), public so callers can drive their own scan over
-// `sync::chain`'s block stream — e.g. a consumer applying a decrypt rule the
-// standard engine doesn't. This is the full set reachable through
-// `CompactBlock`'s and `RawTransaction`'s fields, so the exposed surface is
-// closed (no private-in-public).
 pub use proto::{
     ChainMetadata, CompactBlock, CompactOrchardAction, CompactSaplingOutput, CompactSaplingSpend,
     CompactTx, CompactTxIn, RawTransaction, TxOut,
 };
 
-// Convert a compact-block Orchard action into the `orchard` crate's
-// `CompactAction` — a building block for callers scanning the raw stream.
 pub use decrypt::parse_orchard;
 
 #[cfg(feature = "db")]
@@ -30,6 +22,10 @@ use sync::scan::{Note, Pool, ShieldedNote, Spend};
 #[cfg(feature = "db")]
 use sync::{Account, AccountError, Cursor, SyncError};
 
+/// Sync `db` to the chain tip from a viewing key, auto-connecting to a
+/// lightwalletd server. The batteries-included entry for the `db` consumer; for
+/// a custom client or `Account`, use [`sync::run`]. To start from a key string,
+/// decode it first with [`ViewKey::decode`].
 #[cfg(feature = "db")]
 pub async fn scan(
     key: &ViewKey,
@@ -42,21 +38,13 @@ pub async fn scan(
 }
 
 #[cfg(feature = "db")]
-pub async fn scan_str(
-    encoding: &str,
-    network: &Network,
-    birthday: u32,
-    db: &db::Db,
-) -> Result<(), SyncError> {
-    let key = ViewKey::decode(network, encoding)?;
-    scan(&key, network, birthday, db).await
-}
-
-#[cfg(feature = "db")]
 impl Account for db::Db {
     fn checkpoint(&self) -> Option<Cursor> {
         let st = self.get_sync_state().ok()?;
-        (st.height != 0).then(|| Cursor { height: BlockHeight::from_u32(st.height), hash: st.hash })
+        (st.height != 0).then(|| Cursor {
+            height: BlockHeight::from_u32(st.height),
+            hash: st.hash,
+        })
     }
 
     fn rewind(&self, to: BlockHeight) -> Result<(), AccountError> {
@@ -122,7 +110,10 @@ impl Account for db::Db {
             }
         }
 
-        self.set_sync_state(&SyncState { height: u32::from(at.height), hash: at.hash })?;
+        self.set_sync_state(&SyncState {
+            height: u32::from(at.height),
+            hash: at.hash,
+        })?;
         Ok(())
     }
 }
