@@ -1,14 +1,5 @@
 //! Shardtree shard (sub-tree) serialization.
 //!
-//! Vendored **verbatim** from librustzcash `zcash_client_backend` v0.21.0
-//! (`src/serialization/shardtree.rs`), MIT/Apache-2.0, so seer-sync does not
-//! depend on the whole `zcash_client_backend` crate (which is large and, at the
-//! versions matching our orchard stack, unresolvable). Only the wire format and
-//! these two functions are needed to back the note-commitment tree in SQLite;
-//! the format is byte-compatible with librustzcash.
-//!
-//! The functions are unchanged from upstream aside from visibility; do not
-//! "improve" them — keeping them identical preserves on-disk compatibility.
 
 use byteorder::{ReadBytesExt, WriteBytesExt};
 use core::ops::Deref;
@@ -36,7 +27,9 @@ pub(crate) fn write_shard<H: HashSer, W: Write>(
         match tree.deref() {
             Node::Parent { ann, left, right } => {
                 writer.write_u8(PARENT_TAG)?;
-                Optional::write(&mut writer, ann.as_ref(), |w, h| <H as HashSer>::write(h, w))?;
+                Optional::write(&mut writer, ann.as_ref(), |w, h| {
+                    <H as HashSer>::write(h, w)
+                })?;
                 write_inner(writer, left)?;
                 write_inner(writer, right)?;
                 Ok(())
@@ -107,7 +100,9 @@ mod tests {
     use std::sync::Arc;
 
     fn h(b: u8) -> MerkleHashOrchard {
-        MerkleHashOrchard::from_bytes(&[b; 32]).into_option().unwrap()
+        MerkleHashOrchard::from_bytes(&[b; 32])
+            .into_option()
+            .unwrap()
     }
 
     #[test]
@@ -123,6 +118,9 @@ mod tests {
         );
         let mut bytes = Vec::new();
         write_shard(&mut bytes, &tree).unwrap();
-        assert_eq!(read_shard::<MerkleHashOrchard, _>(&bytes[..]).unwrap(), tree);
+        assert_eq!(
+            read_shard::<MerkleHashOrchard, _>(&bytes[..]).unwrap(),
+            tree
+        );
     }
 }
