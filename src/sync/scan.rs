@@ -69,22 +69,34 @@ pub struct Commitment {
     pub cmx: [u8; 32],
 }
 
+/// Parse fetched raw transactions once; both phase-2 passes (memo enrichment
+/// and sent recovery) consume the parsed list. Unparseable transactions are
+/// dropped, matching the per-pass skip they got before.
+pub(crate) fn parse_transactions(
+    network: &Network,
+    raw_txs: &[([u8; 32], RawTransaction)],
+) -> Vec<([u8; 32], BlockHeight, Transaction)> {
+    raw_txs
+        .iter()
+        .filter_map(|(txid, raw)| {
+            let height = BlockHeight::from_u32(raw.height as u32);
+            Transaction::read(&raw.data[..], BranchId::for_height(network, height))
+                .ok()
+                .map(|tx| (*txid, height, tx))
+        })
+        .collect()
+}
+
 pub(crate) fn enrich_memos(
     keys: &ViewKey,
     network: &Network,
-    raw_txs: &[([u8; 32], RawTransaction)],
+    txs: &[([u8; 32], BlockHeight, Transaction)],
     mut notes: Vec<Note>,
 ) -> Vec<Note> {
     let sapling = &keys.sapling;
     let orchard = &keys.orchard;
 
-    for (txid, raw) in raw_txs {
-        let height = BlockHeight::from_u32(raw.height as u32);
-        let tx = match Transaction::read(&raw.data[..], BranchId::for_height(network, height)) {
-            Ok(tx) => tx,
-            Err(_) => continue,
-        };
-
+    for (txid, _, tx) in txs {
         for note in notes.iter_mut().filter(|n| &n.txid == txid && n.memo.is_none()) {
             let is_sapling = matches!(note.note, ShieldedNote::Sapling(_));
             let output_index = note.output_index as usize;
@@ -293,7 +305,7 @@ fn scan_compact_serial(
 pub(crate) fn scan_sent(
     keys: &ViewKey,
     network: &Network,
-    raw_txs: &[([u8; 32], RawTransaction)],
+    txs: &[([u8; 32], BlockHeight, Transaction)],
     claimed_notes: &[Note],
     tx_index: &HashMap<[u8; 32], u32>,
 ) -> Vec<Note> {
@@ -305,12 +317,8 @@ pub(crate) fn scan_sent(
 
     let mut out = Vec::new();
 
-    for (txid, raw) in raw_txs {
-        let height = BlockHeight::from_u32(raw.height as u32);
-        let tx = match Transaction::read(&raw.data[..], BranchId::for_height(network, height)) {
-            Ok(tx) => tx,
-            Err(_) => continue,
-        };
+    for (txid, height, tx) in txs {
+        let height = *height;
         let index = tx_index.get(txid).copied().unwrap_or(0);
 
         if let Some(bundle) = tx.sapling_bundle() {

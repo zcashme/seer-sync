@@ -4,8 +4,8 @@ pub mod transparent;
 
 use crate::sync::chain::{ChainError, DEFAULT_CHUNK_OUTPUTS, LwdClient};
 use crate::sync::scan::{
-    enrich_memos, scan_commitments, scan_compact, scan_sent, Commitment, CompactScan, Note, Pool,
-    Spend,
+    enrich_memos, parse_transactions, scan_commitments, scan_compact, scan_sent, Commitment,
+    CompactScan, Note, Pool, Spend,
 };
 use crate::BlockHeight;
 use crate::ViewKey;
@@ -129,8 +129,9 @@ pub async fn run<A: Account>(
                         })
                         .collect();
 
-                    let incoming = enrich_memos(keys, network, &raw_txs, incoming);
-                    let sent = scan_sent(keys, network, &raw_txs, &incoming, &tx_index);
+                    let parsed = parse_transactions(network, &raw_txs);
+                    let incoming = enrich_memos(keys, network, &parsed, incoming);
+                    let sent = scan_sent(keys, network, &parsed, &incoming, &tx_index);
                     let notes: Vec<Note> = incoming.into_iter().chain(sent).collect();
                     let cursor = Cursor { height, hash: Some(hash) };
                     account.apply(cursor, &notes, &owned_spends).map_err(SyncError::Account)?;
