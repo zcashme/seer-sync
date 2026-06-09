@@ -8,7 +8,9 @@ use sapling::{
     keys::{OutgoingViewingKey as SaplingOvk, PreparedIncomingViewingKey as SaplingPreparedIvk},
     note_encryption::{CompactOutputDescription, SaplingDomain, Zip212Enforcement},
 };
-use zcash_note_encryption::{batch, try_note_decryption, try_output_recovery_with_ovk, EphemeralKeyBytes};
+use zcash_note_encryption::{
+    batch, try_note_decryption, try_output_recovery_with_ovk, EphemeralKeyBytes,
+};
 use zcash_protocol::memo::MemoBytes;
 
 use crate::proto::{CompactOrchardAction, CompactSaplingOutput};
@@ -45,10 +47,16 @@ pub(crate) fn try_compact_orchard(
 
 pub(crate) fn parse_sapling(p: &CompactSaplingOutput) -> Option<CompactOutputDescription> {
     let cmu_bytes: [u8; 32] = p.cmu[..].try_into().ok()?;
-    let cmu = Option::from(sapling::note::ExtractedNoteCommitment::from_bytes(&cmu_bytes))?;
+    let cmu = Option::from(sapling::note::ExtractedNoteCommitment::from_bytes(
+        &cmu_bytes,
+    ))?;
     let ephemeral_key = EphemeralKeyBytes(p.ephemeral_key[..].try_into().ok()?);
     let enc_ciphertext = p.ciphertext[..].try_into().ok()?;
-    Some(CompactOutputDescription { cmu, ephemeral_key, enc_ciphertext })
+    Some(CompactOutputDescription {
+        cmu,
+        ephemeral_key,
+        enc_ciphertext,
+    })
 }
 
 /// Parse a compact-block Orchard action into the `orchard` crate's
@@ -78,8 +86,7 @@ pub fn try_decrypt_sapling<Proof>(
     ivk: &SaplingPreparedIvk,
     zip212: Zip212Enforcement,
 ) -> Option<(sapling::Note, sapling::PaymentAddress, MemoBytes)> {
-    let (note, recipient, memo) =
-        try_note_decryption(&SaplingDomain::new(zip212), ivk, output)?;
+    let (note, recipient, memo) = try_note_decryption(&SaplingDomain::new(zip212), ivk, output)?;
     Some((note, recipient, MemoBytes::from_bytes(&memo).unwrap()))
 }
 

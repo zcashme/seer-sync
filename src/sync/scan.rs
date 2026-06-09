@@ -4,9 +4,12 @@ use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 use zcash_protocol::memo::MemoBytes;
+use zcash_protocol::TxId;
 
 use crate::decrypt;
-use crate::key::{encode_orchard_recipient, encode_sapling_recipient, OrchardIncoming, SaplingIncoming};
+use crate::key::{
+    encode_orchard_recipient, encode_sapling_recipient, OrchardIncoming, SaplingIncoming,
+};
 use crate::proto::{CompactBlock, CompactTx, RawTransaction};
 use crate::ViewKey;
 
@@ -24,7 +27,7 @@ pub enum Pool {
 pub struct Note {
     pub note: ShieldedNote,
     pub height: BlockHeight,
-    pub txid: [u8; 32],
+    pub txid: TxId,
     pub tx_index: u32,
     pub output_index: u32,
     pub nullifier: Option<[u8; 32]>,
@@ -44,7 +47,7 @@ impl Note {
 
 #[derive(Debug, Clone)]
 pub struct Spend {
-    pub txid: [u8; 32],
+    pub txid: TxId,
     pub nf: [u8; 32],
     pub pool: Pool,
     pub height: BlockHeight,
@@ -74,8 +77,8 @@ pub struct Commitment {
 /// dropped, matching the per-pass skip they got before.
 pub(crate) fn parse_transactions(
     network: &Network,
-    raw_txs: &[([u8; 32], RawTransaction)],
-) -> Vec<([u8; 32], BlockHeight, Transaction)> {
+    raw_txs: &[(TxId, RawTransaction)],
+) -> Vec<(TxId, BlockHeight, Transaction)> {
     raw_txs
         .iter()
         .filter_map(|(txid, raw)| {
@@ -90,14 +93,17 @@ pub(crate) fn parse_transactions(
 pub(crate) fn enrich_memos(
     keys: &ViewKey,
     network: &Network,
-    txs: &[([u8; 32], BlockHeight, Transaction)],
+    txs: &[(TxId, BlockHeight, Transaction)],
     mut notes: Vec<Note>,
 ) -> Vec<Note> {
     let sapling = &keys.sapling;
     let orchard = &keys.orchard;
 
     for (txid, _, tx) in txs {
-        for note in notes.iter_mut().filter(|n| &n.txid == txid && n.memo.is_none()) {
+        for note in notes
+            .iter_mut()
+            .filter(|n| &n.txid == txid && n.memo.is_none())
+        {
             let is_sapling = matches!(note.note, ShieldedNote::Sapling(_));
             let output_index = note.output_index as usize;
             let note_height = note.height;
@@ -147,7 +153,10 @@ pub fn scan_compact(blocks: &[CompactBlock], keys: &ViewKey) -> CompactScan {
             .chunks(chunk)
             .map(|c| s.spawn(move || scan_compact_serial(c, sapling, orchard, collect_spends)))
             .collect();
-        let mut merged = CompactScan { notes: Vec::new(), spends: Vec::new() };
+        let mut merged = CompactScan {
+            notes: Vec::new(),
+            spends: Vec::new(),
+        };
         for h in handles {
             let part = h.join().expect("scan thread panicked");
             merged.notes.extend(part.notes);
@@ -169,7 +178,9 @@ pub fn scan_compact(blocks: &[CompactBlock], keys: &ViewKey) -> CompactScan {
 pub fn scan_commitments(blocks: &[CompactBlock]) -> Vec<Commitment> {
     let mut out = Vec::new();
     for block in blocks {
-        let Some(meta) = block.chain_metadata.as_ref() else { continue };
+        let Some(meta) = block.chain_metadata.as_ref() else {
+            continue;
+        };
         let in_block: u64 = block.vtx.iter().map(|tx| tx.actions.len() as u64).sum();
         let Some(mut pos) = (meta.orchard_commitment_tree_size as u64).checked_sub(in_block) else {
             continue;
@@ -206,12 +217,22 @@ fn scan_compact_serial(
                 let Some(txid) = txid_of(tx) else { continue };
                 for spend in &tx.spends {
                     if let Ok(nf) = spend.nf[..].try_into() {
-                        spends.push(Spend { txid, nf, pool: Pool::Sapling, height });
+                        spends.push(Spend {
+                            txid,
+                            nf,
+                            pool: Pool::Sapling,
+                            height,
+                        });
                     }
                 }
                 for act in &tx.actions {
                     if let Ok(nf) = act.nullifier[..].try_into() {
-                        spends.push(Spend { txid, nf, pool: Pool::Orchard, height });
+                        spends.push(Spend {
+                            txid,
+                            nf,
+                            pool: Pool::Orchard,
+                            height,
+                        });
                     }
                 }
             }
@@ -225,7 +246,7 @@ fn scan_compact_serial(
             });
 
             let mut descs = Vec::new();
-            let mut meta: Vec<([u8; 32], u32, u32, Option<u64>)> = Vec::new();
+            let mut meta: Vec<(TxId, u32, u32, Option<u64>)> = Vec::new();
             let mut leaf = 0u64;
             for tx in &block.vtx {
                 let Some(txid) = txid_of(tx) else { continue };
@@ -241,7 +262,10 @@ fn scan_compact_serial(
             }
 
             let ivks: Vec<_> = sapling.iter().map(|s| s.ivk.clone()).collect();
-            for (i, hit) in decrypt::try_compact_sapling(&ivks, descs).into_iter().enumerate() {
+            for (i, hit) in decrypt::try_compact_sapling(&ivks, descs)
+                .into_iter()
+                .enumerate()
+            {
                 if let Some((note, _recipient, scope)) = hit {
                     let (txid, tx_index, output_index, position) = meta[i];
                     let nullifier = match (sapling[scope].nk.as_ref(), position) {
@@ -265,7 +289,7 @@ fn scan_compact_serial(
 
         if !orchard.is_empty() {
             let mut actions = Vec::new();
-            let mut meta: Vec<([u8; 32], u32, u32)> = Vec::new();
+            let mut meta: Vec<(TxId, u32, u32)> = Vec::new();
             for tx in &block.vtx {
                 let Some(txid) = txid_of(tx) else { continue };
                 let tx_index = tx.index as u32;
@@ -278,11 +302,16 @@ fn scan_compact_serial(
             }
 
             let ivks: Vec<_> = orchard.iter().map(|o| o.ivk.clone()).collect();
-            for (i, hit) in decrypt::try_compact_orchard(&ivks, actions).into_iter().enumerate() {
+            for (i, hit) in decrypt::try_compact_orchard(&ivks, actions)
+                .into_iter()
+                .enumerate()
+            {
                 if let Some((note, _recipient, scope)) = hit {
                     let (txid, tx_index, output_index) = meta[i];
-                    let nullifier =
-                        orchard[scope].fvk.as_ref().map(|fvk| note.nullifier(fvk).to_bytes());
+                    let nullifier = orchard[scope]
+                        .fvk
+                        .as_ref()
+                        .map(|fvk| note.nullifier(fvk).to_bytes());
                     out.push(Note {
                         note: ShieldedNote::Orchard(note),
                         height,
@@ -305,15 +334,17 @@ fn scan_compact_serial(
 pub(crate) fn scan_sent(
     keys: &ViewKey,
     network: &Network,
-    txs: &[([u8; 32], BlockHeight, Transaction)],
+    txs: &[(TxId, BlockHeight, Transaction)],
     claimed_notes: &[Note],
-    tx_index: &HashMap<[u8; 32], u32>,
+    tx_index: &HashMap<TxId, u32>,
 ) -> Vec<Note> {
     let sapling_ovks = &keys.sapling_ovks;
     let orchard_ovks = &keys.orchard_ovks;
 
-    let claimed: HashSet<(Pool, [u8; 32], u32)> =
-        claimed_notes.iter().map(|n| (n.pool(), n.txid, n.output_index)).collect();
+    let claimed: HashSet<(Pool, TxId, u32)> = claimed_notes
+        .iter()
+        .map(|n| (n.pool(), n.txid, n.output_index))
+        .collect();
 
     let mut out = Vec::new();
 
@@ -378,8 +409,8 @@ pub(crate) fn scan_sent(
     out
 }
 
-fn txid_of(tx: &CompactTx) -> Option<[u8; 32]> {
-    tx.txid[..].try_into().ok()
+fn txid_of(tx: &CompactTx) -> Option<TxId> {
+    tx.txid[..].try_into().ok().map(TxId::from_bytes)
 }
 
 #[cfg(test)]
@@ -388,7 +419,10 @@ mod tests {
     use crate::proto::{ChainMetadata, CompactOrchardAction};
 
     fn action(cmx_byte: u8) -> CompactOrchardAction {
-        CompactOrchardAction { cmx: vec![cmx_byte; 32], ..Default::default() }
+        CompactOrchardAction {
+            cmx: vec![cmx_byte; 32],
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -401,14 +435,22 @@ mod tests {
                 ..Default::default()
             }),
             vtx: vec![
-                CompactTx { actions: vec![action(0xaa), action(0xbb)], ..Default::default() },
-                CompactTx { actions: vec![action(0xcc)], ..Default::default() },
+                CompactTx {
+                    actions: vec![action(0xaa), action(0xbb)],
+                    ..Default::default()
+                },
+                CompactTx {
+                    actions: vec![action(0xcc)],
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         };
         let got = scan_commitments(&[block]);
         assert_eq!(
-            got.iter().map(|c| (c.position, c.cmx[0])).collect::<Vec<_>>(),
+            got.iter()
+                .map(|c| (c.position, c.cmx[0]))
+                .collect::<Vec<_>>(),
             vec![(2, 0xaa), (3, 0xbb), (4, 0xcc)],
         );
     }
@@ -418,7 +460,10 @@ mod tests {
         let block = CompactBlock {
             height: 50,
             chain_metadata: None,
-            vtx: vec![CompactTx { actions: vec![action(0x11)], ..Default::default() }],
+            vtx: vec![CompactTx {
+                actions: vec![action(0x11)],
+                ..Default::default()
+            }],
             ..Default::default()
         };
         assert!(scan_commitments(&[block]).is_empty());

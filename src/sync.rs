@@ -2,7 +2,7 @@ pub mod chain;
 pub mod scan;
 pub mod transparent;
 
-use crate::sync::chain::{ChainError, DEFAULT_CHUNK_OUTPUTS, LwdClient};
+use crate::sync::chain::{ChainError, LwdClient, DEFAULT_CHUNK_OUTPUTS};
 use crate::sync::scan::{
     enrich_memos, parse_transactions, scan_commitments, scan_compact, scan_sent, Commitment,
     CompactScan, Note, Pool, Spend,
@@ -11,7 +11,9 @@ use crate::BlockHeight;
 use crate::ViewKey;
 use std::collections::{HashMap, HashSet};
 use tokio_stream::StreamExt;
+use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::Network;
+use zcash_protocol::TxId;
 
 const MAX_TRANSPORT_RETRIES: usize = 4;
 
@@ -30,7 +32,7 @@ pub enum SyncError {
 #[derive(Clone, Copy)]
 pub struct Cursor {
     pub height: BlockHeight,
-    pub hash: Option<[u8; 32]>,
+    pub hash: Option<BlockHash>,
 }
 
 pub trait Account {
@@ -80,8 +82,13 @@ pub async fn run<A: Account>(
         if start > tip {
             return Ok(());
         }
-        let mut stream =
-            chain::blocks(client.clone(), u32::from(start), u32::from(tip), DEFAULT_CHUNK_OUTPUTS, seam);
+        let mut stream = chain::blocks(
+            client.clone(),
+            u32::from(start),
+            u32::from(tip),
+            DEFAULT_CHUNK_OUTPUTS,
+            seam,
+        );
 
         loop {
             let Some(item) = stream.next().await else {
@@ -91,9 +98,12 @@ pub async fn run<A: Account>(
                 Ok(batch) => {
                     let Some(last) = batch.last() else { continue };
                     let height = BlockHeight::from_u32(last.height as u32);
-                    let hash: [u8; 32] = last.hash[..].try_into().unwrap_or([0u8; 32]);
+                    let hash = <[u8; 32]>::try_from(&last.hash[..]).ok().map(BlockHash);
 
-                    let CompactScan { notes: incoming, spends } = scan_compact(&batch, keys);
+                    let CompactScan {
+                        notes: incoming,
+                        spends,
+                    } = scan_compact(&batch, keys);
 
                     let batch_nfs: HashSet<(Pool, [u8; 32])> = incoming
                         .iter()
@@ -108,7 +118,7 @@ pub async fn run<A: Account>(
                         }
                     }
 
-                    let mut txids: Vec<[u8; 32]> = incoming
+                    let mut txids: Vec<TxId> = incoming
                         .iter()
                         .map(|n| n.txid)
                         .chain(owned_spends.iter().map(|s| s.txid))
@@ -121,11 +131,12 @@ pub async fn run<A: Account>(
                         raw_txs.push((txid, raw));
                     }
 
-                    let tx_index: HashMap<[u8; 32], u32> = batch
+                    let tx_index: HashMap<TxId, u32> = batch
                         .iter()
                         .flat_map(|b| b.vtx.iter())
                         .filter_map(|tx| {
-                            tx.txid[..].try_into().ok().map(|id: [u8; 32]| (id, tx.index as u32))
+                            let id: [u8; 32] = tx.txid[..].try_into().ok()?;
+                            Some((TxId::from_bytes(id), tx.index as u32))
                         })
                         .collect();
 
@@ -133,8 +144,10 @@ pub async fn run<A: Account>(
                     let incoming = enrich_memos(keys, network, &parsed, incoming);
                     let sent = scan_sent(keys, network, &parsed, &incoming, &tx_index);
                     let notes: Vec<Note> = incoming.into_iter().chain(sent).collect();
-                    let cursor = Cursor { height, hash: Some(hash) };
-                    account.apply(cursor, &notes, &owned_spends).map_err(SyncError::Account)?;
+                    let cursor = Cursor { height, hash };
+                    account
+                        .apply(cursor, &notes, &owned_spends)
+                        .map_err(SyncError::Account)?;
                     // The commitment firehose (opt-in) is applied *after* notes,
                     // so a witness consumer can mark the positions of the Name
                     // Notes `apply` just indexed — same batch, correlated by cmx.

@@ -2,6 +2,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::transport::{Channel, ClientTlsConfig};
+use zcash_primitives::block::BlockHash;
+use zcash_protocol::TxId;
 
 use crate::proto::{
     compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, ChainSpec,
@@ -77,7 +79,7 @@ pub fn blocks(
     from: u32,
     to: u32,
     max_outputs: usize,
-    prev_hash: Option<[u8; 32]>,
+    prev_hash: Option<BlockHash>,
 ) -> impl Stream<Item = Result<Vec<CompactBlock>, ChainError>> {
     let (tx, rx) = mpsc::channel(1);
     tokio::spawn(async move {
@@ -93,7 +95,7 @@ async fn download(
     from: u32,
     to: u32,
     max_outputs: usize,
-    prev_hash: Option<[u8; 32]>,
+    prev_hash: Option<BlockHash>,
     tx: &mpsc::Sender<Result<Vec<CompactBlock>, ChainError>>,
 ) -> Result<(), ChainError> {
     let req = BlockRange {
@@ -114,7 +116,7 @@ async fn download(
 
     let mut chunk: Vec<CompactBlock> = Vec::new();
     let mut output_count = 0usize;
-    let mut prev_hash: Option<Vec<u8>> = prev_hash.map(|h| h.to_vec());
+    let mut prev_hash: Option<Vec<u8>> = prev_hash.map(|h| h.0.to_vec());
 
     while let Some(block_result) = stream.next().await {
         let block = block_result?;
@@ -154,7 +156,7 @@ async fn download(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransparentUtxo {
     pub address: String,
-    pub txid: [u8; 32],
+    pub txid: TxId,
     pub index: u32,
     pub script: Vec<u8>,
     pub value_zat: u64,
@@ -181,7 +183,7 @@ pub async fn fetch_address_utxos(
         .filter_map(|r| {
             Some(TransparentUtxo {
                 address: r.address,
-                txid: r.txid[..].try_into().ok()?,
+                txid: TxId::from_bytes(r.txid[..].try_into().ok()?),
                 index: u32::try_from(r.index).ok()?,
                 script: r.script,
                 value_zat: u64::try_from(r.value_zat).ok()?,
@@ -193,12 +195,12 @@ pub async fn fetch_address_utxos(
 
 pub async fn fetch_raw_transaction(
     client: &mut LwdClient,
-    txid: &[u8; 32],
+    txid: &TxId,
 ) -> Result<RawTransaction, ChainError> {
     let filter = TxFilter {
         block: None,
         index: 0,
-        hash: txid.to_vec(),
+        hash: txid.as_ref().to_vec(),
     };
     let raw = client
         .get_transaction(tonic::Request::new(filter))

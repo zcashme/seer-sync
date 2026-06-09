@@ -10,7 +10,9 @@ use zcash_keys::address::UnifiedAddress;
 use zcash_keys::encoding::AddressCodec;
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 use zcash_protocol::consensus::Network;
-use zcash_transparent::keys::{ExternalIvk, IncomingViewingKey, InternalIvk, NonHardenedChildIndex};
+use zcash_transparent::keys::{
+    ExternalIvk, IncomingViewingKey, InternalIvk, NonHardenedChildIndex,
+};
 use zip32::Scope;
 
 pub struct ViewKey {
@@ -72,7 +74,10 @@ impl ViewKey {
             Ok(ufvk) => Ok(Self::from_ufvk(&ufvk)),
             Err(ufvk) => match UnifiedIncomingViewingKey::decode(network, encoding) {
                 Ok(uivk) => Ok(Self::from_uivk(&uivk)),
-                Err(uivk) => Err(KeyError { ufvk: ufvk.to_string(), uivk: uivk.to_string() }),
+                Err(uivk) => Err(KeyError {
+                    ufvk: ufvk.to_string(),
+                    uivk: uivk.to_string(),
+                }),
             },
         }
     }
@@ -99,8 +104,7 @@ impl ViewKey {
     }
 
     pub(crate) fn can_derive_nullifiers(&self) -> bool {
-        self.sapling.iter().any(|s| s.nk.is_some())
-            || self.orchard.iter().any(|o| o.fvk.is_some())
+        self.sapling.iter().any(|s| s.nk.is_some()) || self.orchard.iter().any(|o| o.fvk.is_some())
     }
 
     fn from_uivk(uivk: &UnifiedIncomingViewingKey) -> Self {
@@ -108,26 +112,44 @@ impl ViewKey {
             sapling: uivk
                 .sapling()
                 .as_ref()
-                .map(|ivk| vec![SaplingIncoming { ivk: ivk.prepare(), nk: None }])
+                .map(|ivk| {
+                    vec![SaplingIncoming {
+                        ivk: ivk.prepare(),
+                        nk: None,
+                    }]
+                })
                 .unwrap_or_default(),
             orchard: uivk
                 .orchard()
                 .as_ref()
-                .map(|ivk| vec![OrchardIncoming { ivk: OrchardPreparedIvk::new(ivk), fvk: None }])
+                .map(|ivk| {
+                    vec![OrchardIncoming {
+                        ivk: OrchardPreparedIvk::new(ivk),
+                        fvk: None,
+                    }]
+                })
                 .unwrap_or_default(),
             sapling_ovks: Vec::new(),
             orchard_ovks: Vec::new(),
-            transparent: uivk.transparent().clone().map(|external| TransparentIncoming {
-                external,
-                internal: None,
-            }),
+            transparent: uivk
+                .transparent()
+                .clone()
+                .map(|external| TransparentIncoming {
+                    external,
+                    internal: None,
+                }),
         }
     }
 }
 
 fn per_scope<K, T>(key: Option<&K>, derive: impl Fn(&K, Scope) -> T) -> Vec<T> {
-    key.map(|k| [Scope::External, Scope::Internal].into_iter().map(|s| derive(k, s)).collect())
-        .unwrap_or_default()
+    key.map(|k| {
+        [Scope::External, Scope::Internal]
+            .into_iter()
+            .map(|s| derive(k, s))
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 pub(crate) fn encode_sapling_recipient(
@@ -160,13 +182,18 @@ mod tests {
         assert!(key.orchard.iter().all(|o| o.fvk.is_some()));
         assert!(!key.sapling_ovks.is_empty());
         assert!(!key.orchard_ovks.is_empty());
-        assert!(key.transparent.is_none(), "this UFVK carries no transparent component");
+        assert!(
+            key.transparent.is_none(),
+            "this UFVK carries no transparent component"
+        );
     }
 
     #[test]
     fn uivk_is_incoming_only() {
         let ufvk = UnifiedFullViewingKey::decode(&Network::MainNetwork, UFVK).unwrap();
-        let uivk = ufvk.to_unified_incoming_viewing_key().encode(&Network::MainNetwork);
+        let uivk = ufvk
+            .to_unified_incoming_viewing_key()
+            .encode(&Network::MainNetwork);
 
         let key = ViewKey::decode(&Network::MainNetwork, &uivk).expect("decode UIVK");
 

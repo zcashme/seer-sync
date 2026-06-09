@@ -1,4 +1,6 @@
+pub use zcash_primitives::block::BlockHash;
 pub use zcash_protocol::consensus::{BlockHeight, Network};
+pub use zcash_protocol::TxId;
 
 mod key;
 pub use key::{KeyError, ViewKey};
@@ -60,7 +62,7 @@ impl Account for db::Db {
         let st = self.get_sync_state().ok()?;
         (st.height != 0).then(|| Cursor {
             height: BlockHeight::from_u32(st.height),
-            hash: st.hash,
+            hash: st.hash.map(BlockHash),
         })
     }
 
@@ -78,13 +80,13 @@ impl Account for db::Db {
 
         for spend in spends {
             let h = u32::from(spend.height);
-            self.upsert_transaction(&spend.txid, Some(h), None)?;
-            self.mark_spent(spend.pool, &spend.nf, h, &spend.txid)?;
+            self.upsert_transaction(spend.txid.as_ref(), Some(h), None)?;
+            self.mark_spent(spend.pool, &spend.nf, h, spend.txid.as_ref())?;
         }
 
         for note in notes {
             let id = self.upsert_transaction(
-                &note.txid,
+                note.txid.as_ref(),
                 Some(u32::from(note.height)),
                 Some(note.tx_index),
             )?;
@@ -124,7 +126,7 @@ impl Account for db::Db {
 
         self.set_sync_state(&SyncState {
             height: u32::from(at.height),
-            hash: at.hash,
+            hash: at.hash.map(|h| h.0),
         })?;
         Ok(())
     }

@@ -34,7 +34,11 @@ const ORCHARD_TABLE_PREFIX: &str = "orchard";
 
 /// A `shardtree` over the SQLite store, keyed to a single transaction.
 pub type OrchardShardTree<'a, 'conn> = ShardTree<
-    SqliteShardStore<&'a rusqlite::Transaction<'conn>, orchard::tree::MerkleHashOrchard, ORCHARD_SHARD_HEIGHT>,
+    SqliteShardStore<
+        &'a rusqlite::Transaction<'conn>,
+        orchard::tree::MerkleHashOrchard,
+        ORCHARD_SHARD_HEIGHT,
+    >,
     ORCHARD_DEPTH,
     ORCHARD_SHARD_HEIGHT,
 >;
@@ -146,7 +150,11 @@ impl<C, H, const SHARD_HEIGHT: u8> SqliteShardStore<C, H, SHARD_HEIGHT> {
     const SHARD_ROOT_LEVEL: Level = Level::new(SHARD_HEIGHT);
 
     pub fn from_connection(conn: C, table_prefix: &'static str) -> Result<Self, rusqlite::Error> {
-        Ok(SqliteShardStore { conn, table_prefix, _hash: PhantomData })
+        Ok(SqliteShardStore {
+            conn,
+            table_prefix,
+            _hash: PhantomData,
+        })
     }
 }
 
@@ -193,7 +201,11 @@ impl<'conn, 'a: 'conn, H: HashSer, const SHARD_HEIGHT: u8> ShardStore
         max_checkpoint_id(self.conn, self.table_prefix)
     }
 
-    fn add_checkpoint(&mut self, checkpoint_id: BlockHeight, checkpoint: Checkpoint) -> Result<(), Error> {
+    fn add_checkpoint(
+        &mut self,
+        checkpoint_id: BlockHeight,
+        checkpoint: Checkpoint,
+    ) -> Result<(), Error> {
         add_checkpoint(self.conn, self.table_prefix, checkpoint_id, checkpoint)
     }
 
@@ -205,7 +217,8 @@ impl<'conn, 'a: 'conn, H: HashSer, const SHARD_HEIGHT: u8> ShardStore
         &self,
         checkpoint_depth: usize,
     ) -> Result<Option<(BlockHeight, Checkpoint)>, Error> {
-        get_checkpoint_at_depth(self.conn, self.table_prefix, checkpoint_depth).map_err(Error::Query)
+        get_checkpoint_at_depth(self.conn, self.table_prefix, checkpoint_depth)
+            .map_err(Error::Query)
     }
 
     fn get_checkpoint(&self, checkpoint_id: &BlockHeight) -> Result<Option<Checkpoint>, Error> {
@@ -226,7 +239,11 @@ impl<'conn, 'a: 'conn, H: HashSer, const SHARD_HEIGHT: u8> ShardStore
         with_checkpoints(self.conn, self.table_prefix, limit, callback)
     }
 
-    fn update_checkpoint_with<F>(&mut self, checkpoint_id: &BlockHeight, update: F) -> Result<bool, Error>
+    fn update_checkpoint_with<F>(
+        &mut self,
+        checkpoint_id: &BlockHeight,
+        update: F,
+    ) -> Result<bool, Error>
     where
         F: Fn(&mut Checkpoint) -> Result<(), Error>,
     {
@@ -383,7 +400,10 @@ fn get_shard_roots(
     let mut rows = stmt.query([]).map_err(Error::Query)?;
     let mut res = vec![];
     while let Some(row) = rows.next().map_err(Error::Query)? {
-        res.push(Address::from_parts(shard_root_level, row.get(0).map_err(Error::Query)?));
+        res.push(Address::from_parts(
+            shard_root_level,
+            row.get(0).map_err(Error::Query)?,
+        ));
     }
     Ok(res)
 }
@@ -443,7 +463,10 @@ fn min_checkpoint_id(
     conn.query_row(
         &format!("SELECT MIN(checkpoint_id) FROM {table_prefix}_tree_checkpoints"),
         [],
-        |row| row.get::<_, Option<u32>>(0).map(|opt| opt.map(BlockHeight::from)),
+        |row| {
+            row.get::<_, Option<u32>>(0)
+                .map(|opt| opt.map(BlockHeight::from))
+        },
     )
     .map_err(Error::Query)
 }
@@ -455,7 +478,10 @@ fn max_checkpoint_id(
     conn.query_row(
         &format!("SELECT MAX(checkpoint_id) FROM {table_prefix}_tree_checkpoints"),
         [],
-        |row| row.get::<_, Option<u32>>(0).map(|opt| opt.map(BlockHeight::from)),
+        |row| {
+            row.get::<_, Option<u32>>(0)
+                .map(|opt| opt.map(BlockHeight::from))
+        },
     )
     .map_err(Error::Query)
 }
@@ -559,7 +585,9 @@ fn get_marks_removed(
             "SELECT mark_removed_position FROM {table_prefix}_tree_checkpoint_marks_removed WHERE checkpoint_id = ?"
         ))
         .map_err(Error::Query)?;
-    let rows = stmt.query([u32::from(checkpoint_id)]).map_err(Error::Query)?;
+    let rows = stmt
+        .query([u32::from(checkpoint_id)])
+        .map_err(Error::Query)?;
     rows.mapped(|row| row.get::<_, u64>(0).map(Position::from))
         .collect::<Result<BTreeSet<_>, _>>()
         .map_err(Error::Query)
@@ -576,7 +604,10 @@ fn get_checkpoint(
                 "SELECT position FROM {table_prefix}_tree_checkpoints WHERE checkpoint_id = ?"
             ),
             [u32::from(checkpoint_id)],
-            |row| row.get::<_, Option<u64>>(0).map(|opt| opt.map(Position::from)),
+            |row| {
+                row.get::<_, Option<u64>>(0)
+                    .map(|opt| opt.map(Position::from))
+            },
         )
         .optional()
         .map_err(Error::Query)?;
@@ -606,7 +637,10 @@ fn get_checkpoint_at_depth(
             |row| {
                 let checkpoint_id: u32 = row.get(0)?;
                 let position: Option<u64> = row.get(1)?;
-                Ok((BlockHeight::from(checkpoint_id), position.map(Position::from)))
+                Ok((
+                    BlockHeight::from(checkpoint_id),
+                    position.map(Position::from),
+                ))
             },
         )
         .optional()?;
@@ -651,7 +685,9 @@ where
         ))
         .map_err(Error::Query)?;
 
-    let mut rows = stmt_get_checkpoints.query(named_params![":limit": limit]).map_err(Error::Query)?;
+    let mut rows = stmt_get_checkpoints
+        .query(named_params![":limit": limit])
+        .map_err(Error::Query)?;
     while let Some(row) = rows.next().map_err(Error::Query)? {
         let checkpoint_id = row.get::<_, u32>(0).map_err(Error::Query)?;
         let tree_state = row
@@ -665,7 +701,10 @@ where
             .mapped(|row| row.get::<_, u64>(0).map(Position::from))
             .collect::<Result<BTreeSet<_>, _>>()
             .map_err(Error::Query)?;
-        callback(&BlockHeight::from(checkpoint_id), &Checkpoint::from_parts(tree_state, marks_removed))?
+        callback(
+            &BlockHeight::from(checkpoint_id),
+            &Checkpoint::from_parts(tree_state, marks_removed),
+        )?
     }
     Ok(())
 }
@@ -714,7 +753,9 @@ fn truncate_checkpoints_retaining(
     )
     .map_err(Error::Query)?;
     conn.execute(
-        &format!("DELETE FROM {table_prefix}_tree_checkpoint_marks_removed WHERE checkpoint_id = ?"),
+        &format!(
+            "DELETE FROM {table_prefix}_tree_checkpoint_marks_removed WHERE checkpoint_id = ?"
+        ),
         [u32::from(checkpoint_id)],
     )
     .map_err(Error::Query)?;
@@ -733,7 +774,9 @@ mod tests {
     }
 
     fn leaf(b: u8) -> MerkleHashOrchard {
-        MerkleHashOrchard::from_bytes(&cmx(b)).into_option().unwrap()
+        MerkleHashOrchard::from_bytes(&cmx(b))
+            .into_option()
+            .unwrap()
     }
 
     #[test]
@@ -751,7 +794,11 @@ mod tests {
                     Position::from(0),
                     (0u8..4).map(|i| {
                         let h = leaf(i + 1);
-                        let r = if h == marked { Retention::Marked } else { Retention::Ephemeral };
+                        let r = if h == marked {
+                            Retention::Marked
+                        } else {
+                            Retention::Ephemeral
+                        };
                         (h, r)
                     }),
                 )
@@ -765,10 +812,18 @@ mod tests {
         // witness still verifies against the tree root.
         let tx = conn.transaction().unwrap();
         let tree = orchard_tree(&tx, 100).unwrap();
-        let path = tree.witness_at_checkpoint_id(Position::from(2), &100.into()).unwrap().unwrap();
-        let note_cmx = ExtractedNoteCommitment::from_bytes(&cmx(3)).into_option().unwrap();
+        let path = tree
+            .witness_at_checkpoint_id(Position::from(2), &100.into())
+            .unwrap()
+            .unwrap();
+        let note_cmx = ExtractedNoteCommitment::from_bytes(&cmx(3))
+            .into_option()
+            .unwrap();
         let root = tree.root_at_checkpoint_id(&100.into()).unwrap().unwrap();
         let orchard_path = orchard::tree::MerklePath::from(path);
-        assert_eq!(orchard_path.root(note_cmx), orchard::tree::Anchor::from(root));
+        assert_eq!(
+            orchard_path.root(note_cmx),
+            orchard::tree::Anchor::from(root)
+        );
     }
 }
