@@ -1,9 +1,14 @@
 # Adding transparent balance tracking to seer-sync
 
-Design notes for wiring the transparent pool, which is **scaffolded but unwired**
-today: the schema, db methods, and a UTXO fetch all exist, but nothing derives
-transparent addresses or populates the tables, so `balance().transparent_zat` is
-always `0`.
+> **Status (2026-06):** the snapshot path is built — `ViewKey` carries the
+> transparent IVKs, `sync::transparent::utxos` does gap-limit derivation +
+> `GetAddressUtxos`, `Db::apply_transparent_snapshot` reconciles, and
+> `balance().transparent` is honest. Remaining: the **history path**
+> (`GetTaddressTransactions`) for spender attribution and true spend heights.
+> The "what already exists" section below described an earlier scaffold that
+> was removed in `05f4ff5` and differs from what is now built.
+
+Design notes for wiring the transparent pool.
 
 ## The core asymmetry — transparent is not shielded
 

@@ -1,5 +1,6 @@
 pub mod chain;
 pub mod scan;
+pub mod transparent;
 
 use crate::sync::chain::{ChainError, DEFAULT_CHUNK_OUTPUTS, LwdClient};
 use crate::sync::scan::{

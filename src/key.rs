@@ -7,8 +7,10 @@ use sapling::keys::{
 };
 use sapling::NullifierDerivingKey;
 use zcash_keys::address::UnifiedAddress;
+use zcash_keys::encoding::AddressCodec;
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 use zcash_protocol::consensus::Network;
+use zcash_transparent::keys::{ExternalIvk, IncomingViewingKey, InternalIvk, NonHardenedChildIndex};
 use zip32::Scope;
 
 pub struct ViewKey {
@@ -16,6 +18,35 @@ pub struct ViewKey {
     pub(crate) orchard: Vec<OrchardIncoming>,
     pub(crate) sapling_ovks: Vec<SaplingOvk>,
     pub(crate) orchard_ovks: Vec<OrchardOvk>,
+    pub(crate) transparent: Option<TransparentIncoming>,
+}
+
+pub(crate) struct TransparentIncoming {
+    pub external: ExternalIvk,
+    pub internal: Option<InternalIvk>,
+}
+
+impl TransparentIncoming {
+    /// Encoded P2PKH addresses with their child indices for `0..upto` in one
+    /// scope. Indices whose BIP-32 derivation is invalid (cryptographically
+    /// negligible) are skipped, hence the explicit index in each pair.
+    pub fn scoped_addresses(
+        &self,
+        network: &Network,
+        internal: bool,
+        upto: u32,
+    ) -> Vec<(String, u32)> {
+        let derive = |i: u32| {
+            let i_t = NonHardenedChildIndex::from_index(i)?;
+            let addr = match (internal, &self.internal) {
+                (false, _) => self.external.derive_address(i_t).ok()?,
+                (true, Some(ivk)) => ivk.derive_address(i_t).ok()?,
+                (true, None) => return None,
+            };
+            Some((addr.encode(network), i))
+        };
+        (0..upto).filter_map(derive).collect()
+    }
 }
 
 pub(crate) struct SaplingIncoming {
@@ -58,6 +89,12 @@ impl ViewKey {
             }),
             sapling_ovks: per_scope(ufvk.sapling(), |dfvk, scope| dfvk.to_ovk(scope)),
             orchard_ovks: per_scope(ufvk.orchard(), |fvk, scope| fvk.to_ovk(scope)),
+            transparent: ufvk.transparent().and_then(|apk| {
+                Some(TransparentIncoming {
+                    external: apk.derive_external_ivk().ok()?,
+                    internal: apk.derive_internal_ivk().ok(),
+                })
+            }),
         }
     }
 
@@ -80,6 +117,10 @@ impl ViewKey {
                 .unwrap_or_default(),
             sapling_ovks: Vec::new(),
             orchard_ovks: Vec::new(),
+            transparent: uivk.transparent().clone().map(|external| TransparentIncoming {
+                external,
+                internal: None,
+            }),
         }
     }
 }
@@ -119,6 +160,7 @@ mod tests {
         assert!(key.orchard.iter().all(|o| o.fvk.is_some()));
         assert!(!key.sapling_ovks.is_empty());
         assert!(!key.orchard_ovks.is_empty());
+        assert!(key.transparent.is_none(), "this UFVK carries no transparent component");
     }
 
     #[test]

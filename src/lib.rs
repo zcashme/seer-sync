@@ -22,10 +22,6 @@ use sync::scan::{Note, Pool, ShieldedNote, Spend};
 #[cfg(feature = "db")]
 use sync::{Account, AccountError, Cursor, SyncError};
 
-/// Sync `db` to the chain tip from a viewing key, auto-connecting to a
-/// lightwalletd server. The batteries-included entry for the `db` consumer; for
-/// a custom client or `Account`, use [`sync::run`]. To start from a key string,
-/// decode it first with [`ViewKey::decode`].
 #[cfg(feature = "db")]
 pub async fn scan(
     key: &ViewKey,
@@ -33,8 +29,29 @@ pub async fn scan(
     birthday: u32,
     db: &db::Db,
 ) -> Result<(), SyncError> {
-    let client = sync::chain::connect_auto().await?;
-    sync::run(client, key, network, birthday, db).await
+    let mut client = sync::chain::connect_auto().await?;
+    sync::run(client.clone(), key, network, birthday, db).await?;
+    refresh_transparent(&mut client, key, network, birthday, db).await
+}
+
+/// Refresh the transparent UTXO snapshot for `key`'s transparent component (a
+/// no-op when it has none). Separate from the shielded loop — see
+/// [`sync::transparent::utxos`].
+#[cfg(feature = "db")]
+pub async fn refresh_transparent(
+    client: &mut sync::chain::LwdClient,
+    key: &ViewKey,
+    network: &Network,
+    birthday: u32,
+    db: &db::Db,
+) -> Result<(), SyncError> {
+    if key.transparent.is_none() {
+        return Ok(());
+    }
+    let tip = sync::chain::tip_height(client).await?;
+    let utxos = sync::transparent::utxos(client, key, network, birthday).await?;
+    db.apply_transparent_snapshot(&utxos, tip)
+        .map_err(|e| SyncError::Account(Box::new(e)))
 }
 
 #[cfg(feature = "db")]
@@ -64,9 +81,10 @@ impl Account for db::Db {
 
         for spend in spends {
             let h = u32::from(spend.height);
+            self.upsert_transaction(&spend.txid, Some(h), None)?;
             match spend.pool {
-                Pool::Sapling => self.mark_sapling_spent(&spend.nf, h),
-                Pool::Orchard => self.mark_orchard_spent(&spend.nf, h),
+                Pool::Sapling => self.mark_sapling_spent(&spend.nf, h, &spend.txid),
+                Pool::Orchard => self.mark_orchard_spent(&spend.nf, h, &spend.txid),
             }?;
         }
 

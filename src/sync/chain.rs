@@ -5,7 +5,7 @@ use tonic::transport::{Channel, ClientTlsConfig};
 
 use crate::proto::{
     compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, ChainSpec,
-    CompactBlock, RawTransaction, TxFilter,
+    CompactBlock, GetAddressUtxosArg, RawTransaction, TxFilter,
 };
 
 pub const DEFAULT_SERVERS: &[&str] = &[
@@ -149,6 +149,46 @@ async fn download(
         tx.send(Ok(chunk)).await.ok();
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransparentUtxo {
+    pub address: String,
+    pub txid: [u8; 32],
+    pub index: u32,
+    pub script: Vec<u8>,
+    pub value_zat: u64,
+    pub height: u32,
+}
+
+pub async fn fetch_address_utxos(
+    client: &mut LwdClient,
+    addresses: Vec<String>,
+    start_height: u32,
+) -> Result<Vec<TransparentUtxo>, ChainError> {
+    let arg = GetAddressUtxosArg {
+        addresses,
+        start_height: start_height as u64,
+        max_entries: 0,
+    };
+    let replies = client
+        .get_address_utxos(tonic::Request::new(arg))
+        .await?
+        .into_inner()
+        .address_utxos;
+    Ok(replies
+        .into_iter()
+        .filter_map(|r| {
+            Some(TransparentUtxo {
+                address: r.address,
+                txid: r.txid[..].try_into().ok()?,
+                index: u32::try_from(r.index).ok()?,
+                script: r.script,
+                value_zat: u64::try_from(r.value_zat).ok()?,
+                height: u32::try_from(r.height).ok()?,
+            })
+        })
+        .collect())
 }
 
 pub async fn fetch_raw_transaction(

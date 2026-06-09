@@ -31,6 +31,7 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 memo                     BLOB,
                 commitment_tree_position INTEGER,
                 spent_height             INTEGER,
+                spent_txid               BLOB,
                 is_sent                  INTEGER NOT NULL DEFAULT 0,
                 recipient_address        TEXT,
                 UNIQUE (transaction_id, output_index)
@@ -53,6 +54,7 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 memo                     BLOB,
                 commitment_tree_position INTEGER,
                 spent_height             INTEGER,
+                spent_txid               BLOB,
                 is_sent                  INTEGER NOT NULL DEFAULT 0,
                 recipient_address        TEXT,
                 UNIQUE (transaction_id, action_index)
@@ -61,6 +63,20 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 ON orchard_received_notes (transaction_id);
             CREATE INDEX IF NOT EXISTS idx_orchard_received_notes_nf
                 ON orchard_received_notes (nf) WHERE nf IS NOT NULL;
+
+            CREATE TABLE IF NOT EXISTS transparent_received_outputs (
+                id             INTEGER PRIMARY KEY,
+                transaction_id INTEGER NOT NULL
+                    REFERENCES transactions(id_tx) ON DELETE CASCADE,
+                output_index   INTEGER NOT NULL,
+                address        TEXT    NOT NULL,
+                script         BLOB    NOT NULL,
+                value          INTEGER NOT NULL,
+                spent_height   INTEGER,
+                UNIQUE (transaction_id, output_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_transparent_received_outputs_tx
+                ON transparent_received_outputs (transaction_id);
 
             "#,
     )?;

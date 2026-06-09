@@ -92,8 +92,9 @@ commitment check — stop; that belongs in the consumer.
 
 ## Features
 
-- `db` — the reference raw-rusqlite store + the top-level `scan()`/`scan_str()`
-  entry points.
+- `db` — the reference raw-rusqlite store, the top-level `scan()` /
+  `refresh_transparent()` entries, and the read path (`balance()`, `notes()`,
+  `transactions()`, `transparent_outputs()`).
 - `commitment-tree` — the Orchard note-commitment tree (shardtree) and the
   `scan_commitments` firehose ingestion, persisted via `db`. **Opt-in**: it
   ingests every on-chain commitment and pulls shardtree, which a plain balance
@@ -169,10 +170,16 @@ nullifiers derive from the key + the action's `rho` directly.
 
 Implemented: the `src/db/` store + schema; the `run()` confirmed-block loop and
 `Account` trait; memo + sent-recipient recovery (phase 2); the `commitment-tree`
-firehose + shardtree witness store.
+firehose + shardtree witness store; the read path (`notes()`, `transactions()`
+with per-tx received/sent/spent rollups via `spent_txid`, `transparent_outputs()`);
+transparent balance v1 (`sync::transparent::utxos` gap-limit snapshot over
+`GetAddressUtxos`, reconciled by `Db::apply_transparent_snapshot` — spends
+detected by absence, so the spender tx and true spend height are unknown until
+the `GetTaddressTransactions` history path is built; see
+`docs/transparent-balances.md`).
 
-Not implemented in the current store: **transparent balance** and **live
-mempool** (`GetMempoolStream`, the differentiator vs batch wallets).
+Not implemented in the current store: **live mempool** (`GetMempoolStream`, the
+differentiator vs batch wallets) and the transparent **history path**.
 
 ## Testing & benches
 
