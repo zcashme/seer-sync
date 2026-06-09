@@ -12,7 +12,7 @@ use zcash_protocol::value::Zatoshis;
 use crate::sync::chain::TransparentUtxo;
 use crate::sync::scan::Pool;
 
-pub use schema::init;
+use schema::init;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncState {

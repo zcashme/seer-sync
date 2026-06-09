@@ -296,7 +296,7 @@ fn scan_compact_serial(
     CompactScan { notes: out, spends }
 }
 
-pub fn scan_sent(
+pub(crate) fn scan_sent(
     keys: &ViewKey,
     network: &Network,
     raw_txs: &[([u8; 32], RawTransaction)],
