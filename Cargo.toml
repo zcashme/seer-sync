@@ -26,11 +26,11 @@ commitment-tree = ["db", "dep:shardtree", "dep:incrementalmerkletree", "dep:byte
 # ── Core (always compiled, sans-IO) ──────────────────────────────────────────
 # Per-pool note-encryption primitives.
 zcash_note_encryption = "0.4"
-orchard = { version = "0.13", default-features = false, features = ["std"] }
+orchard = { version = "0.14", default-features = false, features = ["std"] }
 sapling = { package = "sapling-crypto", version = "0.7", default-features = false, features = ["std"] }
 # Upstream Zcash stack, crates.io only.
-zcash_protocol = { version = "0.8", default-features = false, features = ["std"] }
-zcash_keys = { version = "0.13", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
+zcash_protocol = { version = "0.9", default-features = false, features = ["std"] }
+zcash_keys = { version = "0.14", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
 zip32 = "0.2"
 # Decoder for the generated proto *message* types (the gRPC client is generated
 # alongside them; see build.rs).
@@ -39,7 +39,7 @@ prost = "0.14"
 # ── Network / async cluster (the live layer) ─────────────────────────────────
 # Full-transaction parsing for memo enrichment (a note's memo lives in the full
 # ciphertext that compact blocks truncate).
-zcash_primitives = { version = "0.27", default-features = false }
+zcash_primitives = { version = "0.28", default-features = false }
 # gRPC + async (driver layer).
 tonic = { version = "0.14", default-features = false, features = ["transport", "tls-ring", "tls-webpki-roots", "codegen"] }
 tonic-prost = "0.14"
@@ -73,11 +73,3 @@ tokio-test = "0.4"
 [[bench]]
 name = "decrypt"
 harness = false
-
-[[example]]
-name = "live_sync_db"
-required-features = ["db"]
-
-[[example]]
-name = "live_uivk_sync_db"
-required-features = ["db"]

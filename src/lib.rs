@@ -7,6 +7,21 @@ pub(crate) mod decrypt;
 pub mod sync;
 pub(crate) mod proto;
 
+// The lightwalletd compact-block *data* types (not the gRPC client or the RPC
+// request/response messages), public so callers can drive their own scan over
+// `sync::chain`'s block stream — e.g. a consumer applying a decrypt rule the
+// standard engine doesn't. This is the full set reachable through
+// `CompactBlock`'s and `RawTransaction`'s fields, so the exposed surface is
+// closed (no private-in-public).
+pub use proto::{
+    ChainMetadata, CompactBlock, CompactOrchardAction, CompactSaplingOutput, CompactSaplingSpend,
+    CompactTx, CompactTxIn, RawTransaction, TxOut,
+};
+
+// Convert a compact-block Orchard action into the `orchard` crate's
+// `CompactAction` — a building block for callers scanning the raw stream.
+pub use decrypt::parse_orchard;
+
 #[cfg(feature = "db")]
 pub mod db;
 

@@ -49,7 +49,10 @@ pub(crate) fn parse_sapling(p: &CompactSaplingOutput) -> Option<CompactOutputDes
     Some(CompactOutputDescription { cmu, ephemeral_key, enc_ciphertext })
 }
 
-pub(crate) fn parse_orchard(p: &CompactOrchardAction) -> Option<CompactAction> {
+/// Parse a compact-block Orchard action into the `orchard` crate's
+/// [`CompactAction`], or `None` if any field is malformed. The building block a
+/// caller needs to trial-decrypt the raw block stream itself.
+pub fn parse_orchard(p: &CompactOrchardAction) -> Option<CompactAction> {
     let nf: [u8; 32] = p.nullifier[..].try_into().ok()?;
     let nf = Option::from(orchard::note::Nullifier::from_bytes(&nf))?;
     let cmx: [u8; 32] = p.cmx[..].try_into().ok()?;
