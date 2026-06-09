@@ -152,7 +152,7 @@ impl Db {
 }
 
 impl Db {
-    pub fn insert_sapling_note(&self, n: &SaplingNoteInsert<'_>) -> rusqlite::Result<i64> {
+    pub fn insert_sapling_note(&self, n: &SaplingNoteInsert<'_>) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT INTO sapling_received_notes(
                 transaction_id, output_index, diversifier, value, rcm, nf,
@@ -172,10 +172,10 @@ impl Db {
                 n.recipient_address,
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(())
     }
 
-    pub fn insert_orchard_note(&self, n: &OrchardNoteInsert<'_>) -> rusqlite::Result<i64> {
+    pub fn insert_orchard_note(&self, n: &OrchardNoteInsert<'_>) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT INTO orchard_received_notes(
                 transaction_id, action_index, diversifier, value, rho, rseed, nf,
@@ -196,7 +196,7 @@ impl Db {
                 n.recipient_address,
             ],
         )?;
-        Ok(self.conn.last_insert_rowid())
+        Ok(())
     }
 
     pub fn mark_sapling_spent(&self, nf: &[u8], height: u32, txid: &[u8]) -> rusqlite::Result<usize> {
