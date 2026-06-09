@@ -1,4 +1,4 @@
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Channel, ClientTlsConfig};
@@ -27,8 +27,6 @@ pub enum ChainError {
     Connect(#[from] tonic::transport::Error),
     #[error("invalid lightwalletd url: {0}")]
     Url(#[from] http::uri::InvalidUri),
-    #[error("transaction rejected (code {code}): {message}")]
-    Rejected { code: i32, message: String },
     #[error("tip height overflowed u32")]
     TipOverflow,
     #[error("all {tried} lightwalletd servers failed:\n{detail}")]
@@ -42,34 +40,6 @@ pub async fn connect(url: &str) -> Result<LwdClient, ChainError> {
         .connect()
         .await?;
     Ok(CompactTxStreamerClient::new(endpoint))
-}
-
-/// Connect to a plaintext (non-TLS) lightwalletd — e.g. a local regtest node.
-///
-/// Simple form for now (no TLS config); the exact h2c behaviour gets validated
-/// against a real regtest lightwalletd rather than theorised here.
-pub async fn connect_plaintext(url: &str) -> Result<LwdClient, ChainError> {
-    let uri: http::Uri = url.parse()?;
-    let endpoint = Channel::builder(uri).connect().await?;
-    Ok(CompactTxStreamerClient::new(endpoint))
-}
-
-pub async fn broadcast_transaction(client: &mut LwdClient, raw_tx: Vec<u8>) -> Result<(), ChainError> {
-    let resp = client
-        .send_transaction(tonic::Request::new(RawTransaction {
-            data: raw_tx,
-            height: 0,
-        }))
-        .await?
-        .into_inner();
-
-    if resp.error_code != 0 {
-        return Err(ChainError::Rejected {
-            code: resp.error_code,
-            message: resp.error_message,
-        });
-    }
-    Ok(())
 }
 
 pub async fn connect_auto() -> Result<LwdClient, ChainError> {
@@ -116,10 +86,6 @@ pub fn blocks(
         }
     });
     ReceiverStream::new(rx)
-}
-
-pub async fn fetch_range(client: LwdClient, from: u32, to: u32) -> Result<Vec<CompactBlock>, ChainError> {
-    blocks(client, from, to, usize::MAX, None).try_concat().await
 }
 
 async fn download(

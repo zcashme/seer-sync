@@ -1,6 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use std::time::Duration;
-use seer_sync::sync::chain::{connect_auto, fetch_range, tip_height};
+use futures::TryStreamExt;
+use seer_sync::sync::chain::{blocks, connect_auto, tip_height};
 use seer_sync::sync::scan::scan_compact;
 use seer_sync::{Network, ViewKey};
 
@@ -20,7 +21,10 @@ fn bench(c: &mut Criterion) {
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| tip.saturating_sub(BENCH_WINDOW));
         eprintln!("[bench] fetching [{from}..{tip}] ({} blocks)", tip - from + 1);
-        fetch_range(client, from, tip).await.expect("fetch_range")
+        blocks(client, from, tip, usize::MAX, None)
+            .try_concat()
+            .await
+            .expect("fetch range")
     });
 
     let view_key = ViewKey::decode(&Network::MainNetwork, UFVK).expect("decoding hardcoded UFVK");

@@ -193,20 +193,6 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn memos(&self) -> rusqlite::Result<Vec<Vec<u8>>> {
-        let mut out = Vec::new();
-        for table in ["sapling_received_notes", "orchard_received_notes"] {
-            let mut stmt = self
-                .conn
-                .prepare(&format!("SELECT memo FROM {table} WHERE memo IS NOT NULL"))?;
-            let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
-            for memo in rows {
-                out.push(memo?);
-            }
-        }
-        Ok(out)
-    }
-
     pub fn mark_sapling_spent(&self, nf: &[u8], height: u32) -> rusqlite::Result<usize> {
         self.conn.execute(
             "UPDATE sapling_received_notes SET spent_height = ?2 WHERE nf = ?1",
