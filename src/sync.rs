@@ -2,7 +2,10 @@ pub mod chain;
 pub mod scan;
 
 use crate::sync::chain::{ChainError, DEFAULT_CHUNK_OUTPUTS, LwdClient};
-use crate::sync::scan::{enrich_memos, scan_compact, scan_sent, CompactScan, Note, Pool, Spend};
+use crate::sync::scan::{
+    enrich_memos, scan_commitments, scan_compact, scan_sent, Commitment, CompactScan, Note, Pool,
+    Spend,
+};
 use crate::BlockHeight;
 use crate::ViewKey;
 use futures::StreamExt;
@@ -23,6 +26,7 @@ pub enum SyncError {
     Account(#[source] AccountError),
 }
 
+#[derive(Clone, Copy)]
 pub struct Cursor {
     pub height: BlockHeight,
     pub hash: Option<[u8; 32]>,
@@ -33,6 +37,25 @@ pub trait Account {
     fn rewind(&self, to: BlockHeight) -> Result<(), AccountError>;
     fn owns_nf(&self, pool: Pool, nf: &[u8; 32]) -> Result<bool, AccountError>;
     fn apply(&self, at: Cursor, notes: &[Note], spends: &[Spend]) -> Result<(), AccountError>;
+
+    /// Whether this consumer wants the Orchard commitment firehose. Default:
+    /// `false`. Ordinary view-key sync does not need every commitment; only
+    /// consumers building note-commitment-tree witnesses opt in (it has a cost).
+    fn wants_commitments(&self) -> bool {
+        false
+    }
+
+    /// Receives every Orchard commitment in the batch, in tree order, when
+    /// [`Account::wants_commitments`] returns `true`. Called once per applied
+    /// batch with the same `at` cursor as the corresponding [`Account::apply`],
+    /// immediately before it. Default: ignore.
+    fn apply_commitments(
+        &self,
+        _at: Cursor,
+        _commitments: &[Commitment],
+    ) -> Result<(), AccountError> {
+        Ok(())
+    }
 }
 
 pub async fn run<A: Account>(
@@ -108,9 +131,17 @@ pub async fn run<A: Account>(
                     let incoming = enrich_memos(keys, network, &raw_txs, incoming);
                     let sent = scan_sent(keys, network, &raw_txs, &incoming, &tx_index);
                     let notes: Vec<Note> = incoming.into_iter().chain(sent).collect();
-                    account
-                        .apply(Cursor { height, hash: Some(hash) }, &notes, &owned_spends)
-                        .map_err(SyncError::Account)?;
+                    let cursor = Cursor { height, hash: Some(hash) };
+                    account.apply(cursor, &notes, &owned_spends).map_err(SyncError::Account)?;
+                    // The commitment firehose (opt-in) is applied *after* notes,
+                    // so a witness consumer can mark the positions of the Name
+                    // Notes `apply` just indexed — same batch, correlated by cmx.
+                    if account.wants_commitments() {
+                        let commitments = scan_commitments(&batch);
+                        account
+                            .apply_commitments(cursor, &commitments)
+                            .map_err(SyncError::Account)?;
+                    }
 
                     transport_attempts = 0;
                     rewind_by = 1;

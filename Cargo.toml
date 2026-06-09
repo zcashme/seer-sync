@@ -17,6 +17,10 @@ publish = false
 # the engine's notes directly.
 default = []
 db = ["dep:rusqlite"]
+# Orchard note-commitment tree + inclusion witnesses, persisted via `db`. Opt-in
+# because it pulls shardtree and ingests every on-chain commitment, which a plain
+# balance scanner neither needs nor should pay for.
+commitment-tree = ["db", "dep:shardtree", "dep:incrementalmerkletree", "dep:byteorder", "dep:zcash_encoding"]
 
 [dependencies]
 # ── Core (always compiled, sans-IO) ──────────────────────────────────────────
@@ -47,6 +51,14 @@ thiserror = "2"
 
 # ── `db` (persistence, optional) ─────────────────────────────────────────────
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+# Orchard note-commitment tree backing for the `db` feature. shardtree is the
+# engine librustzcash uses; the rest support the vendored shard serialization
+# (see src/db/shardtree_serialization.rs). zcash_client_backend is deliberately
+# NOT pulled — only its ~120-line shard codec is vendored.
+shardtree = { version = "0.6", optional = true }
+incrementalmerkletree = { version = "0.8", optional = true }
+byteorder = { version = "1", optional = true }
+zcash_encoding = { version = "0.4", optional = true }
 
 [build-dependencies]
 tonic-prost-build = { version = "0.14", default-features = false }

@@ -1,4 +1,8 @@
 mod schema;
+#[cfg(feature = "commitment-tree")]
+pub mod commitment_tree;
+#[cfg(feature = "commitment-tree")]
+mod shardtree_serialization;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::path::Path;

@@ -55,6 +55,20 @@ pub struct CompactScan {
     pub spends: Vec<Spend>,
 }
 
+/// An Orchard note commitment as it appears on chain, with its absolute leaf
+/// position in the note-commitment tree.
+///
+/// `cmx` is public data — surfacing it needs no viewing key. Consumers building
+/// note-commitment-tree witnesses (e.g. to prove a note's inclusion) ingest
+/// these via [`scan_commitments`]; ordinary view-key sync ignores them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Commitment {
+    /// Absolute leaf position in the Orchard note-commitment tree.
+    pub position: u64,
+    /// The `cmx` (x-coordinate of the output note's commitment).
+    pub cmx: [u8; 32],
+}
+
 pub(crate) fn enrich_memos(
     keys: &ViewKey,
     network: &Network,
@@ -129,6 +143,38 @@ pub fn scan_compact(blocks: &[CompactBlock], keys: &ViewKey) -> CompactScan {
         }
         merged
     })
+}
+
+/// Extract every Orchard note commitment in `blocks`, in tree order, each tagged
+/// with its absolute leaf position.
+///
+/// Independent of any viewing key — this is the public commitment firehose used
+/// to build note-commitment-tree witnesses. A leaf's position is derived from
+/// the block's `orchardCommitmentTreeSize` metadata (the tree size as of the end
+/// of the block) minus the actions in that block. Blocks missing that metadata
+/// are skipped — pre-NU5 blocks carry no Orchard actions, so there is nothing to
+/// position.
+pub fn scan_commitments(blocks: &[CompactBlock]) -> Vec<Commitment> {
+    let mut out = Vec::new();
+    for block in blocks {
+        let Some(meta) = block.chain_metadata.as_ref() else { continue };
+        let in_block: u64 = block.vtx.iter().map(|tx| tx.actions.len() as u64).sum();
+        let Some(mut pos) = (meta.orchard_commitment_tree_size as u64).checked_sub(in_block) else {
+            continue;
+        };
+        for tx in &block.vtx {
+            for act in &tx.actions {
+                if let Ok(cmx) = act.cmx[..].try_into() {
+                    out.push(Commitment { position: pos, cmx });
+                }
+                // Every Orchard action appends exactly one leaf; advance the
+                // position even on the (unreachable) malformed-cmx case so later
+                // leaves stay correctly aligned.
+                pos += 1;
+            }
+        }
+    }
+    out
 }
 
 fn scan_compact_serial(
@@ -332,4 +378,47 @@ pub fn scan_sent(
 
 fn txid_of(tx: &CompactTx) -> Option<[u8; 32]> {
     tx.txid[..].try_into().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::{ChainMetadata, CompactOrchardAction};
+
+    fn action(cmx_byte: u8) -> CompactOrchardAction {
+        CompactOrchardAction { cmx: vec![cmx_byte; 32], ..Default::default() }
+    }
+
+    #[test]
+    fn scan_commitments_positions_from_tree_size() {
+        // Tree size 5 at end of block, 3 actions across two txs → first leaf at 2.
+        let block = CompactBlock {
+            height: 100,
+            chain_metadata: Some(ChainMetadata {
+                orchard_commitment_tree_size: 5,
+                ..Default::default()
+            }),
+            vtx: vec![
+                CompactTx { actions: vec![action(0xaa), action(0xbb)], ..Default::default() },
+                CompactTx { actions: vec![action(0xcc)], ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let got = scan_commitments(&[block]);
+        assert_eq!(
+            got.iter().map(|c| (c.position, c.cmx[0])).collect::<Vec<_>>(),
+            vec![(2, 0xaa), (3, 0xbb), (4, 0xcc)],
+        );
+    }
+
+    #[test]
+    fn scan_commitments_skips_blocks_without_metadata() {
+        let block = CompactBlock {
+            height: 50,
+            chain_metadata: None,
+            vtx: vec![CompactTx { actions: vec![action(0x11)], ..Default::default() }],
+            ..Default::default()
+        };
+        assert!(scan_commitments(&[block]).is_empty());
+    }
 }
