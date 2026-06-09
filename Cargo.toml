@@ -44,10 +44,9 @@ zcash_primitives = { version = "0.28", default-features = false }
 # gRPC + async (driver layer).
 tonic = { version = "0.14", default-features = false, features = ["transport", "tls-ring", "tls-webpki-roots", "codegen"] }
 tonic-prost = "0.14"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt", "sync"] }
 tokio-stream = "0.1"
 http = "1"
-futures = "0.3"
 thiserror = "2"
 
 # ── `db` (persistence, optional) ─────────────────────────────────────────────
@@ -66,10 +65,8 @@ tonic-prost-build = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
-hex = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-serde_json = "1"
-tokio-test = "0.4"
+futures = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [[bench]]
 name = "decrypt"

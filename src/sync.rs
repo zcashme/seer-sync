@@ -9,8 +9,8 @@ use crate::sync::scan::{
 };
 use crate::BlockHeight;
 use crate::ViewKey;
-use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
+use tokio_stream::StreamExt;
 use zcash_protocol::consensus::Network;
 
 const MAX_TRANSPORT_RETRIES: usize = 4;
