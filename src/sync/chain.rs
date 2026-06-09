@@ -44,6 +44,16 @@ pub async fn connect(url: &str) -> Result<LwdClient, ChainError> {
     Ok(CompactTxStreamerClient::new(endpoint))
 }
 
+/// Connect to a plaintext (non-TLS) lightwalletd — e.g. a local regtest node.
+///
+/// Simple form for now (no TLS config); the exact h2c behaviour gets validated
+/// against a real regtest lightwalletd rather than theorised here.
+pub async fn connect_plaintext(url: &str) -> Result<LwdClient, ChainError> {
+    let uri: http::Uri = url.parse()?;
+    let endpoint = Channel::builder(uri).connect().await?;
+    Ok(CompactTxStreamerClient::new(endpoint))
+}
+
 pub async fn broadcast_transaction(client: &mut LwdClient, raw_tx: Vec<u8>) -> Result<(), ChainError> {
     let resp = client
         .send_transaction(tonic::Request::new(RawTransaction {
