@@ -1,3 +1,4 @@
+mod account;
 #[cfg(feature = "commitment-tree")]
 pub mod commitment_tree;
 mod schema;
@@ -7,13 +8,14 @@ mod shardtree_serialization;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Row};
 use std::path::Path;
 use zcash_protocol::value::Zatoshis;
+use zcash_transparent::bundle::OutPoint;
 
-use crate::sync::scan::Pool;
+use crate::sync::scan::{Nullifier, Pool};
 use zcash_protocol::TxId;
 
 use schema::init;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncState {
     pub height: u32,
     pub hash: Option<[u8; 32]>,
@@ -122,7 +124,9 @@ impl Db {
         Ok(())
     }
 
-    pub fn get_sync_state(&self) -> rusqlite::Result<SyncState> {
+    /// `None` until the first applied batch: absence of the row is the
+    /// "never synced" state, no sentinel heights.
+    pub fn get_sync_state(&self) -> rusqlite::Result<Option<SyncState>> {
         self.conn
             .query_row(
                 "SELECT height, hash FROM sync_state WHERE id = 1",
@@ -136,7 +140,55 @@ impl Db {
                 },
             )
             .optional()
-            .map(Option::unwrap_or_default)
+    }
+}
+
+impl Db {
+    pub fn set_birthday(&self, height: u32) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO account(id, birthday) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET birthday = excluded.birthday",
+            params![height],
+        )?;
+        Ok(())
+    }
+
+    pub fn birthday(&self) -> rusqlite::Result<Option<u32>> {
+        self.conn
+            .query_row("SELECT birthday FROM account WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .optional()
+    }
+}
+
+impl Db {
+    pub fn unspent_nullifiers(&self) -> rusqlite::Result<Vec<(Pool, Nullifier)>> {
+        let mut out = Vec::new();
+        for pool in POOLS {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT nf FROM {} WHERE nf IS NOT NULL AND spent_height IS NULL",
+                note_table(pool)
+            ))?;
+            let rows = stmt.query_map([], |row| row.get::<_, [u8; 32]>(0))?;
+            for nf in rows {
+                out.push((pool, Nullifier(nf?)));
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn unspent_outpoints(&self) -> rusqlite::Result<Vec<OutPoint>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.txid, o.output_index
+             FROM transparent_received_outputs o
+             JOIN transactions t ON t.id_tx = o.transaction_id
+             WHERE o.spent_height IS NULL",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(OutPoint::new(row.get::<_, [u8; 32]>(0)?, row.get(1)?))
+        })?;
+        rows.collect()
     }
 }
 
@@ -506,15 +558,62 @@ mod tests {
     #[test]
     fn sync_state_roundtrip() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.get_sync_state().unwrap(), SyncState::default());
+        assert_eq!(db.get_sync_state().unwrap(), None, "fresh db has no row");
         let state = SyncState {
             height: 42,
             hash: Some([7u8; 32]),
         };
         db.set_sync_state(&state).unwrap();
-        let got = db.get_sync_state().unwrap();
+        let got = db.get_sync_state().unwrap().unwrap();
         assert_eq!(got.height, 42);
         assert_eq!(got.hash, Some([7u8; 32]));
+    }
+
+    #[test]
+    fn birthday_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.birthday().unwrap(), None);
+        db.set_birthday(419_200).unwrap();
+        assert_eq!(db.birthday().unwrap(), Some(419_200));
+    }
+
+    #[test]
+    fn unspent_watch_sets_track_spends() {
+        let db = Db::open_in_memory().unwrap();
+        let tx = mined_tx(&db, &[1u8; 32], 100);
+        db.insert_orchard_note(&OrchardNoteInsert {
+            transaction_id: tx,
+            action_index: 0,
+            diversifier: &[0u8; 11],
+            value: 5_000_000,
+            rho: &[1u8; 32],
+            rseed: &[2u8; 32],
+            nf: Some(&[9u8; 32]),
+            memo: None,
+            commitment_tree_position: None,
+            is_sent: false,
+            recipient_address: None,
+        })
+        .unwrap();
+        db.insert_transparent_output(tx, 1, "t1example", &[0x76], 2_000_000)
+            .unwrap();
+
+        assert_eq!(
+            db.unspent_nullifiers().unwrap(),
+            vec![(Pool::Orchard, Nullifier([9u8; 32]))]
+        );
+        assert_eq!(
+            db.unspent_outpoints().unwrap(),
+            vec![OutPoint::new([1u8; 32], 1)]
+        );
+
+        mined_tx(&db, &[2u8; 32], 105);
+        db.mark_spent(Pool::Orchard, &[9u8; 32], 105, &[2u8; 32])
+            .unwrap();
+        db.mark_transparent_spent(&[1u8; 32], 1, 105, &[2u8; 32])
+            .unwrap();
+        assert!(db.unspent_nullifiers().unwrap().is_empty());
+        assert!(db.unspent_outpoints().unwrap().is_empty());
     }
 
     #[test]
@@ -730,7 +829,7 @@ mod tests {
             db.balance().unwrap().orchard,
             Zatoshis::const_from_u64(9_000_000)
         );
-        assert_eq!(db.get_sync_state().unwrap().height, 104);
+        assert_eq!(db.get_sync_state().unwrap().unwrap().height, 104);
 
         db.rewind_to_height(99).unwrap();
         assert_eq!(db.balance().unwrap().orchard, Zatoshis::ZERO);

@@ -15,10 +15,8 @@ use seer_sync::proto::{
     RawTransaction, SendResponse, SubtreeRoot, TransparentAddressBlockFilter, TreeState, TxFilter,
 };
 use seer_sync::sync::chain::LwdClient;
-use seer_sync::sync::scan::{
-    Commitment, Note, Pool, ShieldedNote, Spend, TransparentOutput, TransparentSpend,
-};
-use seer_sync::sync::{run, Account, AccountError, Cursor, SyncError};
+use seer_sync::sync::scan::{Nullifier, Pool, ShieldedNote};
+use seer_sync::sync::{run, Account, AccountError, Batch, Cursor, Resume, SyncError};
 use seer_sync::{BlockHash, BlockHeight, Network, ViewKey};
 use std::collections::HashMap;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -453,21 +451,16 @@ enum Event {
         hash: Option<[u8; 32]>,
         notes: Vec<RecordedNote>,
         spends: Vec<([u8; 32], [u8; 32])>,
-    },
-    Commitments {
-        height: u32,
+        t_outputs: Vec<([u8; 32], u32, u64)>,
+        t_spends: Vec<([u8; 32], [u8; 32], u32)>,
         leaves: Vec<(u64, [u8; 32])>,
-    },
-    Transparent {
-        height: u32,
-        outputs: Vec<([u8; 32], u32, u64)>,
-        spends: Vec<([u8; 32], [u8; 32], u32)>,
     },
     Rewind(u32),
 }
 
 #[derive(Default)]
 struct AccountState {
+    birthday: u32,
     checkpoint: Option<(u32, Option<[u8; 32]>)>,
     notes: Vec<(u32, RecordedNote)>,
     t_outputs: Vec<([u8; 32], u32)>,
@@ -478,7 +471,6 @@ struct AccountState {
 struct RecordingAccount {
     state: Mutex<AccountState>,
     want_commitments: bool,
-    want_transparent: bool,
     fail_apply: bool,
 }
 
@@ -503,6 +495,7 @@ impl RecordingAccount {
                     hash,
                     notes,
                     spends,
+                    ..
                 } => Some((height, hash, notes, spends)),
                 _ => None,
             })
@@ -519,15 +512,25 @@ impl RecordingAccount {
 }
 
 impl Account for RecordingAccount {
-    fn checkpoint(&self) -> Option<Cursor> {
-        self.state
-            .lock()
-            .unwrap()
-            .checkpoint
-            .map(|(h, hash)| Cursor {
+    fn resume(&self) -> Result<Resume, AccountError> {
+        let s = self.state.lock().unwrap();
+        Ok(Resume {
+            birthday: BlockHeight::from_u32(s.birthday),
+            checkpoint: s.checkpoint.map(|(h, hash)| Cursor {
                 height: BlockHeight::from_u32(h),
                 hash: hash.map(BlockHash),
-            })
+            }),
+            nullifiers: s
+                .notes
+                .iter()
+                .filter_map(|(_, n)| n.nf.map(|nf| (Pool::Orchard, Nullifier(nf))))
+                .collect(),
+            outpoints: s
+                .t_outputs
+                .iter()
+                .map(|(hash, n)| OutPoint::new(*hash, *n))
+                .collect(),
+        })
     }
 
     fn rewind(&self, to: BlockHeight) -> Result<(), AccountError> {
@@ -541,23 +544,14 @@ impl Account for RecordingAccount {
         Ok(())
     }
 
-    fn owns_nf(&self, _pool: Pool, nf: &[u8; 32]) -> Result<bool, AccountError> {
-        Ok(self
-            .state
-            .lock()
-            .unwrap()
-            .notes
-            .iter()
-            .any(|(_, n)| n.nf.as_ref() == Some(nf)))
-    }
-
-    fn apply(&self, at: Cursor, notes: &[Note], spends: &[Spend]) -> Result<(), AccountError> {
+    fn apply(&self, at: Cursor, batch: &Batch) -> Result<(), AccountError> {
         if self.fail_apply {
             return Err("account exploded".into());
         }
         let mut s = self.state.lock().unwrap();
         let height = u32::from(at.height);
-        let recorded: Vec<RecordedNote> = notes
+        let recorded: Vec<RecordedNote> = batch
+            .notes
             .iter()
             .map(|n| RecordedNote {
                 txid: n.txid.into(),
@@ -565,19 +559,41 @@ impl Account for RecordingAccount {
                     ShieldedNote::Orchard(o) => o.value().inner(),
                     ShieldedNote::Sapling(sap) => sap.value().inner(),
                 },
-                nf: n.nullifier,
+                nf: n.nullifier.map(|nf| nf.0),
                 has_memo: n.memo.is_some(),
                 is_sent: n.is_sent,
             })
             .collect();
-        for (n, rec) in notes.iter().zip(&recorded) {
+        for (n, rec) in batch.notes.iter().zip(&recorded) {
             s.notes.push((u32::from(n.height), rec.clone()));
+        }
+        for o in &batch.transparent_outputs {
+            s.t_outputs.push((o.txid.into(), o.output_index));
         }
         s.events.push(Event::Apply {
             height,
             hash: at.hash.map(|h| h.0),
             notes: recorded,
-            spends: spends.iter().map(|sp| (sp.nf, sp.txid.into())).collect(),
+            spends: batch
+                .spends
+                .iter()
+                .map(|sp| (sp.nf.0, sp.txid.into()))
+                .collect(),
+            t_outputs: batch
+                .transparent_outputs
+                .iter()
+                .map(|o| (o.txid.into(), o.output_index, o.value_zat))
+                .collect(),
+            t_spends: batch
+                .transparent_spends
+                .iter()
+                .map(|sp| (sp.txid.into(), *sp.outpoint.hash(), sp.outpoint.n()))
+                .collect(),
+            leaves: batch
+                .commitments
+                .iter()
+                .map(|c| (c.position, c.cmx))
+                .collect(),
         });
         s.checkpoint = Some((height, at.hash.map(|h| h.0)));
         Ok(())
@@ -586,49 +602,6 @@ impl Account for RecordingAccount {
     fn wants_commitments(&self) -> bool {
         self.want_commitments
     }
-
-    fn wants_transparent(&self) -> bool {
-        self.want_transparent
-    }
-
-    fn owns_outpoint(&self, outpoint: &OutPoint) -> Result<bool, AccountError> {
-        let op = (*outpoint.hash(), outpoint.n());
-        Ok(self.state.lock().unwrap().t_outputs.contains(&op))
-    }
-
-    fn apply_transparent(
-        &self,
-        at: Cursor,
-        outputs: &[TransparentOutput],
-        spends: &[TransparentSpend],
-    ) -> Result<(), AccountError> {
-        let mut s = self.state.lock().unwrap();
-        for o in outputs {
-            s.t_outputs.push((o.txid.into(), o.output_index));
-        }
-        s.events.push(Event::Transparent {
-            height: u32::from(at.height),
-            outputs: outputs.iter().map(|o| (o.txid.into(), o.output_index, o.value_zat)).collect(),
-            spends: spends
-                .iter()
-                .map(|sp| (sp.txid.into(), *sp.outpoint.hash(), sp.outpoint.n()))
-                .collect(),
-        });
-        Ok(())
-    }
-
-    fn apply_commitments(
-        &self,
-        at: Cursor,
-        commitments: &[Commitment],
-    ) -> Result<(), AccountError> {
-        let mut s = self.state.lock().unwrap();
-        s.events.push(Event::Commitments {
-            height: u32::from(at.height),
-            leaves: commitments.iter().map(|c| (c.position, c.cmx)).collect(),
-        });
-        Ok(())
-    }
 }
 
 async fn sync_with(
@@ -636,9 +609,10 @@ async fn sync_with(
     account: &RecordingAccount,
     keys: &ViewKey,
     birthday: u32,
-) -> (Result<(), SyncError>, Arc<FakeLwd>) {
+) -> (Result<Option<Cursor>, SyncError>, Arc<FakeLwd>) {
     let (client, fake) = serve(fake).await;
-    let res = run(client, keys, &Network::MainNetwork, birthday, account).await;
+    account.state.lock().unwrap().birthday = birthday;
+    let res = run(client, keys, Network::MainNetwork, account).await;
     (res, fake)
 }
 
@@ -818,7 +792,7 @@ async fn chunked_stream_applies_every_block_exactly_once() {
     assert_eq!(
         applies[1].3,
         vec![(nf, txid(0x72))],
-        "cross-chunk spend must resolve via owns_nf"
+        "cross-chunk spend must resolve via the watch-set"
     );
     assert_eq!(
         account.final_checkpoint(),
@@ -914,23 +888,31 @@ async fn transparent_outputs_and_spends_ride_the_run_loop() {
         raws.insert(spend.txid().as_ref().to_vec(), raw(&spend, 104));
     }
 
-    let account = RecordingAccount { want_transparent: true, ..Default::default() };
+    let account = RecordingAccount::default();
     let (res, _) = sync_with(fake, &account, &us.keys, BIRTHDAY).await;
     res.unwrap();
 
-    let transparent: Vec<Event> = account
-        .events()
-        .into_iter()
-        .filter(|e| matches!(e, Event::Transparent { .. }))
-        .collect();
+    let events = account.events();
+    assert_eq!(events.len(), 1, "one chunk, one apply: {events:?}");
+    let Event::Apply {
+        height,
+        t_outputs,
+        t_spends,
+        ..
+    } = &events[0]
+    else {
+        panic!("expected Apply, got {events:?}");
+    };
+    assert_eq!(*height, 105);
     assert_eq!(
-        transparent,
-        vec![Event::Transparent {
-            height: 105,
-            outputs: vec![(funding.txid().into(), 0, 2_000_000)],
-            spends: vec![(spend.txid().into(), funding.txid().into(), 0)],
-        }],
-        "funding output and its same-batch spend must arrive through apply_transparent"
+        *t_outputs,
+        vec![(funding.txid().into(), 0, 2_000_000)],
+        "funding output must ride the batch"
+    );
+    assert_eq!(
+        *t_spends,
+        vec![(spend.txid().into(), funding.txid().into(), 0)],
+        "same-batch spend must resolve against the watch-set"
     );
 }
 
@@ -996,25 +978,17 @@ async fn commitment_firehose_follows_apply_with_aligned_positions() {
     res.unwrap();
 
     let events = account.events();
-    assert_eq!(events.len(), 2);
-    let Event::Apply {
-        height: apply_h, ..
-    } = &events[0]
-    else {
-        panic!("expected Apply first, got {events:?}");
-    };
-    let Event::Commitments {
-        height: commit_h,
-        leaves,
-    } = &events[1]
-    else {
-        panic!("expected Commitments second, got {events:?}");
+    assert_eq!(events.len(), 1);
+    let Event::Apply { notes, leaves, .. } = &events[0] else {
+        panic!("expected Apply, got {events:?}");
     };
     assert_eq!(
-        apply_h, commit_h,
-        "both callbacks must carry the same cursor"
+        *leaves,
+        vec![(0, cmx_of(&theirs)), (1, cmx_of(&ours))],
+        "commitments arrive in the same batch as the notes they position"
     );
-    assert_eq!(*leaves, vec![(0, cmx_of(&theirs)), (1, cmx_of(&ours))]);
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].txid, txid(0x52));
 }
 
 #[tokio::test(flavor = "multi_thread")]

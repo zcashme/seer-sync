@@ -6,6 +6,11 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
 
     conn.execute_batch(
         r#"
+            CREATE TABLE IF NOT EXISTS account (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                birthday    INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS sync_state (
                 id          INTEGER PRIMARY KEY CHECK (id = 1),
                 height      INTEGER NOT NULL DEFAULT 0,

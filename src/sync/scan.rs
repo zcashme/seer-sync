@@ -26,13 +26,19 @@ pub enum Pool {
     Orchard,
 }
 
+/// A revealed nullifier: 32 bytes whose appearance on chain spends a note.
+/// Always paired with a [`Pool`] — Sapling and Orchard nullifiers live in
+/// separate domains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Nullifier(pub [u8; 32]);
+
 pub struct Note {
     pub note: ShieldedNote,
     pub height: BlockHeight,
     pub txid: TxId,
     pub tx_index: u32,
     pub output_index: u32,
-    pub nullifier: Option<[u8; 32]>,
+    pub nullifier: Option<Nullifier>,
     pub memo: Option<MemoBytes>,
     pub is_sent: bool,
     pub recipient: Option<String>,
@@ -50,7 +56,7 @@ impl Note {
 #[derive(Debug, Clone)]
 pub struct Spend {
     pub txid: TxId,
-    pub nf: [u8; 32],
+    pub nf: Nullifier,
     pub pool: Pool,
     pub height: BlockHeight,
 }
@@ -280,7 +286,7 @@ fn scan_compact_serial(
                     if let Ok(nf) = spend.nf[..].try_into() {
                         spends.push(Spend {
                             txid,
-                            nf,
+                            nf: Nullifier(nf),
                             pool: Pool::Sapling,
                             height,
                         });
@@ -290,7 +296,7 @@ fn scan_compact_serial(
                     if let Ok(nf) = act.nullifier[..].try_into() {
                         spends.push(Spend {
                             txid,
-                            nf,
+                            nf: Nullifier(nf),
                             pool: Pool::Orchard,
                             height,
                         });
@@ -330,7 +336,7 @@ fn scan_compact_serial(
                 if let Some((note, _recipient, scope)) = hit {
                     let (txid, tx_index, output_index, position) = meta[i];
                     let nullifier = match (sapling[scope].nk.as_ref(), position) {
-                        (Some(nk), Some(pos)) => Some(note.nf(nk, pos).0),
+                        (Some(nk), Some(pos)) => Some(Nullifier(note.nf(nk, pos).0)),
                         _ => None,
                     };
                     out.push(Note {
@@ -372,7 +378,7 @@ fn scan_compact_serial(
                     let nullifier = orchard[scope]
                         .fvk
                         .as_ref()
-                        .map(|fvk| note.nullifier(fvk).to_bytes());
+                        .map(|fvk| Nullifier(note.nullifier(fvk).to_bytes()));
                     out.push(Note {
                         note: ShieldedNote::Orchard(note),
                         height,
