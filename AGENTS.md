@@ -114,6 +114,9 @@ owns_nf(pool, nf) -> bool                 // is this spend ours?
 apply(at, notes, spends)                  // persist one batch, advance cursor
 wants_commitments() -> bool   (= false)   // opt-in commitment firehose
 apply_commitments(at, commitments)        // ingest the firehose (tree consumer)
+wants_transparent() -> bool   (= false)   // opt-in transparent tracking
+owns_outpoint(outpoint) -> bool           // is this transparent spend ours?
+apply_transparent(at, outputs, spends)    // batch's t-outputs + owned spends
 ```
 
 `Cursor` is the named `(BlockHeight, Option<[u8;32]>)` resume point (scanned
@@ -172,14 +175,18 @@ Implemented: the `src/db/` store + schema; the `run()` confirmed-block loop and
 `Account` trait; memo + sent-recipient recovery (phase 2); the `commitment-tree`
 firehose + shardtree witness store; the read path (`notes()`, `transactions()`
 with per-tx received/sent/spent rollups via `spent_txid`, `transparent_outputs()`);
-transparent balance v1 (`sync::transparent::utxos` gap-limit snapshot over
-`GetAddressUtxos`, reconciled by `Db::apply_transparent_snapshot` — spends
-detected by absence, so the spender tx and true spend height are unknown until
-the `GetTaddressTransactions` history path is built; see
-`docs/transparent-balances.md`).
+transparent tracking that **rides `run()`** (pepper-sync's shape): per pass,
+`sync::transparent::discover` walks each scope's BIP-44 chain with a gap limit,
+asking `GetTaddressTransactions` which txids touched each address over the
+account's whole life; targets landing in a batch's height range join phase 2's
+raw-tx fetch, `scan_transparent` extracts outputs paying us + candidate spends,
+spend ownership resolves like nullifiers (same-batch set, then
+`Account::owns_outpoint`), and results arrive via `Account::apply_transparent`
+with the batch cursor — full spender attribution, reorg-covered by the normal
+rewind. Discovery is stateless (no address book), hence the whole-life window.
 
 Not implemented in the current store: **live mempool** (`GetMempoolStream`, the
-differentiator vs batch wallets) and the transparent **history path**.
+differentiator vs batch wallets).
 
 ## Testing & benches
 

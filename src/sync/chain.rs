@@ -7,7 +7,7 @@ use zcash_protocol::TxId;
 
 use crate::proto::{
     compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, ChainSpec,
-    CompactBlock, GetAddressUtxosArg, RawTransaction, TxFilter,
+    CompactBlock, RawTransaction, TransparentAddressBlockFilter, TxFilter,
 };
 
 pub const DEFAULT_SERVERS: &[&str] = &[
@@ -153,44 +153,31 @@ async fn download(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransparentUtxo {
-    pub address: String,
-    pub txid: TxId,
-    pub index: u32,
-    pub script: Vec<u8>,
-    pub value_zat: u64,
-    pub height: u32,
-}
-
-pub async fn fetch_address_utxos(
+/// Every transaction touching `address` (as recipient or spender) in
+/// `[from, to]`, served from the lightwalletd address index.
+pub async fn fetch_taddress_transactions(
     client: &mut LwdClient,
-    addresses: Vec<String>,
-    start_height: u32,
-) -> Result<Vec<TransparentUtxo>, ChainError> {
-    let arg = GetAddressUtxosArg {
-        addresses,
-        start_height: start_height as u64,
-        max_entries: 0,
+    address: String,
+    from: u32,
+    to: u32,
+) -> Result<Vec<RawTransaction>, ChainError> {
+    let filter = TransparentAddressBlockFilter {
+        address,
+        range: Some(BlockRange {
+            start: Some(BlockId { height: from as u64, hash: vec![] }),
+            end: Some(BlockId { height: to as u64, hash: vec![] }),
+            pool_types: vec![],
+        }),
     };
-    let replies = client
-        .get_address_utxos(tonic::Request::new(arg))
+    let mut stream = client
+        .get_taddress_transactions(tonic::Request::new(filter))
         .await?
-        .into_inner()
-        .address_utxos;
-    Ok(replies
-        .into_iter()
-        .filter_map(|r| {
-            Some(TransparentUtxo {
-                address: r.address,
-                txid: TxId::from_bytes(r.txid[..].try_into().ok()?),
-                index: u32::try_from(r.index).ok()?,
-                script: r.script,
-                value_zat: u64::try_from(r.value_zat).ok()?,
-                height: u32::try_from(r.height).ok()?,
-            })
-        })
-        .collect())
+        .into_inner();
+    let mut out = Vec::new();
+    while let Some(tx) = stream.next().await {
+        out.push(tx?);
+    }
+    Ok(out)
 }
 
 pub async fn fetch_raw_transaction(

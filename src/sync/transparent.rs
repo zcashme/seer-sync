@@ -1,52 +1,71 @@
 use std::collections::HashMap;
 
-use crate::sync::chain::{self, ChainError, LwdClient, TransparentUtxo};
-use crate::{Network, ViewKey};
+use zcash_keys::encoding::AddressCodec;
+use zcash_primitives::transaction::Transaction;
+use zcash_protocol::consensus::{BlockHeight, BranchId};
+use zcash_transparent::address::TransparentAddress;
+
+use crate::sync::chain::{self, ChainError, LwdClient};
+use crate::{Network, TxId, ViewKey};
 
 pub const GAP_LIMIT: u32 = 20;
 
-/// Fetch the current unspent transparent outputs for `key`'s transparent
-/// component (empty when it has none). Compact blocks carry no transparent
-/// data, so this is a snapshot of the server's address index, not part of the
-/// block scan: addresses are derived per scope BIP-44 style, widening the
-/// window until [`GAP_LIMIT`] trailing indices are unused.
-pub async fn utxos(
+#[derive(Default)]
+pub(crate) struct Discovery {
+    /// Every derived address in use (plus the trailing gap), keyed for
+    /// output matching during the scan.
+    pub addresses: HashMap<TransparentAddress, String>,
+    /// txid → mined height of every transaction touching those addresses.
+    pub targets: HashMap<TxId, u32>,
+}
+
+/// Walk each scope's BIP-44 address chain, asking the server which
+/// transactions touched each address in `[from, to]`, stopping after
+/// [`GAP_LIMIT`] consecutive unused addresses. Empty when the key has no
+/// transparent component.
+///
+/// Discovery is stateless (no address book is persisted), so callers must
+/// pass the account's whole life as the window — an address whose only
+/// activity is older than the window would read as unused and end the walk
+/// before later addresses are reached.
+pub(crate) async fn discover(
     client: &mut LwdClient,
     key: &ViewKey,
     network: &Network,
-    start_height: u32,
-) -> Result<Vec<TransparentUtxo>, ChainError> {
+    from: u32,
+    to: u32,
+) -> Result<Discovery, ChainError> {
+    let mut found = Discovery::default();
     let Some(t) = key.transparent.as_ref() else {
-        return Ok(Vec::new());
+        return Ok(found);
     };
-    let mut out = Vec::new();
     for internal in [false, true] {
-        let mut upto = GAP_LIMIT;
-        loop {
-            let addrs = t.scoped_addresses(network, internal, upto);
-            if addrs.is_empty() {
+        let mut unused = 0u32;
+        for index in 0u32.. {
+            if unused >= GAP_LIMIT {
                 break;
             }
-            let fetched = chain::fetch_address_utxos(
-                client,
-                addrs.iter().map(|(a, _)| a.clone()).collect(),
-                start_height,
-            )
-            .await?;
-            let index_of: HashMap<&str, u32> =
-                addrs.iter().map(|(a, i)| (a.as_str(), *i)).collect();
-            let max_hit = fetched
-                .iter()
-                .filter_map(|u| index_of.get(u.address.as_str()).copied())
-                .max();
-            let need = max_hit.map_or(0, |m| m + 1 + GAP_LIMIT);
-            if need > upto {
-                upto = need;
-                continue;
+            let Some(addr) = t.derive(internal, index) else { break };
+            let encoded = addr.encode(network);
+            let txs =
+                chain::fetch_taddress_transactions(client, encoded.clone(), from, to).await?;
+            if txs.is_empty() {
+                unused += 1;
+            } else {
+                unused = 0;
+                for raw in &txs {
+                    let height = BlockHeight::from_u32(raw.height as u32);
+                    let Ok(tx) = Transaction::read(
+                        &raw.data[..],
+                        BranchId::for_height(network, height),
+                    ) else {
+                        continue;
+                    };
+                    found.targets.insert(tx.txid(), raw.height as u32);
+                }
             }
-            out.extend(fetched);
-            break;
+            found.addresses.insert(addr, encoded);
         }
     }
-    Ok(out)
+    Ok(found)
 }

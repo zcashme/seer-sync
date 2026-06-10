@@ -5,11 +5,9 @@ mod schema;
 mod shardtree_serialization;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Row};
-use std::collections::HashSet;
 use std::path::Path;
 use zcash_protocol::value::Zatoshis;
 
-use crate::sync::chain::TransparentUtxo;
 use crate::sync::scan::Pool;
 use zcash_protocol::TxId;
 
@@ -266,48 +264,49 @@ impl Db {
 }
 
 impl Db {
-    /// Reconcile the stored transparent outputs against a fresh
-    /// `GetAddressUtxos` snapshot. The snapshot is the *current unspent set*,
-    /// so a stored unspent output absent from it was spent; the snapshot
-    /// doesn't say by which transaction or at what height, so it is recorded
-    /// as spent at `as_of` (the tip at fetch time) — the closest honest bound.
-    pub fn apply_transparent_snapshot(
+    pub fn insert_transparent_output(
         &self,
-        utxos: &[TransparentUtxo],
-        as_of: u32,
+        transaction_id: i64,
+        output_index: u32,
+        address: &str,
+        script: &[u8],
+        value: u64,
     ) -> rusqlite::Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        for u in utxos {
-            let id = self.upsert_transaction(u.txid.as_ref(), Some(u.height), None)?;
-            tx.execute(
-                "INSERT INTO transparent_received_outputs(
-                    transaction_id, output_index, address, script, value)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(transaction_id, output_index)
-                 DO UPDATE SET spent_height = NULL",
-                params![id, u.index, u.address, u.script, u.value_zat as i64],
-            )?;
-        }
-        let seen: HashSet<(TxId, u32)> = utxos.iter().map(|u| (u.txid, u.index)).collect();
-        let stored: Vec<(i64, TxId, u32)> = {
-            let mut stmt = tx.prepare(
-                "SELECT o.id, t.txid, o.output_index
-                 FROM transparent_received_outputs o
-                 JOIN transactions t ON t.id_tx = o.transaction_id
-                 WHERE o.spent_height IS NULL",
-            )?;
-            let rows = stmt.query_map([], |r| Ok((r.get(0)?, txid(r.get(1)?), r.get(2)?)))?;
-            rows.collect::<Result<_, _>>()?
-        };
-        for (id, txid, index) in stored {
-            if !seen.contains(&(txid, index)) {
-                tx.execute(
-                    "UPDATE transparent_received_outputs SET spent_height = ?2 WHERE id = ?1",
-                    params![id, as_of],
-                )?;
-            }
-        }
-        tx.commit()
+        self.conn.execute(
+            "INSERT INTO transparent_received_outputs(
+                transaction_id, output_index, address, script, value)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(transaction_id, output_index) DO NOTHING",
+            params![transaction_id, output_index, address, script, value as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_transparent_spent(
+        &self,
+        prevout_txid: &[u8],
+        prevout_index: u32,
+        height: u32,
+        spender_txid: &[u8],
+    ) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE transparent_received_outputs
+             SET spent_height = ?3, spent_txid = ?4
+             WHERE output_index = ?2 AND transaction_id =
+                (SELECT id_tx FROM transactions WHERE txid = ?1)",
+            params![prevout_txid, prevout_index, height, spender_txid],
+        )
+    }
+
+    pub fn owns_outpoint(&self, prevout_txid: &[u8], prevout_index: u32) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM transparent_received_outputs o
+                JOIN transactions t ON t.id_tx = o.transaction_id
+                WHERE t.txid = ?1 AND o.output_index = ?2)",
+            params![prevout_txid, prevout_index],
+            |row| row.get(0),
+        )
     }
 }
 
@@ -464,7 +463,7 @@ impl Db {
             )?;
         }
         tx.execute(
-            "UPDATE transparent_received_outputs SET spent_height = NULL
+            "UPDATE transparent_received_outputs SET spent_height = NULL, spent_txid = NULL
              WHERE spent_height > ?1",
             params![height],
         )?;
@@ -673,18 +672,11 @@ mod tests {
     }
 
     #[test]
-    fn transparent_snapshot_inserts_spends_revives_and_rewinds() {
+    fn transparent_output_received_spent_and_rewound() {
         let db = Db::open_in_memory().unwrap();
-        let utxo = TransparentUtxo {
-            address: "t1example".into(),
-            txid: txid([5u8; 32]),
-            index: 0,
-            script: vec![0x76],
-            value_zat: 2_000_000,
-            height: 100,
-        };
+        let funding = mined_tx(&db, &[5u8; 32], 100);
+        db.insert_transparent_output(funding, 0, "t1example", &[0x76], 2_000_000).unwrap();
 
-        db.apply_transparent_snapshot(std::slice::from_ref(&utxo), 110).unwrap();
         let balance = db.balance().unwrap();
         assert_eq!(balance.transparent, Zatoshis::const_from_u64(2_000_000));
         assert_eq!(balance.total(), Zatoshis::const_from_u64(2_000_000));
@@ -692,10 +684,14 @@ mod tests {
         assert_eq!(outs.len(), 1);
         assert_eq!(outs[0].height, Some(100));
         assert_eq!(outs[0].spent_height, None);
-        let txs = db.transactions().unwrap();
-        assert_eq!(txs[0].received, Zatoshis::const_from_u64(2_000_000));
+        assert_eq!(db.transactions().unwrap()[0].received, Zatoshis::const_from_u64(2_000_000));
 
-        db.apply_transparent_snapshot(&[], 120).unwrap();
+        assert!(db.owns_outpoint(&[5u8; 32], 0).unwrap());
+        assert!(!db.owns_outpoint(&[5u8; 32], 1).unwrap());
+        assert!(!db.owns_outpoint(&[6u8; 32], 0).unwrap());
+
+        mined_tx(&db, &[6u8; 32], 120);
+        assert_eq!(db.mark_transparent_spent(&[5u8; 32], 0, 120, &[6u8; 32]).unwrap(), 1);
         assert_eq!(db.balance().unwrap().transparent, Zatoshis::ZERO);
         assert_eq!(db.transparent_outputs().unwrap()[0].spent_height, Some(120));
 
@@ -704,8 +700,6 @@ mod tests {
             db.balance().unwrap().transparent,
             Zatoshis::const_from_u64(2_000_000)
         );
-
-        db.apply_transparent_snapshot(&[utxo], 130).unwrap();
         assert_eq!(db.transparent_outputs().unwrap()[0].spent_height, None);
     }
 

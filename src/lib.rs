@@ -20,9 +20,11 @@ pub use decrypt::parse_orchard;
 pub mod db;
 
 #[cfg(feature = "db")]
-use sync::scan::{Note, Pool, ShieldedNote, Spend};
+use sync::scan::{Note, Pool, ShieldedNote, Spend, TransparentOutput, TransparentSpend};
 #[cfg(feature = "db")]
 use sync::{Account, AccountError, Cursor, SyncError};
+#[cfg(feature = "db")]
+use zcash_transparent::bundle::OutPoint;
 
 #[cfg(feature = "db")]
 pub async fn scan(
@@ -31,29 +33,8 @@ pub async fn scan(
     birthday: u32,
     db: &db::Db,
 ) -> Result<(), SyncError> {
-    let mut client = sync::chain::connect_auto().await?;
-    sync::run(client.clone(), key, network, birthday, db).await?;
-    refresh_transparent(&mut client, key, network, birthday, db).await
-}
-
-/// Refresh the transparent UTXO snapshot for `key`'s transparent component (a
-/// no-op when it has none). Separate from the shielded loop — see
-/// [`sync::transparent::utxos`].
-#[cfg(feature = "db")]
-pub async fn refresh_transparent(
-    client: &mut sync::chain::LwdClient,
-    key: &ViewKey,
-    network: &Network,
-    birthday: u32,
-    db: &db::Db,
-) -> Result<(), SyncError> {
-    if key.transparent.is_none() {
-        return Ok(());
-    }
-    let tip = sync::chain::tip_height(client).await?;
-    let utxos = sync::transparent::utxos(client, key, network, birthday).await?;
-    db.apply_transparent_snapshot(&utxos, tip)
-        .map_err(|e| SyncError::Account(Box::new(e)))
+    let client = sync::chain::connect_auto().await?;
+    sync::run(client, key, network, birthday, db).await
 }
 
 #[cfg(feature = "db")]
@@ -128,6 +109,44 @@ impl Account for db::Db {
             height: u32::from(at.height),
             hash: at.hash.map(|h| h.0),
         })?;
+        Ok(())
+    }
+
+    fn wants_transparent(&self) -> bool {
+        true
+    }
+
+    fn owns_outpoint(&self, outpoint: &OutPoint) -> Result<bool, AccountError> {
+        Ok(db::Db::owns_outpoint(self, outpoint.txid().as_ref(), outpoint.n())?)
+    }
+
+    fn apply_transparent(
+        &self,
+        _at: Cursor,
+        outputs: &[TransparentOutput],
+        spends: &[TransparentSpend],
+    ) -> Result<(), AccountError> {
+        for o in outputs {
+            let id =
+                self.upsert_transaction(o.txid.as_ref(), Some(u32::from(o.height)), None)?;
+            self.insert_transparent_output(
+                id,
+                o.output_index,
+                &o.address,
+                &o.script,
+                o.value_zat,
+            )?;
+        }
+        for s in spends {
+            let h = u32::from(s.height);
+            self.upsert_transaction(s.txid.as_ref(), Some(h), None)?;
+            self.mark_transparent_spent(
+                s.outpoint.txid().as_ref(),
+                s.outpoint.n(),
+                h,
+                s.txid.as_ref(),
+            )?;
+        }
         Ok(())
     }
 }

@@ -73,6 +73,7 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
                 script         BLOB    NOT NULL,
                 value          INTEGER NOT NULL,
                 spent_height   INTEGER,
+                spent_txid     BLOB,
                 UNIQUE (transaction_id, output_index)
             );
             CREATE INDEX IF NOT EXISTS idx_transparent_received_outputs_tx

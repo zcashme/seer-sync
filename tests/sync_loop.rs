@@ -15,15 +15,27 @@ use seer_sync::proto::{
     RawTransaction, SendResponse, SubtreeRoot, TransparentAddressBlockFilter, TreeState, TxFilter,
 };
 use seer_sync::sync::chain::LwdClient;
-use seer_sync::sync::scan::{Commitment, Note, Pool, ShieldedNote, Spend};
+use seer_sync::sync::scan::{
+    Commitment, Note, Pool, ShieldedNote, Spend, TransparentOutput, TransparentSpend,
+};
 use seer_sync::sync::{run, Account, AccountError, Cursor, SyncError};
 use seer_sync::{BlockHash, BlockHeight, Network, ViewKey};
+use std::collections::HashMap;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_stream::Stream;
 use tonic::transport::{Channel, Server};
 use tonic::{Request, Response, Status};
+use zcash_keys::encoding::AddressCodec;
 use zcash_keys::keys::UnifiedSpendingKey;
 use zcash_note_encryption::Domain;
+use zcash_primitives::transaction::{Transaction, TransactionData, TxVersion};
+use zcash_protocol::consensus::BranchId;
+use zcash_protocol::value::Zatoshis;
+use zcash_transparent::address::{Script, TransparentAddress};
+use zcash_transparent::bundle::{
+    Authorized as TransparentAuthorized, Bundle as TransparentBundle, OutPoint, TxIn, TxOut,
+};
+use zcash_transparent::keys::{IncomingViewingKey, NonHardenedChildIndex};
 use zip32::{AccountId, Scope};
 
 const BIRTHDAY: u32 = 100;
@@ -83,6 +95,36 @@ fn txid(label: u8) -> [u8; 32] {
     [label; 32]
 }
 
+fn t_address(seed: u8) -> (TransparentAddress, String) {
+    let usk =
+        UnifiedSpendingKey::from_seed(&Network::MainNetwork, &[seed; 32], AccountId::ZERO).unwrap();
+    let ivk = usk.transparent().to_account_pubkey().derive_external_ivk().unwrap();
+    let addr = ivk.derive_address(NonHardenedChildIndex::ZERO).unwrap();
+    let encoded = addr.encode(&Network::MainNetwork);
+    (addr, encoded)
+}
+
+fn transparent_tx(vin: Vec<TxIn<TransparentAuthorized>>, vout: Vec<TxOut>) -> Transaction {
+    TransactionData::from_parts(
+        TxVersion::Sprout(1),
+        BranchId::Sprout,
+        0,
+        BlockHeight::from_u32(0),
+        Some(TransparentBundle { vin, vout, authorization: TransparentAuthorized }),
+        None,
+        None,
+        None,
+    )
+    .freeze()
+    .unwrap()
+}
+
+fn raw(tx: &Transaction, height: u32) -> RawTransaction {
+    let mut data = Vec::new();
+    tx.write(&mut data).unwrap();
+    RawTransaction { data, height: height as u64 }
+}
+
 fn tx(label: u8, actions: Vec<CompactOrchardAction>) -> CompactTx {
     CompactTx {
         txid: txid(label).to_vec(),
@@ -140,6 +182,8 @@ struct FakeLwd {
     epochs: Mutex<VecDeque<Epoch>>,
     requested_ranges: Mutex<Vec<(u32, u32)>>,
     requested_txs: Mutex<Vec<Vec<u8>>>,
+    taddress_txs: Mutex<HashMap<String, Vec<RawTransaction>>>,
+    raw_txs: Mutex<HashMap<Vec<u8>, RawTransaction>>,
 }
 
 impl FakeLwd {
@@ -223,14 +267,13 @@ impl CompactTxStreamer for FakeLwd {
         &self,
         req: Request<TxFilter>,
     ) -> Result<Response<RawTransaction>, Status> {
-        self.requested_txs
-            .lock()
-            .unwrap()
-            .push(req.into_inner().hash);
-        Ok(Response::new(RawTransaction {
+        let hash = req.into_inner().hash;
+        self.requested_txs.lock().unwrap().push(hash.clone());
+        let known = self.raw_txs.lock().unwrap().get(&hash).cloned();
+        Ok(Response::new(known.unwrap_or(RawTransaction {
             data: vec![0xde, 0xad, 0xbe, 0xef],
             height: 0,
-        }))
+        })))
     }
 
     async fn get_block(&self, _: Request<BlockId>) -> Result<Response<CompactBlock>, Status> {
@@ -273,9 +316,32 @@ impl CompactTxStreamer for FakeLwd {
 
     async fn get_taddress_transactions(
         &self,
-        _: Request<TransparentAddressBlockFilter>,
+        req: Request<TransparentAddressBlockFilter>,
     ) -> Result<Response<Self::GetTaddressTransactionsStream>, Status> {
-        Err(Status::unimplemented("get_taddress_transactions"))
+        let filter = req.into_inner();
+        let (from, to) = filter
+            .range
+            .map(|r| {
+                (
+                    r.start.map_or(0, |b| b.height),
+                    r.end.map_or(u64::MAX, |b| b.height),
+                )
+            })
+            .unwrap_or((0, u64::MAX));
+        let txs: Vec<Result<RawTransaction, Status>> = self
+            .taddress_txs
+            .lock()
+            .unwrap()
+            .get(&filter.address)
+            .map(|list| {
+                list.iter()
+                    .filter(|t| (from..=to).contains(&t.height))
+                    .cloned()
+                    .map(Ok)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Response::new(Box::pin(tokio_stream::iter(txs))))
     }
 
     async fn get_taddress_balance(
@@ -392,6 +458,11 @@ enum Event {
         height: u32,
         leaves: Vec<(u64, [u8; 32])>,
     },
+    Transparent {
+        height: u32,
+        outputs: Vec<([u8; 32], u32, u64)>,
+        spends: Vec<([u8; 32], [u8; 32], u32)>,
+    },
     Rewind(u32),
 }
 
@@ -399,6 +470,7 @@ enum Event {
 struct AccountState {
     checkpoint: Option<(u32, Option<[u8; 32]>)>,
     notes: Vec<(u32, RecordedNote)>,
+    t_outputs: Vec<([u8; 32], u32)>,
     events: Vec<Event>,
 }
 
@@ -406,6 +478,7 @@ struct AccountState {
 struct RecordingAccount {
     state: Mutex<AccountState>,
     want_commitments: bool,
+    want_transparent: bool,
     fail_apply: bool,
 }
 
@@ -512,6 +585,36 @@ impl Account for RecordingAccount {
 
     fn wants_commitments(&self) -> bool {
         self.want_commitments
+    }
+
+    fn wants_transparent(&self) -> bool {
+        self.want_transparent
+    }
+
+    fn owns_outpoint(&self, outpoint: &OutPoint) -> Result<bool, AccountError> {
+        let op = (*outpoint.hash(), outpoint.n());
+        Ok(self.state.lock().unwrap().t_outputs.contains(&op))
+    }
+
+    fn apply_transparent(
+        &self,
+        at: Cursor,
+        outputs: &[TransparentOutput],
+        spends: &[TransparentSpend],
+    ) -> Result<(), AccountError> {
+        let mut s = self.state.lock().unwrap();
+        for o in outputs {
+            s.t_outputs.push((o.txid.into(), o.output_index));
+        }
+        s.events.push(Event::Transparent {
+            height: u32::from(at.height),
+            outputs: outputs.iter().map(|o| (o.txid.into(), o.output_index, o.value_zat)).collect(),
+            spends: spends
+                .iter()
+                .map(|sp| (sp.txid.into(), *sp.outpoint.hash(), sp.outpoint.n()))
+                .collect(),
+        });
+        Ok(())
     }
 
     fn apply_commitments(
@@ -778,6 +881,56 @@ async fn stream_failure_resumes_from_checkpoint_without_replay() {
     assert_eq!(
         account.final_checkpoint(),
         Some((1599, Some(block_hash(1599, FORK_A))))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn transparent_outputs_and_spends_ride_the_run_loop() {
+    let us = wallet(0x01);
+    let (addr, encoded) = t_address(0x01);
+    let (stranger, _) = t_address(0x02);
+
+    let funding = transparent_tx(
+        vec![],
+        vec![TxOut::new(Zatoshis::const_from_u64(2_000_000), addr.script().into())],
+    );
+    let spend = transparent_tx(
+        vec![TxIn::from_parts(
+            OutPoint::new(funding.txid().into(), 0),
+            Script::from(addr.script()),
+            0,
+        )],
+        vec![TxOut::new(Zatoshis::const_from_u64(1_900_000), stranger.script().into())],
+    );
+
+    let fake = FakeLwd::single(chain(100..=105, FORK_A, |_| vec![]));
+    fake.taddress_txs
+        .lock()
+        .unwrap()
+        .insert(encoded, vec![raw(&funding, 102), raw(&spend, 104)]);
+    {
+        let mut raws = fake.raw_txs.lock().unwrap();
+        raws.insert(funding.txid().as_ref().to_vec(), raw(&funding, 102));
+        raws.insert(spend.txid().as_ref().to_vec(), raw(&spend, 104));
+    }
+
+    let account = RecordingAccount { want_transparent: true, ..Default::default() };
+    let (res, _) = sync_with(fake, &account, &us.keys, BIRTHDAY).await;
+    res.unwrap();
+
+    let transparent: Vec<Event> = account
+        .events()
+        .into_iter()
+        .filter(|e| matches!(e, Event::Transparent { .. }))
+        .collect();
+    assert_eq!(
+        transparent,
+        vec![Event::Transparent {
+            height: 105,
+            outputs: vec![(funding.txid().into(), 0, 2_000_000)],
+            spends: vec![(spend.txid().into(), funding.txid().into(), 0)],
+        }],
+        "funding output and its same-batch spend must arrive through apply_transparent"
     );
 }
 

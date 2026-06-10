@@ -7,9 +7,9 @@ use sapling::keys::{
 };
 use sapling::NullifierDerivingKey;
 use zcash_keys::address::UnifiedAddress;
-use zcash_keys::encoding::AddressCodec;
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 use zcash_protocol::consensus::Network;
+use zcash_transparent::address::TransparentAddress;
 use zcash_transparent::keys::{
     ExternalIvk, IncomingViewingKey, InternalIvk, NonHardenedChildIndex,
 };
@@ -29,25 +29,17 @@ pub(crate) struct TransparentIncoming {
 }
 
 impl TransparentIncoming {
-    /// Encoded P2PKH addresses with their child indices for `0..upto` in one
-    /// scope. Indices whose BIP-32 derivation is invalid (cryptographically
-    /// negligible) are skipped, hence the explicit index in each pair.
-    pub fn scoped_addresses(
-        &self,
-        network: &Network,
-        internal: bool,
-        upto: u32,
-    ) -> Vec<(String, u32)> {
-        let derive = |i: u32| {
-            let i_t = NonHardenedChildIndex::from_index(i)?;
-            let addr = match (internal, &self.internal) {
-                (false, _) => self.external.derive_address(i_t).ok()?,
-                (true, Some(ivk)) => ivk.derive_address(i_t).ok()?,
-                (true, None) => return None,
-            };
-            Some((addr.encode(network), i))
-        };
-        (0..upto).filter_map(derive).collect()
+    /// The P2PKH address at BIP-44 child `index` in one scope, or `None` when
+    /// the scope is absent (UIVK has no internal chain), the index exceeds the
+    /// non-hardened range, or derivation is invalid (cryptographically
+    /// negligible).
+    pub(crate) fn derive(&self, internal: bool, index: u32) -> Option<TransparentAddress> {
+        let i = NonHardenedChildIndex::from_index(index)?;
+        match (internal, &self.internal) {
+            (false, _) => self.external.derive_address(i).ok(),
+            (true, Some(ivk)) => ivk.derive_address(i).ok(),
+            (true, None) => None,
+        }
     }
 }
 

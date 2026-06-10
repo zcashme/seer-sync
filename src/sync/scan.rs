@@ -5,6 +5,8 @@ use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::TxId;
+use zcash_transparent::address::TransparentAddress;
+use zcash_transparent::bundle::OutPoint;
 
 use crate::decrypt;
 use crate::key::{
@@ -70,6 +72,65 @@ pub struct Commitment {
     pub position: u64,
     /// The `cmx` (x-coordinate of the output note's commitment).
     pub cmx: [u8; 32],
+}
+
+/// A transparent output paying one of the account's derived addresses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransparentOutput {
+    pub txid: TxId,
+    pub height: BlockHeight,
+    pub output_index: u32,
+    pub address: String,
+    pub script: Vec<u8>,
+    pub value_zat: u64,
+}
+
+/// A transparent input observed in a transaction touching the account's
+/// addresses. `outpoint` names what it spends; whether that output is ours is
+/// resolved by the engine (same flow as shielded nullifiers).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransparentSpend {
+    pub txid: TxId,
+    pub outpoint: OutPoint,
+    pub height: BlockHeight,
+}
+
+/// Extract the transparent outputs paying `ours` and every input (candidate
+/// spend) from the parsed transactions named in `targets`.
+pub(crate) fn scan_transparent(
+    txs: &[(TxId, BlockHeight, Transaction)],
+    targets: &HashSet<TxId>,
+    ours: &HashMap<TransparentAddress, String>,
+) -> (Vec<TransparentOutput>, Vec<TransparentSpend>) {
+    let mut outputs = Vec::new();
+    let mut spends = Vec::new();
+    for (txid, height, tx) in txs {
+        if !targets.contains(txid) {
+            continue;
+        }
+        let Some(bundle) = tx.transparent_bundle() else { continue };
+        for (i, out) in bundle.vout.iter().enumerate() {
+            let Some(encoded) = out.recipient_address().and_then(|a| ours.get(&a)) else {
+                continue;
+            };
+            outputs.push(TransparentOutput {
+                txid: *txid,
+                height: *height,
+                output_index: i as u32,
+                address: encoded.clone(),
+                script: out.script_pubkey().0 .0.clone(),
+                value_zat: out.value().into_u64(),
+            });
+        }
+        for vin in &bundle.vin {
+            spends.push(TransparentSpend {
+                txid: *txid,
+                outpoint: vin.prevout().clone(),
+                height: *height,
+            });
+        }
+    }
+    (outputs, spends)
 }
 
 /// Parse fetched raw transactions once; both phase-2 passes (memo enrichment

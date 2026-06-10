@@ -4,8 +4,8 @@ pub mod transparent;
 
 use crate::sync::chain::{ChainError, LwdClient, DEFAULT_CHUNK_OUTPUTS};
 use crate::sync::scan::{
-    enrich_memos, parse_transactions, scan_commitments, scan_compact, scan_sent, Commitment,
-    CompactScan, Note, Pool, Spend,
+    enrich_memos, parse_transactions, scan_commitments, scan_compact, scan_sent, scan_transparent,
+    Commitment, CompactScan, Note, Pool, Spend, TransparentOutput, TransparentSpend,
 };
 use crate::BlockHeight;
 use crate::ViewKey;
@@ -14,6 +14,7 @@ use tokio_stream::StreamExt;
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::Network;
 use zcash_protocol::TxId;
+use zcash_transparent::bundle::OutPoint;
 
 const MAX_TRANSPORT_RETRIES: usize = 4;
 
@@ -59,6 +60,32 @@ pub trait Account {
     ) -> Result<(), AccountError> {
         Ok(())
     }
+
+    /// Whether this consumer tracks the transparent pool. Default: `false`.
+    /// When `true` (and the key carries a transparent component), the engine
+    /// discovers the account's t-addresses and threads their transactions
+    /// through the same batch flow as shielded notes.
+    fn wants_transparent(&self) -> bool {
+        false
+    }
+
+    /// Is this outpoint one of the account's stored transparent outputs?
+    /// The transparent analogue of [`Account::owns_nf`]. Default: `false`.
+    fn owns_outpoint(&self, _outpoint: &OutPoint) -> Result<bool, AccountError> {
+        Ok(false)
+    }
+
+    /// Receives the batch's transparent outputs paying this account and the
+    /// spends of its outputs, with the same `at` cursor as the corresponding
+    /// [`Account::apply`], immediately after it. Default: ignore.
+    fn apply_transparent(
+        &self,
+        _at: Cursor,
+        _outputs: &[TransparentOutput],
+        _spends: &[TransparentSpend],
+    ) -> Result<(), AccountError> {
+        Ok(())
+    }
 }
 
 pub async fn run<A: Account>(
@@ -82,6 +109,18 @@ pub async fn run<A: Account>(
         if start > tip {
             return Ok(());
         }
+        // Transparent discovery is per-pass: a reorg rewind re-enters here, and
+        // the replacement chain's transparent transactions must be rediscovered.
+        // The window is the account's whole life, not [start, tip] — stateless
+        // gap-limit discovery misses later addresses if early ones look unused
+        // (see `transparent::discover`); targets already below `start` are
+        // simply never reached by the stream.
+        let transparent = if account.wants_transparent() {
+            transparent::discover(&mut fetch_client, keys, network, birthday, u32::from(tip))
+                .await?
+        } else {
+            transparent::Discovery::default()
+        };
         let mut stream = chain::blocks(
             client.clone(),
             u32::from(start),
@@ -118,10 +157,19 @@ pub async fn run<A: Account>(
                         }
                     }
 
+                    let first = batch.first().map_or(u32::from(height), |b| b.height as u32);
+                    let batch_targets: HashSet<TxId> = transparent
+                        .targets
+                        .iter()
+                        .filter(|(_, h)| (first..=u32::from(height)).contains(h))
+                        .map(|(txid, _)| *txid)
+                        .collect();
+
                     let mut txids: Vec<TxId> = incoming
                         .iter()
                         .map(|n| n.txid)
                         .chain(owned_spends.iter().map(|s| s.txid))
+                        .chain(batch_targets.iter().copied())
                         .collect();
                     txids.sort_unstable();
                     txids.dedup();
@@ -148,6 +196,28 @@ pub async fn run<A: Account>(
                     account
                         .apply(cursor, &notes, &owned_spends)
                         .map_err(SyncError::Account)?;
+
+                    if !batch_targets.is_empty() {
+                        let (t_outputs, t_spends) =
+                            scan_transparent(&parsed, &batch_targets, &transparent.addresses);
+                        // Ownership of a spent outpoint resolves like shielded
+                        // nullifiers: created in this batch, or known to the
+                        // account (which `apply` just brought up to date).
+                        let batch_outpoints: HashSet<(TxId, u32)> =
+                            t_outputs.iter().map(|o| (o.txid, o.output_index)).collect();
+                        let mut owned = Vec::new();
+                        for s in t_spends {
+                            let op = (*s.outpoint.txid(), s.outpoint.n());
+                            let mine = batch_outpoints.contains(&op)
+                                || account.owns_outpoint(&s.outpoint).map_err(SyncError::Account)?;
+                            if mine {
+                                owned.push(s);
+                            }
+                        }
+                        account
+                            .apply_transparent(cursor, &t_outputs, &owned)
+                            .map_err(SyncError::Account)?;
+                    }
                     // The commitment firehose (opt-in) is applied *after* notes,
                     // so a witness consumer can mark the positions of the Name
                     // Notes `apply` just indexed — same batch, correlated by cmx.

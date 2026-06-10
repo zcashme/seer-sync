@@ -1,12 +1,15 @@
 # Adding transparent balance tracking to seer-sync
 
-> **Status (2026-06):** the snapshot path is built — `ViewKey` carries the
-> transparent IVKs, `sync::transparent::utxos` does gap-limit derivation +
-> `GetAddressUtxos`, `Db::apply_transparent_snapshot` reconciles, and
-> `balance().transparent` is honest. Remaining: the **history path**
-> (`GetTaddressTransactions`) for spender attribution and true spend heights.
-> The "what already exists" section below described an earlier scaffold that
-> was removed in `05f4ff5` and differs from what is now built.
+> **Status (2026-06):** superseded — the history path is built, and it rides
+> `sync::run` rather than living beside it (the shape pepper-sync uses).
+> `sync::transparent::discover` does gap-limit address discovery over
+> `GetTaddressTransactions`, discovered transactions join each batch's phase-2
+> raw-tx fetch, `scan_transparent` extracts outputs + spends (spender
+> attributed), and results flow through `Account::apply_transparent` under the
+> normal cursor/rewind regime. See AGENTS.md "Sync architecture". This document
+> is kept for the protocol background; its "what already exists" and
+> "recommended path" sections describe earlier iterations
+> (snapshot-by-absence via `GetAddressUtxos`) that no longer exist.
 
 Design notes for wiring the transparent pool.
 
