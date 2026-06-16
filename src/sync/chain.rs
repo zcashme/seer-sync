@@ -62,12 +62,17 @@ pub async fn connect_auto() -> Result<LwdClient, ChainError> {
 }
 
 pub async fn tip_height(client: &mut LwdClient) -> Result<u32, ChainError> {
-    let height = client
+    Ok(tip(client).await?.0)
+}
+
+pub async fn tip(client: &mut LwdClient) -> Result<(u32, Option<[u8; 32]>), ChainError> {
+    let block = client
         .get_latest_block(tonic::Request::new(ChainSpec {}))
         .await?
-        .into_inner()
-        .height;
-    u32::try_from(height).map_err(|_| ChainError::TipOverflow)
+        .into_inner();
+    let height = u32::try_from(block.height).map_err(|_| ChainError::TipOverflow)?;
+    let hash = block.hash[..].try_into().ok();
+    Ok((height, hash))
 }
 
 pub const DEFAULT_CHUNK_OUTPUTS: usize = 100_000;
