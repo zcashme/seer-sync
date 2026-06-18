@@ -10,6 +10,16 @@ trait. It trial-decrypts compact blocks, detects spends, recovers memos and sent
 recipients from full transactions, and follows reorgs without pulling in
 `zcash_client_backend` or `zcash_client_sqlite`.
 
+## Usage
+
+```toml
+[dependencies]
+seer-sync = { version = "0.1", features = ["db"] }
+```
+
+```bash
+cargo run --release --features db --example balance -- '<ufvk>' <birthday> [db]
+```
 
 ## Features
 
@@ -26,9 +36,9 @@ recipients from full transactions, and follows reorgs without pulling in
 - **Commitment firehose** (opt-in) — every Orchard `cmx` with leaf position,
   plus shardtree witnesses for inclusion proofs.
 
+## License
 
-```bash
-cargo run --release --features db --example balance -- '<ufvk>' <birthday> [db]
-```
+MIT
 
-MIT OR Apache-2.0
+[Documentation](https://docs.rs/seer-sync) |
+[Repository](https://github.com/zcashme/seer-sync)

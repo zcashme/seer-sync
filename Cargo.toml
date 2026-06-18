@@ -1,14 +1,23 @@
 [package]
 name = "seer-sync"
 description = "View-key-only Zcash chain sync"
-version = "0.0.2"
+version = "0.1.0"
 authors = ["Julian Abraham <julesverne505@gmail.com>"]
 edition = "2021"
 rust-version = "1.85.1"
-license = "MIT OR Apache-2.0"
+license = "MIT"
+repository = "https://github.com/zcashme/seer-sync"
+readme = "README.md"
 categories = ["cryptography::cryptocurrencies"]
 keywords = ["zcash", "sync", "lightwalletd", "viewing-key", "orchard"]
-publish = false
+exclude = [
+    "AGENTS.md",
+    "docs/",
+    "benches/",
+    "bench-data/",
+    "Cargo.lock",
+    ".gitignore",
+]
 
 [features]
 # `cargo add seer-sync` syncs against lightwalletd out of the box — the gRPC

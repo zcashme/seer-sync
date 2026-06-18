@@ -4,8 +4,8 @@
 //! (`src/wallet/commitment_tree.rs`), MIT/Apache-2.0, trimmed to the single
 //! `ShardStore`-over-`&rusqlite::Transaction` implementation we need (the
 //! `Connection` variant, subtree-root insertion, and confirmation-depth helpers
-//! are dropped). Shard/cap blobs use the vendored
-//! [`crate::db::shardtree_serialization`] codec. Keeping the helpers close to
+//! are dropped). Shard/cap blobs use the vendored `shardtree_serialization`
+//! codec (src/db/shardtree_serialization.rs). Keeping the helpers close to
 //! upstream preserves on-disk compatibility; do not "improve" the SQL.
 
 use std::collections::BTreeSet;

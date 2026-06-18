@@ -1,3 +1,21 @@
+//! Seer-Sycn: View-key-only Zcash chain sync.
+//!
+//! Takes either a Unified Incoming Viewing Key (UIVK) or Unified Full Viewing Key (UFVK) and accurately
+//! track every note and spend you can see, using only compact blocks from
+//! lightwalletd.
+//!
+//! ## Example
+//!
+//! ```no_run
+//! use seer_sync::{sync, BlockHeight, Network, ViewKey};
+//!
+//! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
+//! let key = ViewKey::decode(&Network::MainNetwork, "uivk1...")?;
+//! let db = seer_sync::db::Db::open("seer.db")?;
+//! let _tip = sync(&key, Network::MainNetwork, BlockHeight::from_u32(1_000_000), &db).await?;
+//! # Ok(()) }
+//! ```
+
 pub use zcash_primitives::block::BlockHash;
 pub use zcash_protocol::consensus::{BlockHeight, Network};
 pub use zcash_protocol::TxId;
