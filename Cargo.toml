@@ -77,3 +77,7 @@ zcash_note_encryption = "0.4"
 [[bench]]
 name = "decrypt"
 harness = false
+
+[[example]]
+name = "balance"
+required-features = ["db"]

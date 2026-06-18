@@ -14,10 +14,11 @@ use seer_sync::proto::{
     GetAddressUtxosReplyList, GetMempoolTxRequest, GetSubtreeRootsArg, LightdInfo, PingResponse,
     RawTransaction, SendResponse, SubtreeRoot, TransparentAddressBlockFilter, TreeState, TxFilter,
 };
-use seer_sync::sync::chain::LwdClient;
-use seer_sync::sync::scan::{Nullifier, Pool, ShieldedNote};
-use seer_sync::sync::{run, Account, AccountError, Batch, Cursor, Resume, SyncError};
-use seer_sync::{BlockHash, BlockHeight, Network, ViewKey};
+use seer_sync::chain::LwdClient;
+use seer_sync::{
+    run, Account, AccountError, Batch, BlockHash, BlockHeight, Cursor, Network, Nullifier, Pool,
+    Resume, ShieldedNote, SyncError, ViewKey,
+};
 use std::collections::HashMap;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_stream::Stream;

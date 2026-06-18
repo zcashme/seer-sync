@@ -1,7 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
 use futures::TryStreamExt;
-use seer_sync::sync::chain::{blocks, connect_auto, tip_height};
-use seer_sync::sync::scan::scan_compact;
+use seer_sync::chain::{blocks, connect_auto, tip_height};
+use seer_sync::scan_compact;
 use seer_sync::{Network, ViewKey};
 use std::time::Duration;
 
