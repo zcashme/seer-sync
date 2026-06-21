@@ -12,6 +12,9 @@ use crate::decrypt;
 use crate::key::{
     encode_orchard_recipient, encode_sapling_recipient, OrchardIncoming, SaplingIncoming,
 };
+
+#[cfg(feature = "zns-decrypt")]
+use zns_verify::decrypt as zns_decrypt;
 use crate::proto::{CompactBlock, CompactTx, RawTransaction};
 use crate::ViewKey;
 
@@ -191,10 +194,24 @@ pub(crate) fn enrich_memos(
                 }
             } else if let Some(bundle) = tx.orchard_bundle() {
                 if let Some(action) = bundle.actions().get(output_index) {
-                    for o in orchard {
-                        if let Some((.., memo)) = decrypt::try_decrypt_orchard(action, &o.ivk) {
-                            note.memo = Some(memo);
-                            break;
+                    #[cfg(not(feature = "zns-decrypt"))]
+                    {
+                        for o in orchard {
+                            if let Some((.., memo)) = decrypt::try_decrypt_orchard(action, &o.ivk) {
+                                note.memo = Some(memo);
+                                break;
+                            }
+                        }
+                    }
+                    #[cfg(feature = "zns-decrypt")]
+                    {
+                        for o in orchard {
+                            if let Some(fvk) = &o.fvk {
+                                if let Some((.., memo)) = zns_decrypt::try_decrypt_orchard(action, fvk) {
+                                    note.memo = Some(memo);
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
@@ -368,28 +385,59 @@ fn scan_compact_serial(
                 }
             }
 
-            let ivks: Vec<_> = orchard.iter().map(|o| o.ivk.clone()).collect();
-            for (i, hit) in decrypt::try_compact_orchard(&ivks, actions)
-                .into_iter()
-                .enumerate()
+            #[cfg(not(feature = "zns-decrypt"))]
             {
-                if let Some((note, _recipient, scope)) = hit {
-                    let (txid, tx_index, output_index) = meta[i];
-                    let nullifier = orchard[scope]
-                        .fvk
-                        .as_ref()
-                        .map(|fvk| Nullifier(note.nullifier(fvk).to_bytes()));
-                    out.push(Note {
-                        note: ShieldedNote::Orchard(note),
-                        height,
-                        txid,
-                        tx_index,
-                        output_index,
-                        nullifier,
-                        memo: None,
-                        is_sent: false,
-                        recipient: None,
-                    });
+                let ivks: Vec<_> = orchard.iter().map(|o| o.ivk.clone()).collect();
+                for (i, hit) in decrypt::try_compact_orchard(&ivks, actions)
+                    .into_iter()
+                    .enumerate()
+                {
+                    if let Some((note, _recipient, scope)) = hit {
+                        let (txid, tx_index, output_index) = meta[i];
+                        let nullifier = orchard[scope]
+                            .fvk
+                            .as_ref()
+                            .map(|fvk| Nullifier(note.nullifier(fvk).to_bytes()));
+                        out.push(Note {
+                            note: ShieldedNote::Orchard(note),
+                            height,
+                            txid,
+                            tx_index,
+                            output_index,
+                            nullifier,
+                            memo: None,
+                            is_sent: false,
+                            recipient: None,
+                        });
+                    }
+                }
+            }
+
+            #[cfg(feature = "zns-decrypt")]
+            {
+                let fvks: Vec<_> = orchard.iter().filter_map(|o| o.fvk.clone()).collect();
+                for (i, act) in actions.iter().enumerate() {
+                    for (scope, fvk) in fvks.iter().enumerate() {
+                        if let Some((note, _recipient)) = zns_decrypt::try_compact_orchard(fvk, act) {
+                            let (txid, tx_index, output_index) = meta[i];
+                            let nullifier = orchard[scope]
+                                .fvk
+                                .as_ref()
+                                .map(|f| Nullifier(note.nullifier(f).to_bytes()));
+                            out.push(Note {
+                                note: ShieldedNote::Orchard(note),
+                                height,
+                                txid,
+                                tx_index,
+                                output_index,
+                                nullifier,
+                                memo: None,
+                                is_sent: false,
+                                recipient: None,
+                            });
+                            break;
+                        }
+                    }
                 }
             }
         }

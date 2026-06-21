@@ -13,6 +13,9 @@ use zcash_note_encryption::{
 };
 use zcash_protocol::memo::MemoBytes;
 
+#[cfg(feature = "zns-decrypt")]
+use zns_verify::decrypt as zns_decrypt;
+
 use crate::proto::{CompactOrchardAction, CompactSaplingOutput};
 
 /// One batch pass over all ivks at once; the returned index says which ivk
@@ -35,14 +38,23 @@ pub(crate) fn try_compact_orchard(
     ivks: &[OrchardPreparedIvk],
     actions: Vec<CompactAction>,
 ) -> Vec<Option<(orchard::Note, orchard::Address, usize)>> {
-    let inputs: Vec<(OrchardDomain, CompactAction)> = actions
-        .into_iter()
-        .map(|a| (OrchardDomain::for_compact_action(&a), a))
-        .collect();
-    batch::try_compact_note_decryption(ivks, &inputs)
-        .into_iter()
-        .map(|hit| hit.map(|((note, recipient), ivk)| (note, recipient, ivk)))
-        .collect()
+    #[cfg(feature = "zns-decrypt")]
+    {
+        // When zns-decrypt enabled, scan_compact uses direct zns_decrypt
+        // with FVK (see scan.rs). This branch is not used.
+        vec![None; actions.len()]
+    }
+    #[cfg(not(feature = "zns-decrypt"))]
+    {
+        let inputs: Vec<(OrchardDomain, CompactAction)> = actions
+            .into_iter()
+            .map(|a| (OrchardDomain::for_compact_action(&a), a))
+            .collect();
+        batch::try_compact_note_decryption(ivks, &inputs)
+            .into_iter()
+            .map(|hit| hit.map(|((note, recipient), ivk)| (note, recipient, ivk)))
+            .collect()
+    }
 }
 
 pub(crate) fn parse_sapling(p: &CompactSaplingOutput) -> Option<CompactOutputDescription> {
@@ -76,9 +88,19 @@ pub fn try_decrypt_orchard<A>(
     action: &Action<A>,
     ivk: &OrchardPreparedIvk,
 ) -> Option<(orchard::Note, orchard::Address, MemoBytes)> {
-    let (note, recipient, memo) =
-        try_note_decryption(&OrchardDomain::for_action(action), ivk, action)?;
-    Some((note, recipient, MemoBytes::from_bytes(&memo).unwrap()))
+    #[cfg(not(feature = "zns-decrypt"))]
+    {
+        let (note, recipient, memo) =
+            try_note_decryption(&OrchardDomain::for_action(action), ivk, action)?;
+        Some((note, recipient, MemoBytes::from_bytes(&memo).unwrap()))
+    }
+    #[cfg(feature = "zns-decrypt")]
+    {
+        // When zns-decrypt is enabled, callers use the FVK-based
+        // zns_decrypt functions directly (see scan.rs). This path
+        // is not used.
+        None
+    }
 }
 
 pub fn try_decrypt_sapling<Proof>(
