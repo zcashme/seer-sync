@@ -13,9 +13,6 @@ use zcash_note_encryption::{
 };
 use zcash_protocol::memo::MemoBytes;
 
-#[cfg(feature = "zns-decrypt")]
-use zns_verify::decrypt as zns_decrypt;
-
 use crate::proto::{CompactOrchardAction, CompactSaplingOutput};
 
 /// One batch pass over all ivks at once; the returned index says which ivk
@@ -40,8 +37,6 @@ pub(crate) fn try_compact_orchard(
 ) -> Vec<Option<(orchard::Note, orchard::Address, usize)>> {
     #[cfg(feature = "zns-decrypt")]
     {
-        // When zns-decrypt enabled, scan_compact uses direct zns_decrypt
-        // with FVK (see scan.rs). This branch is not used.
         vec![None; actions.len()]
     }
     #[cfg(not(feature = "zns-decrypt"))]
@@ -96,9 +91,6 @@ pub fn try_decrypt_orchard<A>(
     }
     #[cfg(feature = "zns-decrypt")]
     {
-        // When zns-decrypt is enabled, callers use the FVK-based
-        // zns_decrypt functions directly (see scan.rs). This path
-        // is not used.
         None
     }
 }
