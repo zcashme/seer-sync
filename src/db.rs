@@ -14,7 +14,15 @@ use zcash_protocol::TxId;
 use zcash_transparent::bundle::OutPoint;
 
 use crate::sync::scan::{Nullifier, Pool, ShieldedNote};
-use crate::sync::{Account, AccountError, Batch, Cursor, Resume};
+use crate::sync::{Account, Batch, Cursor, Resume};
+
+#[derive(thiserror::Error, Debug)]
+pub enum DbError {
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("account birthday is not set; call Db::set_birthday or use seer_sync::sync")]
+    BirthdayUnset,
+}
 
 fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
@@ -328,19 +336,19 @@ impl Db {
         Ok(Self { conn })
     }
 
-    pub fn set_birthday(&self, height: u32) -> rusqlite::Result<()> {
+    pub fn set_birthday(&self, height: BlockHeight) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT INTO account(id, birthday) VALUES (1, ?1)
              ON CONFLICT(id) DO UPDATE SET birthday = excluded.birthday",
-            params![height],
+            params![u32::from(height)],
         )?;
         Ok(())
     }
 
-    pub fn birthday(&self) -> rusqlite::Result<Option<u32>> {
+    pub fn birthday(&self) -> rusqlite::Result<Option<BlockHeight>> {
         self.conn
             .query_row("SELECT birthday FROM account WHERE id = 1", [], |row| {
-                row.get(0)
+                row.get::<_, u32>(0).map(BlockHeight::from_u32)
             })
             .optional()
     }
@@ -650,28 +658,28 @@ fn txid(bytes: [u8; 32]) -> TxId {
 }
 
 impl Account for Db {
-    fn resume(&self) -> Result<Resume, AccountError> {
-        let birthday = self
-            .birthday()?
-            .ok_or("account birthday is not set; call Db::set_birthday or use seer_sync::sync")?;
+    type Error = DbError;
+
+    fn resume(&self) -> Result<Resume, Self::Error> {
+        let birthday = self.birthday()?.ok_or(DbError::BirthdayUnset)?;
         let checkpoint = self.get_sync_state()?.map(|st| Cursor {
             height: BlockHeight::from_u32(st.height),
             hash: st.hash.map(BlockHash),
         });
         Ok(Resume {
-            birthday: BlockHeight::from_u32(birthday),
+            birthday,
             checkpoint,
             nullifiers: self.unspent_nullifiers()?,
             outpoints: self.unspent_outpoints()?,
         })
     }
 
-    fn rewind(&self, to: BlockHeight) -> Result<(), AccountError> {
+    fn rewind(&self, to: BlockHeight) -> Result<(), Self::Error> {
         self.rewind_to_height(u32::from(to))?;
         Ok(())
     }
 
-    fn apply(&self, at: Cursor, batch: &Batch) -> Result<(), AccountError> {
+    fn apply(&self, at: Cursor, batch: &Batch) -> Result<(), Self::Error> {
         let tx = self.conn.unchecked_transaction()?;
         let mut ids: HashMap<TxId, i64> = HashMap::new();
         let mut id_for =
@@ -795,7 +803,7 @@ mod tests {
             None,
             "sync state needs the account row: birthday first"
         );
-        db.set_birthday(40).unwrap();
+        db.set_birthday(BlockHeight::from_u32(40)).unwrap();
         db.set_sync_state(&state).unwrap();
         let got = db.get_sync_state().unwrap().unwrap();
         assert_eq!(got.height, 42);
@@ -806,8 +814,8 @@ mod tests {
     fn birthday_roundtrip() {
         let db = Db::open_in_memory().unwrap();
         assert_eq!(db.birthday().unwrap(), None);
-        db.set_birthday(419_200).unwrap();
-        assert_eq!(db.birthday().unwrap(), Some(419_200));
+        db.set_birthday(BlockHeight::from_u32(419_200)).unwrap();
+        assert_eq!(db.birthday().unwrap(), Some(BlockHeight::from_u32(419_200)));
     }
 
     #[test]
@@ -1096,7 +1104,7 @@ mod tests {
         db.mark_spent(Pool::Orchard, &[9u8; 32], spender).unwrap();
         assert_eq!(db.balance().unwrap().orchard, Zatoshis::ZERO);
 
-        db.set_birthday(90).unwrap();
+        db.set_birthday(BlockHeight::from_u32(90)).unwrap();
         db.rewind_to_height(104).unwrap();
         assert_eq!(
             db.balance().unwrap().orchard,

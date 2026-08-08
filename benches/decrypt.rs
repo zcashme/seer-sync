@@ -2,7 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingM
 use futures::TryStreamExt;
 use seer_sync::chain::{blocks, connect_auto, tip_height};
 use seer_sync::scan_compact;
-use seer_sync::{Network, ViewKey};
+use seer_sync::{BlockHeight, Network, ViewKey};
 use std::time::Duration;
 
 const UFVK: &str = "uview1hzzcqccht7226cqmwfxvesey863wzugkdckl4ecyrpy6pmzteum4x75p8gsqqeghfg0ngkhafvjkgzq6u3d2chf9nxlxqldtpfce80renlet8nw6zvkmkt7v2xqf203t63jufh7640kheemmq89u5gha6w6vvjs93gcae7tcswl9glfjwc80afw86y794cuq0rk8mqyylrguq3wcere2lwv4clhxdc76c79et846p6pv69qw40pxjpu8vywwkg440mp46ed97ytcvumj5lzvqf0n3fv7nfze22me7rh07rtzgr6grh3ra6rq9lgcsstvfh7c70nukklnz7a45eauxj70px6tjquklmh7ayryw205zzp7uuxemm4qd8awxc6vsc0l4dc77v5tg";
@@ -12,15 +12,18 @@ fn bench(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
     let blocks = rt.block_on(async {
-        let mut client = connect_auto().await.expect("connecting to lightwalletd");
+        let mut client = connect_auto(Network::MainNetwork)
+            .await
+            .expect("connecting to lightwalletd");
         let tip = tip_height(&mut client).await.expect("tip height");
         let from = std::env::var("BENCH_FROM")
             .ok()
             .and_then(|s| s.parse().ok())
+            .map(BlockHeight::from_u32)
             .unwrap_or_else(|| tip.saturating_sub(BENCH_WINDOW));
         eprintln!(
             "[bench] fetching [{from}..{tip}] ({} blocks)",
-            tip - from + 1
+            u32::from(tip) - u32::from(from) + 1
         );
         blocks(client, from, tip, usize::MAX, None)
             .try_concat()

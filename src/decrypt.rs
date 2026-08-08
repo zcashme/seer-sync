@@ -1,8 +1,10 @@
 use orchard::{
-    keys::{OutgoingViewingKey as OrchardOvk, PreparedIncomingViewingKey as OrchardPreparedIvk},
+    keys::OutgoingViewingKey as OrchardOvk,
     note_encryption::{CompactAction, OrchardDomain},
     Action,
 };
+
+use orchard::keys::PreparedIncomingViewingKey as OrchardPreparedIvk;
 use sapling::{
     bundle::OutputDescription,
     keys::{OutgoingViewingKey as SaplingOvk, PreparedIncomingViewingKey as SaplingPreparedIvk},
@@ -35,21 +37,14 @@ pub(crate) fn try_compact_orchard(
     ivks: &[OrchardPreparedIvk],
     actions: Vec<CompactAction>,
 ) -> Vec<Option<(orchard::Note, orchard::Address, usize)>> {
-    #[cfg(feature = "zns-decrypt")]
-    {
-        vec![None; actions.len()]
-    }
-    #[cfg(not(feature = "zns-decrypt"))]
-    {
-        let inputs: Vec<(OrchardDomain, CompactAction)> = actions
-            .into_iter()
-            .map(|a| (OrchardDomain::for_compact_action(&a), a))
-            .collect();
-        batch::try_compact_note_decryption(ivks, &inputs)
-            .into_iter()
-            .map(|hit| hit.map(|((note, recipient), ivk)| (note, recipient, ivk)))
-            .collect()
-    }
+    let inputs: Vec<(OrchardDomain, CompactAction)> = actions
+        .into_iter()
+        .map(|a| (OrchardDomain::for_compact_action(&a), a))
+        .collect();
+    batch::try_compact_note_decryption(ivks, &inputs)
+        .into_iter()
+        .map(|hit| hit.map(|((note, recipient), ivk)| (note, recipient, ivk)))
+        .collect()
 }
 
 pub(crate) fn parse_sapling(p: &CompactSaplingOutput) -> Option<CompactOutputDescription> {
@@ -83,16 +78,9 @@ pub fn try_decrypt_orchard<A>(
     action: &Action<A>,
     ivk: &OrchardPreparedIvk,
 ) -> Option<(orchard::Note, orchard::Address, MemoBytes)> {
-    #[cfg(not(feature = "zns-decrypt"))]
-    {
-        let (note, recipient, memo) =
-            try_note_decryption(&OrchardDomain::for_action(action), ivk, action)?;
-        Some((note, recipient, MemoBytes::from_bytes(&memo).unwrap()))
-    }
-    #[cfg(feature = "zns-decrypt")]
-    {
-        None
-    }
+    let (note, recipient, memo) =
+        try_note_decryption(&OrchardDomain::for_action(action), ivk, action)?;
+    Some((note, recipient, MemoBytes::from_bytes(&memo).unwrap()))
 }
 
 pub fn try_decrypt_sapling<Proof>(

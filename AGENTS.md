@@ -1,220 +1,219 @@
 # AGENTS.md
 
-Working notes for agents (and humans) on `seer-sync`.
+Working notes for agents (and humans) on **seer-sync**.
 
 ## What this is
 
-A **view-key-only Zcash chain sync** library, targeting crates.io. Think of it
-as a **non-spendable wallet** whose one job is to **accurately track every note,
-live** — from viewing keys only (IVK/FVK).
+A **view-key-only Zcash chain sync** library for the **Ironwood era**.
+Non-spendable wallet: given a viewing key, accurately track every note and
+spend you can see from lightwalletd compact blocks.
 
-What a viewing key buys you bounds detection:
-- **UIVK** (incoming) → see notes arrive, can't tell when they're spent.
-- **UFVK** (full) → also carries each pool's nullifier-deriving key → spends too.
+| Key | Capability |
+|-----|------------|
+| **UIVK** | Incoming notes only (no nullifiers → no spends) |
+| **UFVK** | Notes + spends (nullifier keys) + sent recovery (OVKs) |
 
-`ViewKey::decode` accepts either encoding and pre-derives the per-pool scanning
-keys up front (`src/key.rs`).
+`ViewKey::decode` accepts either encoding and pre-derives per-pool scanning
+keys in `src/key.rs`.
 
-## The boundary we hold
+## Sibling crates (this monorepo)
 
-Depend on librustzcash's **protocol/keys/crypto** layer, never its **wallet
-framework**:
-- IN: `zcash_protocol`, `zcash_keys` (+ transitive `zcash_address` /
-  `zcash_transparent` / `zcash_encoding`), pool crypto `orchard`,
-  `sapling-crypto`, `zcash_note_encryption`, `zip32`. The whole stack is on the
-  **0.14 line** (orchard 0.14, zcash_protocol 0.9, zcash_keys 0.14,
-  zcash_primitives 0.28).
-- OUT: `zcash_client_backend`, `zcash_client_sqlite` — they impose a wallet
-  framework, DB schema, and sync model. We hand-roll our own equivalents:
-  vendored lightwalletd protos (`src/proto.rs`, client stubs only), raw-rusqlite
-  `src/db/`, our own `src/sync/` engine. For the note-commitment tree we use
-  `shardtree` directly plus a vendored ~120-line shard codec
-  (`src/db/shardtree_serialization.rs`) — **not** `zcash_client_backend`.
+| Path | Role |
+|------|------|
+| `../zns-orchard` | **Our orchard** (fork of upstream 0.15.5 + `unsafe-zns`). Path + version + `[patch.crates-io]`. |
+| `../zns-verify` | ZNS commitment verify + optional relaxed Ironwood decrypt (`zns-decrypt` feature). |
+| `../zns-resolver` | App consumer: `impl Account`, enables `zns-decrypt`, also patches orchard → zns-orchard. |
 
-The line is "**know the protocol**" vs "**be a wallet framework**".
+**Always one orchard identity** in the monorepo:
 
-`librustzcash/` is checked out at repo root **for reference only**. It is not a
-dependency.
+```toml
+orchard = { version = "0.15.5", path = "../zns-orchard", default-features = false, features = ["std"] }
 
-## General-purpose, and ZNS-blind
+[patch.crates-io]
+orchard = { path = "../zns-orchard" }
+```
 
-seer-sync is **protocol-faithful and application-agnostic**. Orchard/Sapling
-decryption applies the full ZIP-212 commitment check, so it surfaces only notes
-whose commitment binds. It carries **no application-specific decrypt rules**, no
-`observe`/relaxed-decrypt feature, no cipher crates, and no `cmx` field on
-`Note`. Keep it that way.
+`version` is required for crates.io publish (path is stripped); `path` + `patch`
+keep local builds on zns-orchard so types unify with zcash_keys/primitives.
+Never leave the graph on two orchard versions.
 
-A consumer that needs a **non-standard decrypt rule** — e.g. ZcashName Name
-Notes, whose `(rcm, ψ)` are a deterministic hash that fails the standard
-`rseed`→`cmx` check and so gets discarded here — does **not** get a hook in this
-crate. Instead it **drives its own scan** over seer-sync's toolkit and supplies
-its own decrypt:
-- `sync::chain::blocks` — the compact-block stream (with reorg detection);
-- the re-exported compact-block **data types** (`CompactBlock`, `CompactTx`,
-  `CompactOrchardAction`, `RawTransaction`, … — at the crate root, *not* the
-  whole `proto` module; the gRPC client and RPC messages stay private);
-- `parse_orchard` — proto action → `orchard::CompactAction`;
-- `sync::scan::scan_commitments` — the position-tagged commitment firehose.
+## Dependency boundary
 
-The relaxed decrypt and commitment verification then live entirely in the
-consumer's crates (the ZcashName resolver drives such a loop; the relaxed
-trial-decrypt lives behind a feature in `zns-verify`). If you find yourself
-wanting to teach seer-sync about names, memos-as-commands, or skipping the
-commitment check — stop; that belongs in the consumer.
+**IN** — protocol / keys / crypto only (Ironwood stack):
 
-## Layout
+| Crate | Pin |
+|-------|-----|
+| orchard | path `../zns-orchard` (0.15.5) |
+| sapling-crypto | 0.7 |
+| zcash_note_encryption | 0.4 |
+| zcash_protocol | 0.10 |
+| zcash_keys | 0.15 |
+| zcash_primitives | 0.29 |
+| zcash_transparent | 0.9 |
+| zip32 | 0.2 |
+| tonic / prost / tokio | gRPC + async driver |
 
-- `src/key.rs` — `ViewKey`: parse a UFVK/UIVK and pre-derive per-pool incoming
-  viewing keys (+ the nullifier-deriving `fvk`/`nk` and outgoing keys when the
-  key is full).
-- `src/decrypt.rs` — per-pool compact + full trial decryption and sender
-  recovery (standard, commitment-checked). `parse_orchard`/`parse_sapling` turn
-  proto actions/outputs into the pool crates' compact types; `parse_orchard` is
-  re-exported as a public building block.
-- `src/sync/scan.rs` — **sans-IO core**. `scan_compact()` runs batch
-  trial-decryption over every compact output/action (parallel across CPUs for
-  large ranges), returning per-note receives + every spend seen; `enrich_memos`
-  + `scan_sent` are phase 2; `scan_commitments()` is the viewing-key-independent
-  firehose (every `cmx`, tagged with its absolute leaf position). Types: `Note`,
-  `ShieldedNote`, `Pool`, `Spend`, `Commitment`, `CompactScan`.
-- `src/sync/chain.rs` — the one lightwalletd block producer. `blocks()` streams
-  compact blocks; `fetch_raw_transaction` serves phase 2; `tip_height`,
-  `connect`/`connect_auto`. The only IO. Errors are typed (`ChainError`).
-- `src/sync.rs` — the persistence-free `run::<A: Account>()` loop. Drives
-  fetch → scan → `Account` over the chain, handling transport faults and reorgs
-  inline. Reads no consumer state. See **Sync architecture**.
-- `src/db/` — raw rusqlite. `schema.rs` is a stripped descendant of
-  `zcash_client_sqlite`; `mod.rs` impls `Account` for `Db` (consumer zero);
-  `commitment_tree.rs` + `shardtree_serialization.rs` back the `commitment-tree`
-  feature.
-- `src/proto.rs` — generated lightwalletd types (`build.rs` emits client stubs
-  only; we call lightwalletd, never serve it).
+MSRV: **1.88**. Errors: **thiserror only** (no anyhow).
+
+**OUT** — never depend on:
+
+- `zcash_client_backend`
+- `zcash_client_sqlite`
+
+We hand-roll: vendored lightwalletd protos (client stubs only), raw rusqlite
+`Db`, our own `run` engine, and (opt-in) shardtree + a vendored ~120-line shard
+codec — not the wallet framework.
+
+Line: **know the protocol** vs **be a wallet framework**.
 
 ## Features
 
-- `db` — the reference raw-rusqlite store, the top-level `scan()` /
-  `refresh_transparent()` entries, and the read path (`balance()`, `notes()`,
-  `transactions()`, `transparent_outputs()`).
-- `commitment-tree` — the Orchard note-commitment tree (shardtree) and the
-  `scan_commitments` firehose ingestion, persisted via `db`. **Opt-in**: it
-  ingests every on-chain commitment and pulls shardtree, which a plain balance
-  scanner neither needs nor should pay for. Witnesses are for consumers that
-  must *prove* a note's inclusion (e.g. an indexer), not for tracking balance.
+| Feature | What it enables |
+|---------|-----------------|
+| *(default none)* | Engine + keys + scan; bring your own `Account` |
+| `db` | Reference SQLite `Db`, `sync()`, read path |
+| `commitment-tree` | Requires `db`. Every Orchard `cmx` + shardtree witnesses |
+| `zns-decrypt` | Layers Ironwood Name Note trial-decrypt (via `zns-verify`) **on top of** standard Orchard — does not replace it |
 
-## Sync architecture
+### Decrypt order (with `zns-decrypt`)
 
-The confirmed-block loop lives in `src/sync.rs::run` and is **persistence-free**:
-it reads no consumer state and writes none. The consumer implements one trait,
-**`Account`**, over its own store, and `run` drives the sweep:
+1. **Standard Orchard** — `OrchardDomain`, ZIP-212 / cmx check (lead byte `0x02`).
+2. **Unclaimed actions only** — relaxed Ironwood via `zns-verify` (V3 / Name Notes; no cmx check; caller verifies bindings).
+
+Default (no feature): step 1 only. Application logic (names, memos-as-commands,
+`verify_name_note`) stays in the consumer (`zns-resolver`), not here.
+
+## Layout
 
 ```
-checkpoint() -> Option<Cursor>            // resume point: height + seam hash
-rewind(to)                                // drop state above a height (reorg)
-owns_nf(pool, nf) -> bool                 // is this spend ours?
-apply(at, notes, spends)                  // persist one batch, advance cursor
-wants_commitments() -> bool   (= false)   // opt-in commitment firehose
-apply_commitments(at, commitments)        // ingest the firehose (tree consumer)
-wants_transparent() -> bool   (= false)   // opt-in transparent tracking
-owns_outpoint(outpoint) -> bool           // is this transparent spend ours?
-apply_transparent(at, outputs, spends)    // batch's t-outputs + owned spends
+src/
+  lib.rs          public re-exports + feature-gated sync()
+  key.rs          ViewKey, KeyError
+  decrypt.rs      per-pool trial decrypt; parse_orchard (public)
+  proto.rs        include! of build.rs output (client stubs only)
+  sync.rs         run(), Account, Batch, Cursor, Resume, SyncError<E>
+  sync/
+    chain.rs      only I/O — lightwalletd connect/stream/fetch (BlockHeight-typed)
+    scan.rs       sans-IO: scan_compact, enrich_memos, scan_sent, scan_commitments, …
+    transparent.rs BIP-44 gap-limit discovery
+  db.rs           feature `db` — SQLite Account + schema + reads
+  db/
+    commitment_tree.rs          feature `commitment-tree`
+    shardtree_serialization.rs
 ```
 
-`Cursor` is the named `(BlockHeight, Option<[u8;32]>)` resume point (scanned
-height + its seam hash). The engine stays a free function; `impl Account for Db`
-is the reference wiring, and `lib.rs::scan()` is the one-call convenience entry.
+## Public engine API
 
-- **One stream to the tip.** `run` opens a single `GetBlockRange` for
-  `[start, tip]`. `chain::blocks`/`download` chunks it by output-cost *or* block
-  count (`DEFAULT_CHUNK_OUTPUTS` / `DEFAULT_CHUNK_BLOCKS`, whichever trips first)
-  into a `channel(1)`-backpressured stream; the spawned downloader stays one
-  batch ahead, so network fetch overlaps CPU decrypt for free. The two caps guard
-  different axes: outputs bound scan work + memory per chunk; the block cap keeps
-  cursor checkpoints regular in sparse regions. Memory is bounded by the chunk,
-  not the range.
-- **Crash-safe by the cursor.** `apply` advances the consumer's cursor after
-  *every* batch. A dropped stream is retried (`MAX_TRANSPORT_RETRIES`) and
-  re-resumes from `checkpoint()`; nothing is re-fetched.
-- **Reorgs: one detector, self-terminating walk-back.** Continuity is checked in
-  *one* place — `download`'s `prev_hash` chain, seeded with the seam hash from
-  `checkpoint()`, so the same check covers both the resume seam and
-  block-to-block. A break is a typed `ChainError::Reorg`; `run` calls `rewind`,
-  doubles the step, and re-resumes until the seam reconnects. No depth limit —
-  the seam check is its own all-clear. Rewinding is cheap (over-rewind costs
-  nothing, inserts are idempotent); the consumer keeps only the cursor's seam
-  hash. With `commitment-tree`, the consumer truncates the tree to its nearest
-  checkpoint in lockstep inside `rewind`.
-- **Two-phase scan.** `scan_compact` finds notes in compact blocks (phase 1),
-  then `enrich_memos`/`scan_sent` fetch each owning full tx and full-decrypt to
-  recover memos + sent recipients (phase 2), so what reaches `apply` is complete;
-  a failed fetch errors the whole chunk.
-- **Errors: typed.** `ChainError` (transport + `Reorg`), `SyncError` (wraps
-  `Chain` / `Key` / `Account`), and `AccountError = Box<dyn Error + Send + Sync>`
-  so consumer stores surface their own error type without seer-sync knowing it.
+### `Account`
 
-## Schema, in one breath
+Fold over the chain. One associated error type (not boxed):
 
-Watch-only keeps a lean store: `sync_state` (the linear cursor — scanned
-`height` + seam `hash`), `transactions`, and the per-pool
-`sapling_received_notes` / `orchard_received_notes` tables (each carries the
-note, its nullifier, spend status, leaf position, and memo as columns). Spentness
-is a nullifier match — a received note whose nf later appears is spent; unmined
-spends fall out for free via `transactions.mined_height IS NULL`, no overlay
-tables. **Absent by design:** an `account` table (single key — dropped), a
-`blocks` table (the cursor is the only chain-position state), `sent_notes`
-(never authors txs), `scan_queue` (tip-follow is linear), and
-`nullifier_map`/`tx_locator_map` (a linear scan always sees a note before its
-spend). Witness/shardtree tables exist **only** under `commitment-tree`.
+```rust
+trait Account {
+    type Error: Error + Send + Sync + 'static;
 
-Sapling leaf positions come from the tree *size* lightwalletd stamps on each
-block's `chain_metadata`; positions live as an int column, not a tree. Orchard
-nullifiers derive from the key + the action's `rho` directly.
+    fn resume(&self) -> Result<Resume, Self::Error>;
+    fn rewind(&self, to: BlockHeight) -> Result<(), Self::Error>;
+    fn apply(&self, at: Cursor, batch: &Batch) -> Result<(), Self::Error>;
+    fn wants_commitments(&self) -> bool { false }  // opt-in cmx firehose
+}
+```
 
-## Scope
+| Type | Meaning |
+|------|---------|
+| `Resume` | birthday, optional checkpoint `Cursor`, watched nullifiers + outpoints |
+| `Cursor` | fully applied height + optional seam `BlockHash` |
+| `Batch` | notes, spends, transparent outs/spends, optional commitments |
 
-Implemented: the `src/db/` store + schema; the `run()` confirmed-block loop and
-`Account` trait; memo + sent-recipient recovery (phase 2); the `commitment-tree`
-firehose + shardtree witness store; the read path (`notes()`, `transactions()`
-with per-tx received/sent/spent rollups via `spent_txid`, `transparent_outputs()`);
-transparent tracking that **rides `run()`** (pepper-sync's shape): per pass,
-`sync::transparent::discover` walks each scope's BIP-44 chain with a gap limit,
-asking `GetTaddressTransactions` which txids touched each address over the
-account's whole life; targets landing in a batch's height range join phase 2's
-raw-tx fetch, `scan_transparent` extracts outputs paying us + candidate spends,
-spend ownership resolves like nullifiers (same-batch set, then
-`Account::owns_outpoint`), and results arrive via `Account::apply_transparent`
-with the batch cursor — full spender attribution, reorg-covered by the normal
-rewind. Discovery is stateless (no address book), hence the whole-life window.
+`run(client, keys, network, account) -> Result<Option<Cursor>, SyncError<A::Error>>`.
 
-Not implemented in the current store: **live mempool** (`GetMempoolStream`, the
-differentiator vs batch wallets).
+### Errors
+
+```text
+SyncError<E>  = Chain(ChainError) | Key(KeyError) | Account(E)
+DbError       = Sqlite(...) | BirthdayUnset          // feature db
+ChainError    = Reorg(BlockHeight) | Rpc | Connect | …
+```
+
+`From<ChainError>` / `From<KeyError>` for `SyncError<E>` are **hand-written** —
+`thiserror`'s `#[from]` does not emit them on a generic enum. Do not reintroduce
+`AccountError = Box<dyn Error>`.
+
+### Heights
+
+Public chain API uses **`BlockHeight`** / **`BlockHash`**, not raw `u32` /
+`[u8; 32]`, at the edges:
+
+- `tip` / `tip_height` / `blocks(from, to, …)` / `fetch_taddress_transactions`
+- `ChainError::Reorg(BlockHeight)`
+- `Db::set_birthday(BlockHeight)`
+- `connect_auto(Network)` picks mainnet vs testnet lightwalletd lists
+
+Proto still speaks `u64` heights internally; convert at the boundary.
+
+## Sync loop (`run`)
+
+Persistence-free: never opens the consumer's store. Only calls `Account`.
+
+```
+resume → discover transparent (whole life, gap-limit)
+      → stream blocks [start, tip] (chunked, backpressured)
+      → scan_compact → fetch full txs → enrich_memos / scan_sent / scan_transparent
+      → optional scan_commitments
+      → apply(Cursor, Batch)
+reorg  → rewind → double step → re-resume
+transport fault → bounded retry from checkpoint
+```
+
+- **One stream to tip.** Chunk by `DEFAULT_CHUNK_OUTPUTS` or `DEFAULT_CHUNK_BLOCKS`
+  (whichever first). `channel(1)` keeps download one batch ahead of decrypt.
+- **Crash-safe cursor.** `apply` must persist batch + cursor atomically.
+- **Reorgs.** Single detector in `download` (`prev_hash` chain, seeded by seam).
+  `Reorg` → rewind with growing step until seam reconnects.
+- **Two-phase scan.** Compact trial decrypt, then full-tx for memos / sent / t-addrs.
+- **Transparent** rides the same loop (stateless discovery → whole-life window).
+
+## Schema (`db` feature), in one breath
+
+Single-account SQLite (WAL): birthday + sync cursor on `account`; `txs`;
+`sapling_received_notes` / `orchard_received_notes` (nullifier, spend, position,
+memo); transparent UTXOs. Spentness = nullifier / outpoint match.
+
+**Absent by design:** multi-account table, blocks table, `sent_notes` authoring,
+`scan_queue`, `nullifier_map`. Witness tables only under `commitment-tree`.
 
 ## Testing & benches
 
-- **Unit tests** live in `src/db/mod.rs` and the `commitment_tree` module
-  (`cargo test --features commitment-tree`): sync-state round-trips,
-  received-then-spent and rewind on synthetic rows, unmined-spend-doesn't-reduce-
-  balance, and a sqlite-backed witness root that survives reopen. `scan.rs` has
-  offline `scan_commitments` position tests. No network.
-- **Live integration coverage** — none in-tree. If you add it, mind the trap: a
-  window defined as "N blocks back from tip" trails a funded key by hundreds of
-  thousands of blocks, so it scans an empty range and exercises only structural
-  invariants, never the received-note / spend / memo paths. Prefer
-  **deterministic + offline**: gen a UFVK, encrypt a note into a synthetic
-  `CompactBlock`, assert `scan_compact` finds it → `apply` persists it → a later
-  block's nullifier marks it spent.
-- **Bench** (`benches/decrypt.rs`, `cargo bench --bench decrypt`): fetches a live
-  block window *once* in setup, then times `scan_compact` only (no network in the
-  measured loop). Uses a UIVK with **zero mainnet notes** (confirmed — don't
-  re-hunt), so it measures the decrypt hot path, not hit-handling.
+```bash
+cargo test --features db
+cargo test --features db,zns-decrypt
+cargo test --features db,commitment-tree
+cargo check --features db,zns-decrypt --tests --examples
+```
+
+- **Unit / offline:** `src/db.rs` tests, `scan_commitments` position tests,
+  `tests/sync_loop.rs` (mock lightwalletd, synthetic compact blocks).
+- **No live mainnet integration** in-tree. Prefer deterministic offline fixtures.
+- **Bench** `benches/decrypt.rs`: live fetch once in setup, then time
+  `scan_compact` only.
 
 ## Conventions
 
-- Don't reach for module hierarchy to express "A uses B" — reach for a
-  trait/type at the boundary (the `Account` trait is the canonical example).
-- Keep the sans-IO core free of async/network deps so it stays trivially
-  testable (feed it `vec![]` of blocks) and embeddable.
-- **Tight code, comments explain *why* not *what*.** Match the surrounding
-  density; don't narrate the obvious. Discuss structure in prose and converge;
-  don't over-formalize or sprint ahead of the agreed change.
-- Application-specific logic does not belong here — see **General-purpose, and
-  ZNS-blind**.
+1. **Trait at the boundary**, not deeper module hierarchy (`Account` is the model).
+2. **Sans-IO scan stays free of async/network** — feed it `&[CompactBlock]`.
+3. **Tight code; comments explain why, not what.** Match surrounding density.
+4. **Typed errors end-to-end** — associated `Account::Error`, no `Box<dyn Error>`
+   on the engine boundary, no `anyhow`.
+5. **Do not teach the engine ZNS protocol** (names, verbs, prev_rcm). The
+   `zns-decrypt` feature only supplies the decrypt *path*; verification stays
+   in `zns-verify` / the consumer.
+6. **Keep orchard unified** — path + patch to `zns-orchard`; never leave
+   zcash_* on crates.io orchard 0.14 while this crate is on 0.15.
+
+## Out of scope (for now)
+
+- Live mempool (`GetMempoolStream`)
+- Spend / transaction authoring
+- Multi-account wallets
+- Being a drop-in `zcash_client_*` replacement
+```

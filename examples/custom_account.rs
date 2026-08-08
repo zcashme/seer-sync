@@ -5,7 +5,7 @@
 use std::sync::Mutex;
 
 use seer_sync::{
-    chain, run, Account, AccountError, Batch, BlockHeight, Cursor, Network, Nullifier, Pool,
+    chain, run, Account, Batch, BlockHeight, Cursor, Network, Nullifier, Pool,
     Resume, ShieldedNote, ViewKey,
 };
 
@@ -14,6 +14,10 @@ struct Memory {
     state: Mutex<State>,
 }
 
+#[derive(thiserror::Error, Debug)]
+#[error("{0}")]
+struct ExError(String);
+
 #[derive(Default)]
 struct State {
     checkpoint: Option<Cursor>,
@@ -21,7 +25,9 @@ struct State {
 }
 
 impl Account for Memory {
-    fn resume(&self) -> Result<Resume, AccountError> {
+    type Error = ExError;
+
+    fn resume(&self) -> Result<Resume, Self::Error> {
         let s = self.state.lock().unwrap();
         Ok(Resume {
             birthday: self.birthday,
@@ -31,7 +37,7 @@ impl Account for Memory {
         })
     }
 
-    fn rewind(&self, to: BlockHeight) -> Result<(), AccountError> {
+    fn rewind(&self, to: BlockHeight) -> Result<(), Self::Error> {
         let mut s = self.state.lock().unwrap();
         s.unspent.retain(|(.., height)| *height <= to);
         s.checkpoint = Some(Cursor {
@@ -41,7 +47,7 @@ impl Account for Memory {
         Ok(())
     }
 
-    fn apply(&self, at: Cursor, batch: &Batch) -> Result<(), AccountError> {
+    fn apply(&self, at: Cursor, batch: &Batch) -> Result<(), Self::Error> {
         let mut s = self.state.lock().unwrap();
         for note in &batch.notes {
             let value = match &note.note {
@@ -77,7 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         birthday: BlockHeight::from_u32(birthday),
         state: Mutex::default(),
     };
-    let client = chain::connect_auto().await?;
+    let client = chain::connect_auto(Network::MainNetwork).await?;
     let tip = run(client, &key, Network::MainNetwork, &account).await?;
 
     let s = account.state.lock().unwrap();

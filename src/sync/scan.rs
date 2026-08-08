@@ -194,20 +194,23 @@ pub(crate) fn enrich_memos(
                 }
             } else if let Some(bundle) = tx.orchard_bundle() {
                 if let Some(action) = bundle.actions().get(output_index) {
-                    #[cfg(not(feature = "zns-decrypt"))]
-                    {
-                        for o in orchard {
-                            if let Some((.., memo)) = decrypt::try_decrypt_orchard(action, &o.ivk) {
-                                note.memo = Some(memo);
-                                break;
-                            }
+                    // Standard Orchard (ZIP-212 cmx check) first.
+                    let mut got = false;
+                    for o in orchard {
+                        if let Some((.., memo)) = decrypt::try_decrypt_orchard(action, &o.ivk) {
+                            note.memo = Some(memo);
+                            got = true;
+                            break;
                         }
                     }
+                    // Optional Ironwood Name Note path: V3 plaintext, no cmx check.
                     #[cfg(feature = "zns-decrypt")]
-                    {
+                    if !got {
                         for o in orchard {
                             if let Some(fvk) = &o.fvk {
-                                if let Some((.., memo)) = zns_decrypt::try_decrypt_orchard(action, fvk) {
+                                if let Some((.., memo)) =
+                                    zns_decrypt::try_decrypt_ironwood(action, fvk)
+                                {
                                     note.memo = Some(memo);
                                     break;
                                 }
@@ -385,40 +388,45 @@ fn scan_compact_serial(
                 }
             }
 
-            #[cfg(not(feature = "zns-decrypt"))]
-            {
-                let ivks: Vec<_> = orchard.iter().map(|o| o.ivk.clone()).collect();
-                for (i, hit) in decrypt::try_compact_orchard(&ivks, actions)
-                    .into_iter()
-                    .enumerate()
-                {
-                    if let Some((note, _recipient, scope)) = hit {
-                        let (txid, tx_index, output_index) = meta[i];
-                        let nullifier = orchard[scope]
-                            .fvk
-                            .as_ref()
-                            .map(|fvk| Nullifier(note.nullifier(fvk).to_bytes()));
-                        out.push(Note {
-                            note: ShieldedNote::Orchard(note),
-                            height,
-                            txid,
-                            tx_index,
-                            output_index,
-                            nullifier,
-                            memo: None,
-                            is_sent: false,
-                            recipient: None,
-                        });
-                    }
+            // Standard Orchard domain (lead byte 0x02, ZIP-212 cmx check).
+            let ivks: Vec<_> = orchard.iter().map(|o| o.ivk.clone()).collect();
+            let hits = decrypt::try_compact_orchard(&ivks, actions.clone());
+            let mut claimed = vec![false; actions.len()];
+            for (i, hit) in hits.into_iter().enumerate() {
+                if let Some((note, _recipient, scope)) = hit {
+                    claimed[i] = true;
+                    let (txid, tx_index, output_index) = meta[i];
+                    let nullifier = orchard[scope]
+                        .fvk
+                        .as_ref()
+                        .map(|fvk| Nullifier(note.nullifier(fvk).to_bytes()));
+                    out.push(Note {
+                        note: ShieldedNote::Orchard(note),
+                        height,
+                        txid,
+                        tx_index,
+                        output_index,
+                        nullifier,
+                        memo: None,
+                        is_sent: false,
+                        recipient: None,
+                    });
                 }
             }
 
+            // Ironwood Name Notes (lead byte 0x03, relaxed cmx): only try
+            // actions the standard path did not claim.
             #[cfg(feature = "zns-decrypt")]
             {
                 let fvks: Vec<_> = orchard.iter().filter_map(|o| o.fvk.clone()).collect();
                 for (i, act) in actions.iter().enumerate() {
+                    if claimed[i] {
+                        continue;
+                    }
                     for (scope, fvk) in fvks.iter().enumerate() {
-                        if let Some((note, _recipient)) = zns_decrypt::try_compact_orchard(fvk, act) {
+                        if let Some((note, _recipient)) =
+                            zns_decrypt::try_compact_ironwood(fvk, act)
+                        {
                             let (txid, tx_index, output_index) = meta[i];
                             let nullifier = orchard[scope]
                                 .fvk

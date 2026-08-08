@@ -1,8 +1,8 @@
-//! Seer-Sycn: View-key-only Zcash chain sync.
+//! Seer-Sync: view-key-only Zcash chain sync for the Ironwood era.
 //!
-//! Takes either a Unified Incoming Viewing Key (UIVK) or Unified Full Viewing Key (UFVK) and accurately
-//! track every note and spend you can see, using only compact blocks from
-//! lightwalletd.
+//! Takes either a Unified Incoming Viewing Key (UIVK) or Unified Full Viewing Key
+//! (UFVK) and accurately tracks every note and spend you can see, using only
+//! compact blocks from lightwalletd.
 //!
 //! ## Example
 //!
@@ -32,7 +32,7 @@ pub use sync::scan::{
     scan_commitments, scan_compact, Commitment, Note, Nullifier, Pool, ShieldedNote, Spend,
     TransparentOutput, TransparentSpend,
 };
-pub use sync::{run, Account, AccountError, Batch, Cursor, Resume, SyncError};
+pub use sync::{run, Account, Batch, Cursor, Resume, SyncError};
 
 /// Parse a compact Orchard action into a decryptable [`orchard`] action —
 /// the out-of-band decrypt hook zns-verify builds on.
@@ -50,9 +50,9 @@ pub async fn sync(
     network: Network,
     birthday: BlockHeight,
     db: &db::Db,
-) -> Result<Option<Cursor>, SyncError> {
-    db.set_birthday(u32::from(birthday))
-        .map_err(|e| SyncError::Account(Box::new(e)))?;
-    let client = chain::connect_auto().await?;
+) -> Result<Option<Cursor>, SyncError<db::DbError>> {
+    db.set_birthday(birthday)
+        .map_err(|e| SyncError::Account(e.into()))?;
+    let client = chain::connect_auto(network).await?;
     run(client, key, network, db).await
 }

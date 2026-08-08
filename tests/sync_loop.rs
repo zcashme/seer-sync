@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use orchard::keys::FullViewingKey;
-use orchard::note::{ExtractedNoteCommitment, RandomSeed, Rho};
+use orchard::note::{ExtractedNoteCommitment, NoteVersion, RandomSeed, Rho};
 use orchard::note_encryption::{OrchardDomain, OrchardNoteEncryption};
 use orchard::value::NoteValue;
 use seer_sync::proto::compact_tx_streamer_server::{CompactTxStreamer, CompactTxStreamerServer};
@@ -16,7 +16,7 @@ use seer_sync::proto::{
 };
 use seer_sync::chain::LwdClient;
 use seer_sync::{
-    run, Account, AccountError, Batch, BlockHash, BlockHeight, Cursor, Network, Nullifier, Pool,
+    run, Account, Batch, BlockHash, BlockHeight, Cursor, Network, Nullifier, Pool,
     Resume, ShieldedNote, SyncError, ViewKey,
 };
 use std::collections::HashMap;
@@ -71,6 +71,7 @@ fn forge_note(addr: orchard::Address, value: u64, spent_nf: [u8; 32]) -> orchard
                 NoteValue::from_raw(value),
                 rho,
                 rseed,
+                NoteVersion::V2,
             ))
         })
         .expect("forgeable note")
@@ -512,8 +513,15 @@ impl RecordingAccount {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+#[error("{0}")]
+struct TestError(String);
+impl From<&str> for TestError { fn from(s: &str) -> Self { TestError(s.to_string()) } }
+
 impl Account for RecordingAccount {
-    fn resume(&self) -> Result<Resume, AccountError> {
+    type Error = TestError;
+
+    fn resume(&self) -> Result<Resume, Self::Error> {
         let s = self.state.lock().unwrap();
         Ok(Resume {
             birthday: BlockHeight::from_u32(s.birthday),
@@ -534,7 +542,7 @@ impl Account for RecordingAccount {
         })
     }
 
-    fn rewind(&self, to: BlockHeight) -> Result<(), AccountError> {
+    fn rewind(&self, to: BlockHeight) -> Result<(), Self::Error> {
         let to = u32::from(to);
         let mut s = self.state.lock().unwrap();
         s.events.push(Event::Rewind(to));
@@ -545,7 +553,7 @@ impl Account for RecordingAccount {
         Ok(())
     }
 
-    fn apply(&self, at: Cursor, batch: &Batch) -> Result<(), AccountError> {
+    fn apply(&self, at: Cursor, batch: &Batch) -> Result<(), Self::Error> {
         if self.fail_apply {
             return Err("account exploded".into());
         }
@@ -610,7 +618,7 @@ async fn sync_with(
     account: &RecordingAccount,
     keys: &ViewKey,
     birthday: u32,
-) -> (Result<Option<Cursor>, SyncError>, Arc<FakeLwd>) {
+) -> (Result<Option<Cursor>, SyncError<<RecordingAccount as Account>::Error>>, Arc<FakeLwd>) {
     let (client, fake) = serve(fake).await;
     account.state.lock().unwrap().birthday = birthday;
     let res = run(client, keys, Network::MainNetwork, account).await;

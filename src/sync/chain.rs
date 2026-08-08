@@ -3,6 +3,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_primitives::block::BlockHash;
+use zcash_protocol::consensus::{BlockHeight, Network};
 use zcash_protocol::TxId;
 
 use crate::proto::{
@@ -10,19 +11,29 @@ use crate::proto::{
     CompactBlock, RawTransaction, TransparentAddressBlockFilter, TxFilter,
 };
 
-pub const DEFAULT_SERVERS: &[&str] = &[
+pub const DEFAULT_MAINNET_SERVERS: &[&str] = &[
     "https://zec.rocks:443",
     "https://na.zec.rocks:443",
     "https://eu.zec.rocks:443",
     "https://ap.zec.rocks:443",
 ];
 
+pub const DEFAULT_TESTNET_SERVERS: &[&str] = &["https://testnet.zec.rocks:443"];
+
+/// The built-in lightwalletd server list for `network`.
+pub fn default_servers(network: Network) -> &'static [&'static str] {
+    match network {
+        Network::MainNetwork => DEFAULT_MAINNET_SERVERS,
+        Network::TestNetwork => DEFAULT_TESTNET_SERVERS,
+    }
+}
+
 pub type LwdClient = CompactTxStreamerClient<Channel>;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ChainError {
     #[error("chain reorg at height {0}")]
-    Reorg(u32),
+    Reorg(BlockHeight),
     #[error("lightwalletd RPC: {0}")]
     Rpc(#[from] tonic::Status),
     #[error("connecting to lightwalletd: {0}")]
@@ -44,9 +55,10 @@ pub async fn connect(url: &str) -> Result<LwdClient, ChainError> {
     Ok(CompactTxStreamerClient::new(endpoint))
 }
 
-pub async fn connect_auto() -> Result<LwdClient, ChainError> {
+pub async fn connect_auto(network: Network) -> Result<LwdClient, ChainError> {
+    let servers = default_servers(network);
     let mut errors = Vec::new();
-    for &url in DEFAULT_SERVERS {
+    for &url in servers {
         match connect(url).await {
             Ok(mut client) => match tip_height(&mut client).await {
                 Ok(_) => return Ok(client),
@@ -56,22 +68,22 @@ pub async fn connect_auto() -> Result<LwdClient, ChainError> {
         }
     }
     Err(ChainError::NoServer {
-        tried: DEFAULT_SERVERS.len(),
+        tried: servers.len(),
         detail: errors.join("\n"),
     })
 }
 
-pub async fn tip_height(client: &mut LwdClient) -> Result<u32, ChainError> {
+pub async fn tip_height(client: &mut LwdClient) -> Result<BlockHeight, ChainError> {
     Ok(tip(client).await?.0)
 }
 
-pub async fn tip(client: &mut LwdClient) -> Result<(u32, Option<[u8; 32]>), ChainError> {
+pub async fn tip(client: &mut LwdClient) -> Result<(BlockHeight, Option<BlockHash>), ChainError> {
     let block = client
         .get_latest_block(tonic::Request::new(ChainSpec {}))
         .await?
         .into_inner();
-    let height = u32::try_from(block.height).map_err(|_| ChainError::TipOverflow)?;
-    let hash = block.hash[..].try_into().ok();
+    let height = BlockHeight::from_u32(u32::try_from(block.height).map_err(|_| ChainError::TipOverflow)?);
+    let hash = block.hash[..].try_into().ok().map(BlockHash);
     Ok((height, hash))
 }
 
@@ -81,14 +93,23 @@ pub const DEFAULT_CHUNK_BLOCKS: usize = 1_000;
 
 pub fn blocks(
     client: LwdClient,
-    from: u32,
-    to: u32,
+    from: BlockHeight,
+    to: BlockHeight,
     max_outputs: usize,
     prev_hash: Option<BlockHash>,
 ) -> impl Stream<Item = Result<Vec<CompactBlock>, ChainError>> {
     let (tx, rx) = mpsc::channel(1);
     tokio::spawn(async move {
-        if let Err(e) = download(client, from, to, max_outputs, prev_hash, &tx).await {
+        if let Err(e) = download(
+            client,
+            u32::from(from),
+            u32::from(to),
+            max_outputs,
+            prev_hash,
+            &tx,
+        )
+        .await
+        {
             tx.send(Err(e)).await.ok();
         }
     });
@@ -128,7 +149,7 @@ async fn download(
 
         if let Some(ref ph) = prev_hash {
             if !block.prev_hash.is_empty() && &block.prev_hash != ph {
-                return Err(ChainError::Reorg(block.height as u32));
+                return Err(ChainError::Reorg(BlockHeight::from_u32(block.height as u32)));
             }
         }
         prev_hash = Some(block.hash.clone());
@@ -163,14 +184,20 @@ async fn download(
 pub async fn fetch_taddress_transactions(
     client: &mut LwdClient,
     address: String,
-    from: u32,
-    to: u32,
+    from: BlockHeight,
+    to: BlockHeight,
 ) -> Result<Vec<RawTransaction>, ChainError> {
     let filter = TransparentAddressBlockFilter {
         address,
         range: Some(BlockRange {
-            start: Some(BlockId { height: from as u64, hash: vec![] }),
-            end: Some(BlockId { height: to as u64, hash: vec![] }),
+            start: Some(BlockId {
+                height: u64::from(u32::from(from)),
+                hash: vec![],
+            }),
+            end: Some(BlockId {
+                height: u64::from(u32::from(to)),
+                hash: vec![],
+            }),
             pool_types: vec![],
         }),
     };

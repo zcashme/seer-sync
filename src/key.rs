@@ -49,7 +49,9 @@ pub(crate) struct SaplingIncoming {
 }
 
 pub(crate) struct OrchardIncoming {
+    /// Prepared IVK for standard Orchard (and standard Ironwood) trial decryption.
     pub ivk: OrchardPreparedIvk,
+    /// Full viewing key when the encoding is a UFVK — nullifiers + ZNS Ironwood path.
     pub fvk: Option<OrchardFvk>,
 }
 

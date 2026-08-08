@@ -18,16 +18,31 @@ use zcash_transparent::bundle::OutPoint;
 
 const MAX_TRANSPORT_RETRIES: usize = 4;
 
-pub type AccountError = Box<dyn std::error::Error + Send + Sync>;
-
+/// Engine-level failure. The account error type is preserved (not boxed) so
+/// consumers can match on their own error enum without downcasting.
+///
+/// `From<ChainError>` / `From<KeyError>` are hand-written: `thiserror`'s
+/// `#[from]` does not emit those impls for a generic enum.
 #[derive(thiserror::Error, Debug)]
-pub enum SyncError {
+pub enum SyncError<E> {
     #[error(transparent)]
-    Chain(#[from] ChainError),
+    Chain(ChainError),
     #[error(transparent)]
-    Key(#[from] crate::key::KeyError),
-    #[error("account: {0}")]
-    Account(#[source] AccountError),
+    Key(crate::key::KeyError),
+    #[error(transparent)]
+    Account(E),
+}
+
+impl<E> From<ChainError> for SyncError<E> {
+    fn from(err: ChainError) -> Self {
+        Self::Chain(err)
+    }
+}
+
+impl<E> From<crate::key::KeyError> for SyncError<E> {
+    fn from(err: crate::key::KeyError) -> Self {
+        Self::Key(err)
+    }
 }
 
 /// A position on the chain: a fully applied height and its block hash.
@@ -80,18 +95,20 @@ pub struct Batch {
 /// state, each [`Account::apply`] folds in one `(Cursor, Batch)` pair, and
 /// [`Account::rewind`] is the undo.
 pub trait Account {
+    type Error: std::error::Error + Send + Sync + 'static;
+
     /// Where this account stands and what it is watching. Called once per
     /// pass — at engine start and again after every rewind or transport
     /// retry.
-    fn resume(&self) -> Result<Resume, AccountError>;
+    fn resume(&self) -> Result<Resume, Self::Error>;
 
     /// Truncate all state above `to`: notes, spend marks, and the checkpoint.
     /// Called when the chain reorganizes below the cursor.
-    fn rewind(&self, to: BlockHeight) -> Result<(), AccountError>;
+    fn rewind(&self, to: BlockHeight) -> Result<(), Self::Error>;
 
     /// Fold one batch into the account. The batch and its cursor must be
     /// persisted atomically — together or not at all.
-    fn apply(&self, at: Cursor, batch: &Batch) -> Result<(), AccountError>;
+    fn apply(&self, at: Cursor, batch: &Batch) -> Result<(), Self::Error>;
 
     /// Opt into the Orchard commitment firehose ([`Batch::commitments`]).
     /// Off by default: only consumers building note-commitment-tree witnesses
@@ -109,9 +126,9 @@ pub async fn run<A: Account>(
     keys: &ViewKey,
     network: Network,
     account: &A,
-) -> Result<Option<Cursor>, SyncError> {
+) -> Result<Option<Cursor>, SyncError<A::Error>> {
     let mut fetch_client = client.clone();
-    let tip = BlockHeight::from_u32(chain::tip_height(&mut fetch_client).await?);
+    let tip = chain::tip_height(&mut fetch_client).await?;
 
     let mut rewind_by: u32 = 1;
     let mut transport_attempts: usize = 0;
@@ -143,22 +160,11 @@ pub async fn run<A: Account>(
         // (see `transparent::discover`); targets already below `start` are
         // simply never reached by the stream. No-op for keys without a
         // transparent component.
-        let transparent = transparent::discover(
-            &mut fetch_client,
-            keys,
-            &network,
-            u32::from(birthday),
-            u32::from(tip),
-        )
-        .await?;
+        let transparent =
+            transparent::discover(&mut fetch_client, keys, &network, birthday, tip).await?;
 
-        let mut stream = chain::blocks(
-            client.clone(),
-            u32::from(start),
-            u32::from(tip),
-            DEFAULT_CHUNK_OUTPUTS,
-            seam,
-        );
+        let mut stream =
+            chain::blocks(client.clone(), start, tip, DEFAULT_CHUNK_OUTPUTS, seam);
 
         loop {
             let Some(item) = stream.next().await else {
@@ -168,7 +174,9 @@ pub async fn run<A: Account>(
                 Ok(blocks) => {
                     let Some(last_block) = blocks.last() else { continue };
                     let height = BlockHeight::from_u32(last_block.height as u32);
-                    let hash = <[u8; 32]>::try_from(&last_block.hash[..]).ok().map(BlockHash);
+                    let hash = <[u8; 32]>::try_from(&last_block.hash[..])
+                        .ok()
+                        .map(BlockHash);
 
                     let CompactScan {
                         notes: incoming,
@@ -185,11 +193,13 @@ pub async fn run<A: Account>(
                         .filter(|s| watched_nfs.contains(&(s.pool, s.nf)))
                         .collect();
 
-                    let first = blocks.first().map_or(u32::from(height), |b| b.height as u32);
+                    let first = blocks
+                        .first()
+                        .map_or(height, |b| BlockHeight::from_u32(b.height as u32));
                     let batch_targets: HashSet<TxId> = transparent
                         .targets
                         .iter()
-                        .filter(|(_, h)| (first..=u32::from(height)).contains(h))
+                        .filter(|(_, h)| (first..=height).contains(h))
                         .map(|(txid, _)| *txid)
                         .collect();
 
@@ -259,9 +269,9 @@ pub async fn run<A: Account>(
                     rewind_by = 1;
                 }
                 Err(ChainError::Reorg(at)) => {
-                    account
-                        .rewind(BlockHeight::from_u32(at.saturating_sub(rewind_by)))
-                        .map_err(SyncError::Account)?;
+                    let rewind_to =
+                        BlockHeight::from_u32(u32::from(at).saturating_sub(rewind_by));
+                    account.rewind(rewind_to).map_err(SyncError::Account)?;
                     rewind_by = rewind_by.saturating_mul(2);
                     break;
                 }

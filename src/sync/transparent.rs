@@ -16,7 +16,7 @@ pub(crate) struct Discovery {
     /// output matching during the scan.
     pub addresses: HashMap<TransparentAddress, String>,
     /// txid → mined height of every transaction touching those addresses.
-    pub targets: HashMap<TxId, u32>,
+    pub targets: HashMap<TxId, BlockHeight>,
 }
 
 /// Walk each scope's BIP-44 address chain, asking the server which
@@ -32,8 +32,8 @@ pub(crate) async fn discover(
     client: &mut LwdClient,
     key: &ViewKey,
     network: &Network,
-    from: u32,
-    to: u32,
+    from: BlockHeight,
+    to: BlockHeight,
 ) -> Result<Discovery, ChainError> {
     let mut found = Discovery::default();
     let Some(t) = key.transparent.as_ref() else {
@@ -61,7 +61,7 @@ pub(crate) async fn discover(
                     ) else {
                         continue;
                     };
-                    found.targets.insert(tx.txid(), raw.height as u32);
+                    found.targets.insert(tx.txid(), height);
                 }
             }
             found.addresses.insert(addr, encoded);
