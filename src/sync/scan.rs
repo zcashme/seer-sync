@@ -195,17 +195,14 @@ pub(crate) fn enrich_memos(
             } else if let Some(bundle) = tx.orchard_bundle() {
                 if let Some(action) = bundle.actions().get(output_index) {
                     // Standard Orchard (ZIP-212 cmx check) first.
-                    let mut got = false;
-                    for o in orchard {
-                        if let Some((.., memo)) = decrypt::try_decrypt_orchard(action, &o.ivk) {
-                            note.memo = Some(memo);
-                            got = true;
-                            break;
-                        }
-                    }
-                    // Optional Ironwood Name Note path: V3 plaintext, no cmx check.
-                    #[cfg(feature = "zns-decrypt")]
-                    if !got {
+                    let standard = orchard.iter().find_map(|o| {
+                        decrypt::try_decrypt_orchard(action, &o.ivk).map(|(.., memo)| memo)
+                    });
+                    if let Some(memo) = standard {
+                        note.memo = Some(memo);
+                    } else {
+                        // Optional Ironwood Name Note path: V3 plaintext, no cmx check.
+                        #[cfg(feature = "zns-decrypt")]
                         for o in orchard {
                             if let Some(fvk) = &o.fvk {
                                 if let Some((.., memo)) =
