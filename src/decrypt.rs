@@ -1,6 +1,6 @@
 use orchard::{
     keys::OutgoingViewingKey as OrchardOvk,
-    note_encryption::{CompactAction, OrchardDomain},
+    note_encryption::{CompactAction, IronwoodDomain, OrchardDomain},
     Action,
 };
 
@@ -47,6 +47,20 @@ pub(crate) fn try_compact_orchard(
         .collect()
 }
 
+pub(crate) fn try_compact_ironwood(
+    ivks: &[OrchardPreparedIvk],
+    actions: Vec<CompactAction>,
+) -> Vec<Option<(orchard::Note, orchard::Address, usize)>> {
+    let inputs: Vec<(IronwoodDomain, CompactAction)> = actions
+        .into_iter()
+        .map(|a| (IronwoodDomain::for_compact_action(&a), a))
+        .collect();
+    batch::try_compact_note_decryption(ivks, &inputs)
+        .into_iter()
+        .map(|hit| hit.map(|((note, recipient), ivk)| (note, recipient, ivk)))
+        .collect()
+}
+
 pub(crate) fn parse_sapling(p: &CompactSaplingOutput) -> Option<CompactOutputDescription> {
     let cmu_bytes: [u8; 32] = p.cmu[..].try_into().ok()?;
     let cmu = Option::from(sapling::note::ExtractedNoteCommitment::from_bytes(
@@ -83,6 +97,15 @@ pub fn try_decrypt_orchard<A>(
     Some((note, recipient, MemoBytes::from_bytes(&memo).unwrap()))
 }
 
+pub fn try_decrypt_ironwood<A>(
+    action: &Action<A>,
+    ivk: &OrchardPreparedIvk,
+) -> Option<(orchard::Note, orchard::Address, MemoBytes)> {
+    let (note, recipient, memo) =
+        try_note_decryption(&IronwoodDomain::for_action(action), ivk, action)?;
+    Some((note, recipient, MemoBytes::from_bytes(&memo).unwrap()))
+}
+
 pub fn try_decrypt_sapling<Proof>(
     output: &OutputDescription<Proof>,
     ivk: &SaplingPreparedIvk,
@@ -98,6 +121,20 @@ pub(crate) fn try_decrypt_orchard_sent<A>(
 ) -> Option<(orchard::Note, orchard::Address, MemoBytes)> {
     let (note, recipient, memo) = try_output_recovery_with_ovk(
         &OrchardDomain::for_action(action),
+        ovk,
+        action,
+        action.cv_net(),
+        &action.encrypted_note().out_ciphertext,
+    )?;
+    Some((note, recipient, MemoBytes::from_bytes(&memo).unwrap()))
+}
+
+pub(crate) fn try_decrypt_ironwood_sent<A>(
+    action: &Action<A>,
+    ovk: &OrchardOvk,
+) -> Option<(orchard::Note, orchard::Address, MemoBytes)> {
+    let (note, recipient, memo) = try_output_recovery_with_ovk(
+        &IronwoodDomain::for_action(action),
         ovk,
         action,
         action.cv_net(),

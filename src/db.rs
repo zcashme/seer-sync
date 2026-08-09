@@ -89,6 +89,29 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
             CREATE INDEX IF NOT EXISTS idx_orchard_received_notes_nf
                 ON orchard_received_notes (nf) WHERE nf IS NOT NULL;
 
+            CREATE TABLE IF NOT EXISTS ironwood_received_notes (
+                id                       INTEGER PRIMARY KEY,
+                transaction_id           INTEGER NOT NULL
+                    REFERENCES txs(id_tx) ON DELETE CASCADE,
+                action_index             INTEGER NOT NULL,
+                diversifier              BLOB    NOT NULL,
+                value                    INTEGER NOT NULL,
+                rho                      BLOB    NOT NULL,
+                rseed                    BLOB    NOT NULL,
+                nf                       BLOB    UNIQUE,
+                memo                     BLOB,
+                commitment_tree_position INTEGER,
+                spent_tx                 INTEGER
+                    REFERENCES txs(id_tx) ON DELETE SET NULL,
+                is_sent                  INTEGER NOT NULL DEFAULT 0,
+                recipient_address        TEXT,
+                UNIQUE (transaction_id, action_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_ironwood_received_notes_tx
+                ON ironwood_received_notes (transaction_id);
+            CREATE INDEX IF NOT EXISTS idx_ironwood_received_notes_nf
+                ON ironwood_received_notes (nf) WHERE nf IS NOT NULL;
+
             CREATE TABLE IF NOT EXISTS transparent_received_outputs (
                 id             INTEGER PRIMARY KEY,
                 transaction_id INTEGER NOT NULL
@@ -108,7 +131,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
             -- shielding direction, memo, and recipients, derived from the
             -- note/output tables so it can never disagree with them. `txs` is
             -- the storage spine; this is what humans and consumers read.
-            CREATE VIEW IF NOT EXISTS transactions AS
+            DROP VIEW IF EXISTS transactions;
+            CREATE VIEW transactions AS
             SELECT
                 t.txid,
                 t.mined_height,
@@ -117,6 +141,8 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
                   WHERE transaction_id = t.id_tx AND is_sent = 0)
               + (SELECT COALESCE(SUM(value), 0) FROM orchard_received_notes
                   WHERE transaction_id = t.id_tx AND is_sent = 0)
+              + (SELECT COALESCE(SUM(value), 0) FROM ironwood_received_notes
+                  WHERE transaction_id = t.id_tx AND is_sent = 0)
               + (SELECT COALESCE(SUM(value), 0) FROM transparent_received_outputs
                   WHERE transaction_id = t.id_tx)
                     AS received,
@@ -124,10 +150,14 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
                   WHERE transaction_id = t.id_tx AND is_sent = 1)
               + (SELECT COALESCE(SUM(value), 0) FROM orchard_received_notes
                   WHERE transaction_id = t.id_tx AND is_sent = 1)
+              + (SELECT COALESCE(SUM(value), 0) FROM ironwood_received_notes
+                  WHERE transaction_id = t.id_tx AND is_sent = 1)
                     AS sent,
                 (SELECT COALESCE(SUM(value), 0) FROM sapling_received_notes
                   WHERE spent_tx = t.id_tx)
               + (SELECT COALESCE(SUM(value), 0) FROM orchard_received_notes
+                  WHERE spent_tx = t.id_tx)
+              + (SELECT COALESCE(SUM(value), 0) FROM ironwood_received_notes
                   WHERE spent_tx = t.id_tx)
               + (SELECT COALESCE(SUM(value), 0) FROM transparent_received_outputs
                   WHERE spent_tx = t.id_tx)
@@ -138,6 +168,9 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
                 EXISTS(SELECT 1 FROM orchard_received_notes
                         WHERE transaction_id = t.id_tx OR spent_tx = t.id_tx)
                     AS orchard,
+                EXISTS(SELECT 1 FROM ironwood_received_notes
+                        WHERE transaction_id = t.id_tx OR spent_tx = t.id_tx)
+                    AS ironwood,
                 EXISTS(SELECT 1 FROM transparent_received_outputs
                         WHERE transaction_id = t.id_tx OR spent_tx = t.id_tx)
                     AS transparent,
@@ -147,19 +180,25 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
                      AND (EXISTS(SELECT 1 FROM sapling_received_notes
                                   WHERE transaction_id = t.id_tx)
                        OR EXISTS(SELECT 1 FROM orchard_received_notes
+                                  WHERE transaction_id = t.id_tx)
+                       OR EXISTS(SELECT 1 FROM ironwood_received_notes
                                   WHERE transaction_id = t.id_tx))
                         THEN 'shielding'
                     WHEN (EXISTS(SELECT 1 FROM sapling_received_notes
                                   WHERE spent_tx = t.id_tx)
                        OR EXISTS(SELECT 1 FROM orchard_received_notes
+                                  WHERE spent_tx = t.id_tx)
+                       OR EXISTS(SELECT 1 FROM ironwood_received_notes
                                   WHERE spent_tx = t.id_tx))
                      AND EXISTS(SELECT 1 FROM transparent_received_outputs
                                  WHERE transaction_id = t.id_tx)
                         THEN 'deshielding'
                     WHEN NOT EXISTS(SELECT 1 FROM sapling_received_notes
                                      WHERE transaction_id = t.id_tx OR spent_tx = t.id_tx)
-                     AND NOT EXISTS(SELECT 1 FROM orchard_received_notes
-                                     WHERE transaction_id = t.id_tx OR spent_tx = t.id_tx)
+                    AND NOT EXISTS(SELECT 1 FROM orchard_received_notes
+                                    WHERE transaction_id = t.id_tx OR spent_tx = t.id_tx)
+                    AND NOT EXISTS(SELECT 1 FROM ironwood_received_notes
+                                    WHERE transaction_id = t.id_tx OR spent_tx = t.id_tx)
                         THEN 'transparent'
                     ELSE 'shielded'
                 END AS kind,
@@ -168,6 +207,9 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
                      WHERE transaction_id = t.id_tx AND memo IS NOT NULL
                     UNION ALL
                     SELECT memo FROM orchard_received_notes
+                     WHERE transaction_id = t.id_tx AND memo IS NOT NULL
+                    UNION ALL
+                    SELECT memo FROM ironwood_received_notes
                      WHERE transaction_id = t.id_tx AND memo IS NOT NULL)
                  LIMIT 1)
                     AS memo,
@@ -176,6 +218,9 @@ fn init(conn: &Connection) -> rusqlite::Result<()> {
                      WHERE transaction_id = t.id_tx AND recipient_address IS NOT NULL
                     UNION ALL
                     SELECT recipient_address FROM orchard_received_notes
+                     WHERE transaction_id = t.id_tx AND recipient_address IS NOT NULL
+                    UNION ALL
+                    SELECT recipient_address FROM ironwood_received_notes
                      WHERE transaction_id = t.id_tx AND recipient_address IS NOT NULL))
                     AS recipients
             FROM txs t;
@@ -195,6 +240,7 @@ pub struct SyncState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolBalance {
     pub orchard: Zatoshis,
+    pub ironwood: Zatoshis,
     pub sapling: Zatoshis,
     pub transparent: Zatoshis,
 }
@@ -203,6 +249,7 @@ impl Default for PoolBalance {
     fn default() -> Self {
         PoolBalance {
             orchard: Zatoshis::ZERO,
+            ironwood: Zatoshis::ZERO,
             sapling: Zatoshis::ZERO,
             transparent: Zatoshis::ZERO,
         }
@@ -211,7 +258,8 @@ impl Default for PoolBalance {
 
 impl PoolBalance {
     pub fn total(&self) -> Zatoshis {
-        ((self.orchard + self.sapling).and_then(|s| s + self.transparent))
+        (((self.orchard + self.ironwood).and_then(|s| s + self.sapling))
+            .and_then(|s| s + self.transparent))
             .expect("summed pool balances exceed MAX_MONEY")
     }
 }
@@ -292,20 +340,22 @@ pub struct TxRow {
     pub spent: Zatoshis,
     pub sapling: bool,
     pub orchard: bool,
+    pub ironwood: bool,
     pub transparent: bool,
     pub kind: TxKind,
     pub memo: Option<Vec<u8>>,
     pub recipients: Option<String>,
 }
 
-/// The two shielded note tables are twins; every per-pool statement is written
+/// The shielded note tables are twins; every per-pool statement is written
 /// once and parameterized by [`Pool`], iterating [`POOLS`].
-const POOLS: [Pool; 2] = [Pool::Sapling, Pool::Orchard];
+const POOLS: [Pool; 3] = [Pool::Sapling, Pool::Orchard, Pool::Ironwood];
 
 fn note_table(pool: Pool) -> &'static str {
     match pool {
         Pool::Sapling => "sapling_received_notes",
         Pool::Orchard => "orchard_received_notes",
+        Pool::Ironwood => "ironwood_received_notes",
     }
 }
 
@@ -313,6 +363,7 @@ fn index_col(pool: Pool) -> &'static str {
     match pool {
         Pool::Sapling => "output_index",
         Pool::Orchard => "action_index",
+        Pool::Ironwood => "action_index",
     }
 }
 
@@ -454,12 +505,26 @@ impl Db {
     }
 
     pub fn insert_orchard_note(&self, n: &OrchardNoteInsert<'_>) -> rusqlite::Result<()> {
+        self.insert_orchard_like_note("orchard_received_notes", n)
+    }
+
+    pub fn insert_ironwood_note(&self, n: &OrchardNoteInsert<'_>) -> rusqlite::Result<()> {
+        self.insert_orchard_like_note("ironwood_received_notes", n)
+    }
+
+    fn insert_orchard_like_note(
+        &self,
+        table: &str,
+        n: &OrchardNoteInsert<'_>,
+    ) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO orchard_received_notes(
+            &format!(
+                "INSERT INTO {table}(
                 transaction_id, action_index, diversifier, value, rho, rseed, nf,
                 memo, commitment_tree_position, is_sent, recipient_address)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
-             ON CONFLICT(transaction_id, action_index) DO NOTHING",
+             ON CONFLICT(transaction_id, action_index) DO NOTHING"
+            ),
             params![
                 n.transaction_id,
                 n.action_index,
@@ -531,6 +596,7 @@ impl Db {
         Ok(PoolBalance {
             sapling: shielded(Pool::Sapling)?,
             orchard: shielded(Pool::Orchard)?,
+            ironwood: shielded(Pool::Ironwood)?,
             transparent: self.unspent_sum(
                 "SELECT COALESCE(SUM(value), 0) FROM transparent_received_outputs
                  WHERE spent_tx IS NULL",
@@ -588,7 +654,7 @@ impl Db {
     pub fn transactions(&self) -> rusqlite::Result<Vec<TxRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT txid, mined_height, tx_index, received, sent, spent,
-                    sapling, orchard, transparent, kind, memo, recipients
+                    sapling, orchard, ironwood, transparent, kind, memo, recipients
              FROM transactions
              ORDER BY mined_height IS NULL, mined_height, tx_index",
         )?;
@@ -602,10 +668,11 @@ impl Db {
                 spent: zatoshis(row.get(5)?),
                 sapling: row.get(6)?,
                 orchard: row.get(7)?,
-                transparent: row.get(8)?,
-                kind: tx_kind(&row.get::<_, String>(9)?),
-                memo: row.get(10)?,
-                recipients: row.get(11)?,
+                ironwood: row.get(8)?,
+                transparent: row.get(9)?,
+                kind: tx_kind(&row.get::<_, String>(10)?),
+                memo: row.get(11)?,
+                recipients: row.get(12)?,
             })
         })?;
         rows.collect()
@@ -712,6 +779,19 @@ impl Account for Db {
                     // REVIEW: dead column for this impl — it never opts into
                     // commitments; drop it from the schema or wire
                     // wants_commitments in the db-module pass.
+                    commitment_tree_position: None,
+                    is_sent: note.is_sent,
+                    recipient_address: note.recipient.as_deref(),
+                })?,
+                ShieldedNote::Ironwood(n) => self.insert_ironwood_note(&OrchardNoteInsert {
+                    transaction_id: id,
+                    action_index: note.output_index,
+                    diversifier: n.recipient().diversifier().as_array(),
+                    value: n.value().inner(),
+                    rho: &n.rho().to_bytes(),
+                    rseed: n.rseed().as_bytes(),
+                    nf: note.nullifier.as_ref().map(|nf| nf.0.as_slice()),
+                    memo: note.memo.as_ref().map(|m| m.as_slice()),
                     commitment_tree_position: None,
                     is_sent: note.is_sent,
                     recipient_address: note.recipient.as_deref(),
@@ -1021,8 +1101,7 @@ mod tests {
 
         // t-funds arrive, then get spent into an orchard note: shielding.
         let funding = mined_tx(&db, &[1u8; 32], 100);
-        db.insert_transparent_output(funding, 0, "t1example", &[0x76], 2_000_000)
-            .unwrap();
+        db.insert_transparent_output(funding, 0, "t1example", &[0x76], 2_000_000).unwrap();
         let shield = mined_tx(&db, &[2u8; 32], 110);
         db.mark_transparent_spent(&[1u8; 32], 0, shield).unwrap();
         db.insert_orchard_note(&OrchardNoteInsert {
@@ -1058,7 +1137,8 @@ mod tests {
     fn transparent_output_received_spent_and_rewound() {
         let db = Db::open_in_memory().unwrap();
         let funding = mined_tx(&db, &[5u8; 32], 100);
-        db.insert_transparent_output(funding, 0, "t1example", &[0x76], 2_000_000).unwrap();
+        db.insert_transparent_output(funding, 0, "t1example", &[0x76], 2_000_000)
+            .unwrap();
 
         let balance = db.balance().unwrap();
         assert_eq!(balance.transparent, Zatoshis::const_from_u64(2_000_000));

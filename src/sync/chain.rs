@@ -157,7 +157,7 @@ async fn download(
         let block_outputs: usize = block
             .vtx
             .iter()
-            .map(|t| t.outputs.len() + t.actions.len())
+            .map(|t| t.outputs.len() + t.actions.len() + t.ironwood_actions.len())
             .sum();
 
         let chunk_full =

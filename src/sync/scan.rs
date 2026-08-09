@@ -13,20 +13,22 @@ use crate::key::{
     encode_orchard_recipient, encode_sapling_recipient, OrchardIncoming, SaplingIncoming,
 };
 
-#[cfg(feature = "zns-decrypt")]
-use zns_verify::decrypt as zns_decrypt;
 use crate::proto::{CompactBlock, CompactTx, RawTransaction};
 use crate::ViewKey;
+#[cfg(feature = "zns-decrypt")]
+use zns_verify::decrypt as zns_decrypt;
 
 pub enum ShieldedNote {
     Sapling(sapling::Note),
     Orchard(orchard::Note),
+    Ironwood(orchard::Note),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pool {
     Sapling,
     Orchard,
+    Ironwood,
 }
 
 /// A revealed nullifier: 32 bytes whose appearance on chain spends a note.
@@ -52,6 +54,7 @@ impl Note {
         match self.note {
             ShieldedNote::Sapling(_) => Pool::Sapling,
             ShieldedNote::Orchard(_) => Pool::Orchard,
+            ShieldedNote::Ironwood(_) => Pool::Ironwood,
         }
     }
 }
@@ -117,7 +120,9 @@ pub(crate) fn scan_transparent(
         if !targets.contains(txid) {
             continue;
         }
-        let Some(bundle) = tx.transparent_bundle() else { continue };
+        let Some(bundle) = tx.transparent_bundle() else {
+            continue;
+        };
         for (i, out) in bundle.vout.iter().enumerate() {
             let Some(encoded) = out.recipient_address().and_then(|a| ours.get(&a)) else {
                 continue;
@@ -192,7 +197,10 @@ pub(crate) fn enrich_memos(
                         }
                     }
                 }
-            } else if let Some(bundle) = tx.orchard_bundle() {
+            } else if matches!(note.note, ShieldedNote::Orchard(_)) {
+                let Some(bundle) = tx.orchard_bundle() else {
+                    continue;
+                };
                 if let Some(action) = bundle.actions().get(output_index) {
                     // Standard Orchard (ZIP-212 cmx check) first.
                     let standard = orchard.iter().find_map(|o| {
@@ -202,6 +210,27 @@ pub(crate) fn enrich_memos(
                         note.memo = Some(memo);
                     } else {
                         // Optional Ironwood Name Note path: V3 plaintext, no cmx check.
+                        #[cfg(feature = "zns-decrypt")]
+                        for o in orchard {
+                            if let Some(fvk) = &o.fvk {
+                                if let Some((.., memo)) =
+                                    zns_decrypt::try_decrypt_ironwood(action, fvk)
+                                {
+                                    note.memo = Some(memo);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if let Some(bundle) = tx.ironwood_bundle() {
+                if let Some(action) = bundle.actions().get(output_index) {
+                    let standard = orchard.iter().find_map(|o| {
+                        decrypt::try_decrypt_ironwood(action, &o.ivk).map(|(.., memo)| memo)
+                    });
+                    if let Some(memo) = standard {
+                        note.memo = Some(memo);
+                    } else {
                         #[cfg(feature = "zns-decrypt")]
                         for o in orchard {
                             if let Some(fvk) = &o.fvk {
@@ -319,6 +348,16 @@ fn scan_compact_serial(
                         });
                     }
                 }
+                for act in &tx.ironwood_actions {
+                    if let Ok(nf) = act.nullifier[..].try_into() {
+                        spends.push(Spend {
+                            txid,
+                            nf: Nullifier(nf),
+                            pool: Pool::Ironwood,
+                            height,
+                        });
+                    }
+                }
             }
         }
 
@@ -415,12 +454,14 @@ fn scan_compact_serial(
             // actions the standard path did not claim.
             #[cfg(feature = "zns-decrypt")]
             {
-                let fvks: Vec<_> = orchard.iter().filter_map(|o| o.fvk.clone()).collect();
                 for (i, act) in actions.iter().enumerate() {
                     if claimed[i] {
                         continue;
                     }
-                    for (scope, fvk) in fvks.iter().enumerate() {
+                    for (scope, incoming) in orchard.iter().enumerate() {
+                        let Some(fvk) = incoming.fvk.as_ref() else {
+                            continue;
+                        };
                         if let Some((note, _recipient)) =
                             zns_decrypt::try_compact_ironwood(fvk, act)
                         {
@@ -442,6 +483,73 @@ fn scan_compact_serial(
                             });
                             break;
                         }
+                    }
+                }
+            }
+        }
+
+        if !orchard.is_empty() {
+            let mut actions = Vec::new();
+            let mut meta: Vec<(TxId, u32, u32)> = Vec::new();
+            for tx in &block.vtx {
+                let Some(txid) = txid_of(tx) else { continue };
+                let tx_index = tx.index as u32;
+                for (ai, act) in tx.ironwood_actions.iter().enumerate() {
+                    if let Some(action) = decrypt::parse_orchard(act) {
+                        actions.push(action);
+                        meta.push((txid, tx_index, ai as u32));
+                    }
+                }
+            }
+
+            let ivks: Vec<_> = orchard.iter().map(|o| o.ivk.clone()).collect();
+            let hits = decrypt::try_compact_ironwood(&ivks, actions.clone());
+            let mut claimed = vec![false; actions.len()];
+            for (i, hit) in hits.into_iter().enumerate() {
+                if let Some((note, _recipient, scope)) = hit {
+                    claimed[i] = true;
+                    let (txid, tx_index, output_index) = meta[i];
+                    let nullifier = orchard[scope]
+                        .fvk
+                        .as_ref()
+                        .map(|fvk| Nullifier(note.nullifier(fvk).to_bytes()));
+                    out.push(Note {
+                        note: ShieldedNote::Ironwood(note),
+                        height,
+                        txid,
+                        tx_index,
+                        output_index,
+                        nullifier,
+                        memo: None,
+                        is_sent: false,
+                        recipient: None,
+                    });
+                }
+            }
+
+            #[cfg(feature = "zns-decrypt")]
+            for (i, act) in actions.iter().enumerate() {
+                if claimed[i] {
+                    continue;
+                }
+                for incoming in orchard {
+                    let Some(fvk) = incoming.fvk.as_ref() else {
+                        continue;
+                    };
+                    if let Some((note, _recipient)) = zns_decrypt::try_compact_ironwood(fvk, act) {
+                        let (txid, tx_index, output_index) = meta[i];
+                        out.push(Note {
+                            note: ShieldedNote::Ironwood(note),
+                            height,
+                            txid,
+                            tx_index,
+                            output_index,
+                            nullifier: Some(Nullifier(note.nullifier(fvk).to_bytes())),
+                            memo: None,
+                            is_sent: false,
+                            recipient: None,
+                        });
+                        break;
                     }
                 }
             }
@@ -520,6 +628,62 @@ pub(crate) fn scan_sent(
                             recipient: encode_orchard_recipient(network, recipient),
                         });
                         break;
+                    }
+                }
+            }
+        }
+
+        if let Some(bundle) = tx.ironwood_bundle() {
+            for (ai, action) in bundle.actions().iter().enumerate() {
+                if claimed.contains(&(Pool::Ironwood, *txid, ai as u32)) {
+                    continue;
+                }
+                #[cfg(feature = "zns-decrypt")]
+                let mut recovered = false;
+                for ovk in orchard_ovks {
+                    if let Some((note, recipient, memo)) =
+                        decrypt::try_decrypt_ironwood_sent(action, ovk)
+                    {
+                        out.push(Note {
+                            note: ShieldedNote::Ironwood(note),
+                            height,
+                            txid: *txid,
+                            tx_index: index,
+                            output_index: ai as u32,
+                            nullifier: None,
+                            memo: Some(memo),
+                            is_sent: true,
+                            recipient: encode_orchard_recipient(network, recipient),
+                        });
+                        #[cfg(feature = "zns-decrypt")]
+                        {
+                            recovered = true;
+                        }
+                        break;
+                    }
+                }
+                #[cfg(feature = "zns-decrypt")]
+                if !recovered {
+                    for incoming in &keys.orchard {
+                        let Some(fvk) = incoming.fvk.as_ref() else {
+                            continue;
+                        };
+                        if let Some((note, recipient, memo)) =
+                            zns_decrypt::try_decrypt_ironwood_sent(action, fvk)
+                        {
+                            out.push(Note {
+                                note: ShieldedNote::Ironwood(note),
+                                height,
+                                txid: *txid,
+                                tx_index: index,
+                                output_index: ai as u32,
+                                nullifier: None,
+                                memo: Some(memo),
+                                is_sent: true,
+                                recipient: encode_orchard_recipient(network, recipient),
+                            });
+                            break;
+                        }
                     }
                 }
             }

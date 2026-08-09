@@ -52,6 +52,7 @@ impl Account for Memory {
         for note in &batch.notes {
             let value = match &note.note {
                 ShieldedNote::Orchard(n) => n.value().inner(),
+                ShieldedNote::Ironwood(n) => n.value().inner(),
                 ShieldedNote::Sapling(n) => n.value().inner(),
             };
             if note.is_sent {

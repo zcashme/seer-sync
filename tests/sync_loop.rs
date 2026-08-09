@@ -566,6 +566,7 @@ impl Account for RecordingAccount {
                 txid: n.txid.into(),
                 value: match &n.note {
                     ShieldedNote::Orchard(o) => o.value().inner(),
+                    ShieldedNote::Ironwood(i) => i.value().inner(),
                     ShieldedNote::Sapling(sap) => sap.value().inner(),
                 },
                 nf: n.nullifier.map(|nf| nf.0),
