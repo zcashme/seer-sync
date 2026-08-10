@@ -1,755 +1,456 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
+use zcash_primitives::block::BlockHash;
+use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_primitives::transaction::components::sapling::zip212_enforcement;
-use zcash_primitives::transaction::Transaction;
-use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
-use zcash_protocol::memo::MemoBytes;
-use zcash_protocol::TxId;
-use zcash_transparent::address::TransparentAddress;
-use zcash_transparent::bundle::OutPoint;
+use zcash_protocol::ShieldedPool;
+use zcash_protocol::consensus::{BlockHeight, Network, NetworkUpgrade, Parameters};
+use zcash_protocol::value::Zatoshis;
+use zcash_transparent::address::Script;
+use zcash_transparent::bundle::{OutPoint, TxOut};
+use zcash_transparent::keys::{IncomingViewingKey as TransparentIvk, NonHardenedChildIndex};
+use zcash_script::script::{Code as ScriptCode, Evaluable as _};
+use zip32::Scope;
 
-use crate::decrypt;
-use crate::key::{
-    encode_orchard_recipient, encode_sapling_recipient, OrchardIncoming, SaplingIncoming,
+use crate::proto::CompactBlock;
+use crate::sync::decrypt::{
+    decrypt_compact_ironwood, decrypt_compact_orchard, decrypt_compact_sapling,
+    decrypt_full_ironwood, decrypt_full_orchard, decrypt_full_sapling,
+    recover_outgoing_ironwood, recover_outgoing_orchard, recover_outgoing_sapling,
+    DecryptResult, ScanningKeys,
 };
 
-use crate::proto::{CompactBlock, CompactTx, RawTransaction};
-use crate::ViewKey;
-#[cfg(feature = "zns-decrypt")]
-use zns_verify::decrypt as zns_decrypt;
-
-pub enum ShieldedNote {
-    Sapling(sapling::Note),
-    Orchard(orchard::Note),
-    Ironwood(orchard::Note),
+pub(crate) struct Nullifiers {
+    pub sapling: Vec<sapling::Nullifier>,
+    pub orchard: Vec<orchard::note::Nullifier>,
+    pub ironwood: Vec<orchard::note::Nullifier>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Pool {
-    Sapling,
-    Orchard,
-    Ironwood,
+pub(crate) struct TransparentScanningKey {
+    pub external: zcash_transparent::keys::ExternalIvk,
+    pub internal: Option<zcash_transparent::keys::InternalIvk>,
 }
 
-/// A revealed nullifier: 32 bytes whose appearance on chain spends a note.
-/// Always paired with a [`Pool`] — Sapling and Orchard nullifiers live in
-/// separate domains.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Nullifier(pub [u8; 32]);
-
-pub struct Note {
-    pub note: ShieldedNote,
-    pub height: BlockHeight,
-    pub txid: TxId,
-    pub tx_index: u32,
-    pub output_index: u32,
-    pub nullifier: Option<Nullifier>,
-    pub memo: Option<MemoBytes>,
-    pub is_sent: bool,
-    pub recipient: Option<String>,
-}
-
-impl Note {
-    pub fn pool(&self) -> Pool {
-        match self.note {
-            ShieldedNote::Sapling(_) => Pool::Sapling,
-            ShieldedNote::Orchard(_) => Pool::Orchard,
-            ShieldedNote::Ironwood(_) => Pool::Ironwood,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Spend {
-    pub txid: TxId,
-    pub nf: Nullifier,
-    pub pool: Pool,
-    pub height: BlockHeight,
-}
-
-pub struct CompactScan {
-    pub notes: Vec<Note>,
-    pub spends: Vec<Spend>,
-}
-
-/// An Orchard note commitment as it appears on chain, with its absolute leaf
-/// position in the note-commitment tree.
-///
-/// `cmx` is public data — surfacing it needs no viewing key. Consumers building
-/// note-commitment-tree witnesses (e.g. to prove a note's inclusion) ingest
-/// these via [`scan_commitments`]; ordinary view-key sync ignores them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Commitment {
-    /// Absolute leaf position in the Orchard note-commitment tree.
+pub(crate) struct WalletOutput<Note, Nf, Recipient> {
+    pub index: u32,
+    pub note: Note,
+    pub recipient: Recipient,
+    pub nf: Option<Nf>,
     pub position: u64,
-    /// The `cmx` (x-coordinate of the output note's commitment).
-    pub cmx: [u8; 32],
+    pub scope: Scope,
+    pub memo: Option<[u8; 512]>,
+    pub is_sent: bool,
+    pub is_change: bool,
 }
 
-/// A transparent output paying one of the account's derived addresses.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransparentOutput {
-    pub txid: TxId,
+pub(crate) type SaplingOutput =
+    WalletOutput<sapling::Note, sapling::Nullifier, sapling::PaymentAddress>;
+
+pub(crate) type OrchardOutput =
+    WalletOutput<orchard::Note, orchard::note::Nullifier, orchard::Address>;
+
+pub(crate) struct SaplingSpend {
+    pub index: u32,
+    pub nf: sapling::Nullifier,
+}
+
+pub(crate) struct OrchardSpend {
+    pub index: u32,
+    pub nf: orchard::note::Nullifier,
+}
+
+pub(crate) struct TransparentOutput {
+    pub outpoint: OutPoint,
+    pub txout: TxOut,
     pub height: BlockHeight,
-    pub output_index: u32,
-    pub address: String,
-    pub script: Vec<u8>,
-    pub value_zat: u64,
 }
 
-/// A transparent input observed in a transaction touching the account's
-/// addresses. `outpoint` names what it spends; whether that output is ours is
-/// resolved by the engine (same flow as shielded nullifiers).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransparentSpend {
+pub(crate) struct TransparentSpend {
     pub txid: TxId,
     pub outpoint: OutPoint,
     pub height: BlockHeight,
 }
 
-/// Extract the transparent outputs paying `ours` and every input (candidate
-/// spend) from the parsed transactions named in `targets`.
-pub(crate) fn scan_transparent(
-    txs: &[(TxId, BlockHeight, Transaction)],
-    targets: &HashSet<TxId>,
-    ours: &HashMap<TransparentAddress, String>,
-) -> (Vec<TransparentOutput>, Vec<TransparentSpend>) {
-    let mut outputs = Vec::new();
-    let mut spends = Vec::new();
-    for (txid, height, tx) in txs {
-        if !targets.contains(txid) {
-            continue;
-        }
-        let Some(bundle) = tx.transparent_bundle() else {
-            continue;
-        };
-        for (i, out) in bundle.vout.iter().enumerate() {
-            let Some(encoded) = out.recipient_address().and_then(|a| ours.get(&a)) else {
-                continue;
-            };
-            outputs.push(TransparentOutput {
-                txid: *txid,
-                height: *height,
-                output_index: i as u32,
-                address: encoded.clone(),
-                script: out.script_pubkey().0 .0.clone(),
-                value_zat: out.value().into_u64(),
-            });
-        }
-        for vin in &bundle.vin {
-            spends.push(TransparentSpend {
-                txid: *txid,
-                outpoint: vin.prevout().clone(),
-                height: *height,
-            });
-        }
-    }
-    (outputs, spends)
+pub(crate) struct WalletTx {
+    pub txid: TxId,
+    pub height: BlockHeight,
+    pub tx_index: u32,
+    pub sapling_outputs: Vec<SaplingOutput>,
+    pub sapling_spends: Vec<SaplingSpend>,
+    pub orchard_outputs: Vec<OrchardOutput>,
+    pub orchard_spends: Vec<OrchardSpend>,
+    pub ironwood_outputs: Vec<OrchardOutput>,
+    pub ironwood_spends: Vec<OrchardSpend>,
+    pub transparent_outputs: Vec<TransparentOutput>,
+    pub transparent_spends: Vec<TransparentSpend>,
 }
 
-/// Parse fetched raw transactions once; both phase-2 passes (memo enrichment
-/// and sent recovery) consume the parsed list. Unparseable transactions are
-/// dropped, matching the per-pass skip they got before.
-pub(crate) fn parse_transactions(
-    network: &Network,
-    raw_txs: &[(TxId, RawTransaction)],
-) -> Vec<(TxId, BlockHeight, Transaction)> {
-    raw_txs
-        .iter()
-        .filter_map(|(txid, raw)| {
-            let height = BlockHeight::from_u32(raw.height as u32);
-            Transaction::read(&raw.data[..], BranchId::for_height(network, height))
-                .ok()
-                .map(|tx| (*txid, height, tx))
-        })
-        .collect()
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ScanError {
+    #[error("invalid compact block at height {0}")]
+    InvalidCompactBlock(BlockHeight),
+    #[error("block height discontinuity: expected {prev_height} + 1, got {new_height}")]
+    BlockHeightDiscontinuity { prev_height: BlockHeight, new_height: BlockHeight },
+    #[error("previous hash mismatch at height {0}")]
+    PrevHashMismatch(BlockHeight),
+    #[error("note commitment tree size unknown for {0:?} at height {1}")]
+    TreeSizeUnknown(ShieldedPool, BlockHeight),
+    #[error("note commitment tree size mismatch for {0:?} at height {1}: given {given}, computed {computed}")]
+    TreeSizeMismatch { pool: ShieldedPool, at_height: BlockHeight, given: u32, computed: u32 },
 }
 
-pub(crate) fn enrich_memos(
-    keys: &ViewKey,
-    network: &Network,
-    txs: &[(TxId, BlockHeight, Transaction)],
-    mut notes: Vec<Note>,
-) -> Vec<Note> {
-    let sapling = &keys.sapling;
-    let orchard = &keys.orchard;
-
-    for (txid, _, tx) in txs {
-        for note in notes
-            .iter_mut()
-            .filter(|n| &n.txid == txid && n.memo.is_none())
-        {
-            let is_sapling = matches!(note.note, ShieldedNote::Sapling(_));
-            let output_index = note.output_index as usize;
-            let note_height = note.height;
-
-            if is_sapling {
-                if let Some(bundle) = tx.sapling_bundle() {
-                    if let Some(output) = bundle.shielded_outputs().get(output_index) {
-                        let zip212 = zip212_enforcement(network, note_height);
-                        for s in sapling {
-                            if let Some((.., memo)) =
-                                decrypt::try_decrypt_sapling(output, &s.ivk, zip212)
-                            {
-                                note.memo = Some(memo);
-                                break;
-                            }
-                        }
-                    }
-                }
-            } else if matches!(note.note, ShieldedNote::Orchard(_)) {
-                let Some(bundle) = tx.orchard_bundle() else {
-                    continue;
-                };
-                if let Some(action) = bundle.actions().get(output_index) {
-                    // Standard Orchard (ZIP-212 cmx check) first.
-                    let standard = orchard.iter().find_map(|o| {
-                        decrypt::try_decrypt_orchard(action, &o.ivk).map(|(.., memo)| memo)
-                    });
-                    if let Some(memo) = standard {
-                        note.memo = Some(memo);
-                    } else {
-                        // Optional Ironwood Name Note path: V3 plaintext, no cmx check.
-                        #[cfg(feature = "zns-decrypt")]
-                        for o in orchard {
-                            if let Some(fvk) = &o.fvk {
-                                if let Some((.., memo)) =
-                                    zns_decrypt::try_decrypt_ironwood(action, fvk)
-                                {
-                                    note.memo = Some(memo);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            } else if let Some(bundle) = tx.ironwood_bundle() {
-                if let Some(action) = bundle.actions().get(output_index) {
-                    let standard = orchard.iter().find_map(|o| {
-                        decrypt::try_decrypt_ironwood(action, &o.ivk).map(|(.., memo)| memo)
-                    });
-                    if let Some(memo) = standard {
-                        note.memo = Some(memo);
-                    } else {
-                        #[cfg(feature = "zns-decrypt")]
-                        for o in orchard {
-                            if let Some(fvk) = &o.fvk {
-                                if let Some((.., memo)) =
-                                    zns_decrypt::try_decrypt_ironwood(action, fvk)
-                                {
-                                    note.memo = Some(memo);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    notes
-}
-
-pub fn scan_compact(blocks: &[CompactBlock], keys: &ViewKey) -> CompactScan {
-    let sapling = keys.sapling.as_slice();
-    let orchard = keys.orchard.as_slice();
-    let collect_spends = keys.can_derive_nullifiers();
-
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    if threads <= 1 || blocks.len() < 64 {
-        return scan_compact_serial(blocks, sapling, orchard, collect_spends);
-    }
-
-    let chunk = blocks.len().div_ceil(threads);
-    std::thread::scope(|s| {
-        let handles: Vec<_> = blocks
-            .chunks(chunk)
-            .map(|c| s.spawn(move || scan_compact_serial(c, sapling, orchard, collect_spends)))
-            .collect();
-        let mut merged = CompactScan {
-            notes: Vec::new(),
-            spends: Vec::new(),
-        };
-        for h in handles {
-            let part = h.join().expect("scan thread panicked");
-            merged.notes.extend(part.notes);
-            merged.spends.extend(part.spends);
-        }
-        merged
-    })
-}
-
-/// Extract every Orchard note commitment in `blocks`, in tree order, each tagged
-/// with its absolute leaf position.
-///
-/// Independent of any viewing key — this is the public commitment firehose used
-/// to build note-commitment-tree witnesses. A leaf's position is derived from
-/// the block's `orchardCommitmentTreeSize` metadata (the tree size as of the end
-/// of the block) minus the actions in that block. Blocks missing that metadata
-/// are skipped — pre-NU5 blocks carry no Orchard actions, so there is nothing to
-/// position.
-pub fn scan_commitments(blocks: &[CompactBlock]) -> Vec<Commitment> {
-    let mut out = Vec::new();
-    for block in blocks {
-        let Some(meta) = block.chain_metadata.as_ref() else {
-            continue;
-        };
-        let in_block: u64 = block.vtx.iter().map(|tx| tx.actions.len() as u64).sum();
-        let Some(mut pos) = (meta.orchard_commitment_tree_size as u64).checked_sub(in_block) else {
-            continue;
-        };
-        for tx in &block.vtx {
-            for act in &tx.actions {
-                if let Ok(cmx) = act.cmx[..].try_into() {
-                    out.push(Commitment { position: pos, cmx });
-                }
-                // Every Orchard action appends exactly one leaf; advance the
-                // position even on the (unreachable) malformed-cmx case so later
-                // leaves stay correctly aligned.
-                pos += 1;
-            }
-        }
-    }
-    out
-}
-
-fn scan_compact_serial(
+pub(crate) fn scan_compact(
     blocks: &[CompactBlock],
-    sapling: &[SaplingIncoming],
-    orchard: &[OrchardIncoming],
-    collect_spends: bool,
-) -> CompactScan {
-    let mut out = Vec::new();
-    let mut spends = Vec::new();
+    keys: &ScanningKeys,
+    transparent: Option<&TransparentScanningKey>,
+    network: Network,
+    nullifiers: &Nullifiers,
+    outpoints: &HashSet<OutPoint>,
+    prior: Option<(BlockHeight, BlockHash)>,
+) -> Result<(Vec<WalletTx>, Vec<(TxId, BlockHeight, u32)>), ScanError> {
+    let mut txs = Vec::new();
+    let mut all_txs = Vec::new();
+    let mut prev = prior;
+    let mut prev_tree_sizes: Option<(u32, u32, u32)> = None;
 
     for block in blocks {
-        let height = BlockHeight::from_u32(block.height as u32);
+        let height = BlockHeight::from(u32::try_from(block.height).map_err(|_| ScanError::InvalidCompactBlock(BlockHeight::from(0)))?);
+        let hash: [u8; 32] = block.hash.as_slice().try_into().map_err(|_| ScanError::InvalidCompactBlock(height))?;
 
-        if collect_spends {
-            for tx in &block.vtx {
-                let Some(txid) = txid_of(tx) else { continue };
-                for spend in &tx.spends {
-                    if let Ok(nf) = spend.nf[..].try_into() {
-                        spends.push(Spend {
-                            txid,
-                            nf: Nullifier(nf),
-                            pool: Pool::Sapling,
-                            height,
-                        });
-                    }
-                }
-                for act in &tx.actions {
-                    if let Ok(nf) = act.nullifier[..].try_into() {
-                        spends.push(Spend {
-                            txid,
-                            nf: Nullifier(nf),
-                            pool: Pool::Orchard,
-                            height,
-                        });
-                    }
-                }
-                for act in &tx.ironwood_actions {
-                    if let Ok(nf) = act.nullifier[..].try_into() {
-                        spends.push(Spend {
-                            txid,
-                            nf: Nullifier(nf),
-                            pool: Pool::Ironwood,
-                            height,
-                        });
-                    }
-                }
+        if let Some((prev_height, prev_hash)) = prev {
+            if height != prev_height + 1 {
+                return Err(ScanError::BlockHeightDiscontinuity { prev_height, new_height: height });
+            }
+            if block.prev_hash != prev_hash.0.as_slice() {
+                return Err(ScanError::PrevHashMismatch(height));
             }
         }
 
-        if !sapling.is_empty() {
-            let block_start = block.chain_metadata.as_ref().map(|m| {
-                let after = m.sapling_commitment_tree_size as u64;
-                let in_block: u64 = block.vtx.iter().map(|tx| tx.outputs.len() as u64).sum();
-                after.saturating_sub(in_block)
-            });
+        let start = match prev_tree_sizes {
+            Some(sizes) => sizes,
+            None => initial_tree_sizes(&network, height, block)?,
+        };
 
-            let mut descs = Vec::new();
-            let mut meta: Vec<(TxId, u32, u32, Option<u64>)> = Vec::new();
-            let mut leaf = 0u64;
-            for tx in &block.vtx {
-                let Some(txid) = txid_of(tx) else { continue };
-                let tx_index = tx.index as u32;
-                for (oi, output) in tx.outputs.iter().enumerate() {
-                    let pos = block_start.map(|s| s + leaf);
-                    leaf += 1;
-                    if let Some(desc) = decrypt::parse_sapling(output) {
-                        descs.push(desc);
-                        meta.push((txid, tx_index, oi as u32, pos));
-                    }
-                }
-            }
+        scan_block(block, keys, transparent, &network, nullifiers, outpoints,
+            start, &mut txs, &mut all_txs)?;
 
-            let ivks: Vec<_> = sapling.iter().map(|s| s.ivk.clone()).collect();
-            for (i, hit) in decrypt::try_compact_sapling(&ivks, descs)
-                .into_iter()
-                .enumerate()
-            {
-                if let Some((note, _recipient, scope)) = hit {
-                    let (txid, tx_index, output_index, position) = meta[i];
-                    let nullifier = match (sapling[scope].nk.as_ref(), position) {
-                        (Some(nk), Some(pos)) => Some(Nullifier(note.nf(nk, pos).0)),
-                        _ => None,
-                    };
-                    out.push(Note {
-                        note: ShieldedNote::Sapling(note),
-                        height,
-                        txid,
-                        tx_index,
-                        output_index,
-                        nullifier,
-                        memo: None,
-                        is_sent: false,
-                        recipient: None,
-                    });
-                }
-            }
-        }
-
-        if !orchard.is_empty() {
-            let mut actions = Vec::new();
-            let mut meta: Vec<(TxId, u32, u32)> = Vec::new();
-            for tx in &block.vtx {
-                let Some(txid) = txid_of(tx) else { continue };
-                let tx_index = tx.index as u32;
-                for (ai, act) in tx.actions.iter().enumerate() {
-                    if let Some(action) = decrypt::parse_orchard(act) {
-                        actions.push(action);
-                        meta.push((txid, tx_index, ai as u32));
-                    }
-                }
-            }
-
-            // Standard Orchard domain (lead byte 0x02, ZIP-212 cmx check).
-            let ivks: Vec<_> = orchard.iter().map(|o| o.ivk.clone()).collect();
-            let hits = decrypt::try_compact_orchard(&ivks, actions.clone());
-            let mut claimed = vec![false; actions.len()];
-            for (i, hit) in hits.into_iter().enumerate() {
-                if let Some((note, _recipient, scope)) = hit {
-                    claimed[i] = true;
-                    let (txid, tx_index, output_index) = meta[i];
-                    let nullifier = orchard[scope]
-                        .fvk
-                        .as_ref()
-                        .map(|fvk| Nullifier(note.nullifier(fvk).to_bytes()));
-                    out.push(Note {
-                        note: ShieldedNote::Orchard(note),
-                        height,
-                        txid,
-                        tx_index,
-                        output_index,
-                        nullifier,
-                        memo: None,
-                        is_sent: false,
-                        recipient: None,
-                    });
-                }
-            }
-
-            // Ironwood Name Notes (lead byte 0x03, relaxed cmx): only try
-            // actions the standard path did not claim.
-            #[cfg(feature = "zns-decrypt")]
-            {
-                for (i, act) in actions.iter().enumerate() {
-                    if claimed[i] {
-                        continue;
-                    }
-                    for (scope, incoming) in orchard.iter().enumerate() {
-                        let Some(fvk) = incoming.fvk.as_ref() else {
-                            continue;
-                        };
-                        if let Some((note, _recipient)) =
-                            zns_decrypt::try_compact_ironwood(fvk, act)
-                        {
-                            let (txid, tx_index, output_index) = meta[i];
-                            let nullifier = orchard[scope]
-                                .fvk
-                                .as_ref()
-                                .map(|f| Nullifier(note.nullifier(f).to_bytes()));
-                            out.push(Note {
-                                note: ShieldedNote::Orchard(note),
-                                height,
-                                txid,
-                                tx_index,
-                                output_index,
-                                nullifier,
-                                memo: None,
-                                is_sent: false,
-                                recipient: None,
-                            });
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        if !orchard.is_empty() {
-            let mut actions = Vec::new();
-            let mut meta: Vec<(TxId, u32, u32)> = Vec::new();
-            for tx in &block.vtx {
-                let Some(txid) = txid_of(tx) else { continue };
-                let tx_index = tx.index as u32;
-                for (ai, act) in tx.ironwood_actions.iter().enumerate() {
-                    if let Some(action) = decrypt::parse_orchard(act) {
-                        actions.push(action);
-                        meta.push((txid, tx_index, ai as u32));
-                    }
-                }
-            }
-
-            let ivks: Vec<_> = orchard.iter().map(|o| o.ivk.clone()).collect();
-            let hits = decrypt::try_compact_ironwood(&ivks, actions.clone());
-            let mut claimed = vec![false; actions.len()];
-            for (i, hit) in hits.into_iter().enumerate() {
-                if let Some((note, _recipient, scope)) = hit {
-                    claimed[i] = true;
-                    let (txid, tx_index, output_index) = meta[i];
-                    let nullifier = orchard[scope]
-                        .fvk
-                        .as_ref()
-                        .map(|fvk| Nullifier(note.nullifier(fvk).to_bytes()));
-                    out.push(Note {
-                        note: ShieldedNote::Ironwood(note),
-                        height,
-                        txid,
-                        tx_index,
-                        output_index,
-                        nullifier,
-                        memo: None,
-                        is_sent: false,
-                        recipient: None,
-                    });
-                }
-            }
-
-            #[cfg(feature = "zns-decrypt")]
-            for (i, act) in actions.iter().enumerate() {
-                if claimed[i] {
-                    continue;
-                }
-                for incoming in orchard {
-                    let Some(fvk) = incoming.fvk.as_ref() else {
-                        continue;
-                    };
-                    if let Some((note, _recipient)) = zns_decrypt::try_compact_ironwood(fvk, act) {
-                        let (txid, tx_index, output_index) = meta[i];
-                        out.push(Note {
-                            note: ShieldedNote::Ironwood(note),
-                            height,
-                            txid,
-                            tx_index,
-                            output_index,
-                            nullifier: Some(Nullifier(note.nullifier(fvk).to_bytes())),
-                            memo: None,
-                            is_sent: false,
-                            recipient: None,
-                        });
-                        break;
-                    }
-                }
-            }
-        }
+        prev_tree_sizes = Some(final_tree_sizes(block));
+        prev = Some((height, BlockHash(hash)));
     }
 
-    CompactScan { notes: out, spends }
+    Ok((txs, all_txs))
 }
 
-pub(crate) fn scan_sent(
-    keys: &ViewKey,
-    network: &Network,
-    txs: &[(TxId, BlockHeight, Transaction)],
-    claimed_notes: &[Note],
-    tx_index: &HashMap<TxId, u32>,
-) -> Vec<Note> {
-    let sapling_ovks = &keys.sapling_ovks;
-    let orchard_ovks = &keys.orchard_ovks;
+pub(crate) fn scan_full(
+    txs: &mut Vec<WalletTx>,
+    full_txs: &[(TxId, BlockHeight, u32, Transaction)],
+    keys: &ScanningKeys,
+    network: Network,
+) -> Result<(), ScanError> {
+    for (txid, height, tx_index, tx) in full_txs {
+        let zip212 = zip212_enforcement(&network, *height);
 
-    let claimed: HashSet<(Pool, TxId, u32)> = claimed_notes
-        .iter()
-        .map(|n| (n.pool(), n.txid, n.output_index))
-        .collect();
-
-    let mut out = Vec::new();
-
-    for (txid, height, tx) in txs {
-        let height = *height;
-        let index = tx_index.get(txid).copied().unwrap_or(0);
+        let pos = txs.iter().position(|t| t.txid == *txid);
+        let wtx = match pos {
+            Some(i) => &mut txs[i],
+            None => {
+                txs.push(WalletTx {
+                    txid: *txid, height: *height, tx_index: *tx_index,
+                    sapling_outputs: Vec::new(), sapling_spends: Vec::new(),
+                    orchard_outputs: Vec::new(), orchard_spends: Vec::new(),
+                    ironwood_outputs: Vec::new(), ironwood_spends: Vec::new(),
+                    transparent_outputs: Vec::new(), transparent_spends: Vec::new(),
+                });
+                txs.last_mut().expect("just pushed")
+            }
+        };
 
         if let Some(bundle) = tx.sapling_bundle() {
-            let zip212 = zip212_enforcement(network, height);
-            for (oi, output) in bundle.shielded_outputs().iter().enumerate() {
-                if claimed.contains(&(Pool::Sapling, *txid, oi as u32)) {
-                    continue;
-                }
-                for ovk in sapling_ovks {
-                    if let Some((note, recipient, memo)) =
-                        decrypt::try_decrypt_sapling_sent(output, ovk, zip212)
-                    {
-                        out.push(Note {
-                            note: ShieldedNote::Sapling(note),
-                            height,
-                            txid: *txid,
-                            tx_index: index,
-                            output_index: oi as u32,
-                            nullifier: None,
-                            memo: Some(memo),
-                            is_sent: true,
-                            recipient: encode_sapling_recipient(network, recipient),
-                        });
-                        break;
+            let outputs = bundle.shielded_outputs();
+            let full = decrypt_full_sapling(outputs, keys, zip212);
+            for (idx, opt) in full.into_iter().enumerate() {
+                if let Some(o) = wtx.sapling_outputs.iter_mut().find(|o| o.index == idx as u32) {
+                    if let Some(DecryptResult { memo: Some(memo), .. }) = opt {
+                        o.memo = Some(memo);
                     }
                 }
             }
+            let outgoing = recover_outgoing_sapling(outputs, keys, zip212);
+                for (idx, opt) in outgoing.into_iter().enumerate() {
+                    if opt.is_some() && !wtx.sapling_outputs.iter().any(|o| o.index == idx as u32) {
+                        if let Some(DecryptResult { note, recipient, memo: Some(memo), key_index }) = opt {
+                            wtx.sapling_outputs.push(SaplingOutput {
+                                index: idx as u32, note, recipient, nf: None,
+                                position: 0u64,
+                                scope: if key_index == 0 { Scope::External } else { Scope::Internal },
+                                memo: Some(memo), is_sent: true, is_change: false,
+                            });
+                        }
+                    }
+                }
         }
 
         if let Some(bundle) = tx.orchard_bundle() {
-            for (ai, action) in bundle.actions().iter().enumerate() {
-                if claimed.contains(&(Pool::Orchard, *txid, ai as u32)) {
-                    continue;
-                }
-                for ovk in orchard_ovks {
-                    if let Some((note, recipient, memo)) =
-                        decrypt::try_decrypt_orchard_sent(action, ovk)
-                    {
-                        out.push(Note {
-                            note: ShieldedNote::Orchard(note),
-                            height,
-                            txid: *txid,
-                            tx_index: index,
-                            output_index: ai as u32,
-                            nullifier: None,
-                            memo: Some(memo),
-                            is_sent: true,
-                            recipient: encode_orchard_recipient(network, recipient),
-                        });
-                        break;
+            let actions: Vec<_> = bundle.actions().iter().cloned().collect();
+            let full = decrypt_full_orchard(&actions, keys);
+            for (idx, opt) in full.into_iter().enumerate() {
+                if let Some(o) = wtx.orchard_outputs.iter_mut().find(|o| o.index == idx as u32) {
+                    if let Some(DecryptResult { memo: Some(memo), .. }) = opt {
+                        o.memo = Some(memo);
                     }
                 }
             }
+            let outgoing = recover_outgoing_orchard(&actions, keys);
+                for (idx, opt) in outgoing.into_iter().enumerate() {
+                    if opt.is_some() && !wtx.orchard_outputs.iter().any(|o| o.index == idx as u32) {
+                        if let Some(DecryptResult { note, recipient, memo: Some(memo), key_index }) = opt {
+                            wtx.orchard_outputs.push(OrchardOutput {
+                                index: idx as u32, note, recipient, nf: None,
+                                position: 0u64,
+                                scope: if key_index == 0 { Scope::External } else { Scope::Internal },
+                                memo: Some(memo), is_sent: true, is_change: false,
+                            });
+                        }
+                    }
+                }
         }
 
         if let Some(bundle) = tx.ironwood_bundle() {
-            for (ai, action) in bundle.actions().iter().enumerate() {
-                if claimed.contains(&(Pool::Ironwood, *txid, ai as u32)) {
-                    continue;
-                }
-                #[cfg(feature = "zns-decrypt")]
-                let mut recovered = false;
-                for ovk in orchard_ovks {
-                    if let Some((note, recipient, memo)) =
-                        decrypt::try_decrypt_ironwood_sent(action, ovk)
-                    {
-                        out.push(Note {
-                            note: ShieldedNote::Ironwood(note),
-                            height,
-                            txid: *txid,
-                            tx_index: index,
-                            output_index: ai as u32,
-                            nullifier: None,
-                            memo: Some(memo),
-                            is_sent: true,
-                            recipient: encode_orchard_recipient(network, recipient),
-                        });
-                        #[cfg(feature = "zns-decrypt")]
-                        {
-                            recovered = true;
-                        }
-                        break;
+            let actions: Vec<_> = bundle.actions().iter().cloned().collect();
+            let full = decrypt_full_ironwood(&actions, keys);
+            for (idx, opt) in full.into_iter().enumerate() {
+                if let Some(o) = wtx.ironwood_outputs.iter_mut().find(|o| o.index == idx as u32) {
+                    if let Some(DecryptResult { memo: Some(memo), .. }) = opt {
+                        o.memo = Some(memo);
                     }
                 }
-                #[cfg(feature = "zns-decrypt")]
-                if !recovered {
-                    for incoming in &keys.orchard {
-                        let Some(fvk) = incoming.fvk.as_ref() else {
-                            continue;
-                        };
-                        if let Some((note, recipient, memo)) =
-                            zns_decrypt::try_decrypt_ironwood_sent(action, fvk)
-                        {
-                            out.push(Note {
-                                note: ShieldedNote::Ironwood(note),
-                                height,
-                                txid: *txid,
-                                tx_index: index,
-                                output_index: ai as u32,
-                                nullifier: None,
-                                memo: Some(memo),
-                                is_sent: true,
-                                recipient: encode_orchard_recipient(network, recipient),
+            }
+            let outgoing = recover_outgoing_ironwood(&actions, keys);
+                for (idx, opt) = outgoing.into_iter().enumerate() {
+                    if opt.is_some() && !wtx.ironwood_outputs.iter().any(|o| o.index == idx as u32) {
+                        if let Some(DecryptResult { note, recipient, memo: Some(memo), key_index }) = opt {
+                            wtx.ironwood_outputs.push(OrchardOutput {
+                                index: idx as u32, note, recipient, nf: None,
+                                position: 0u64,
+                                scope: if key_index == 0 { Scope::External } else { Scope::Internal },
+                                memo: Some(memo), is_sent: true, is_change: false,
                             });
-                            break;
                         }
+                    }
+                }
+        }
+    }
+
+    Ok(())
+}
+
+fn scan_block(
+    block: &CompactBlock,
+    keys: &ScanningKeys,
+    transparent: Option<&TransparentScanningKey>,
+    network: &Network,
+    nullifiers: &Nullifiers,
+    outpoints: &HashSet<OutPoint>,
+    start_sizes: (u32, u32, u32),
+    txs: &mut Vec<WalletTx>,
+    all_txs: &mut Vec<(TxId, BlockHeight, u32)>,
+) -> Result<(), ScanError> {
+    let height = BlockHeight::from(u32::try_from(block.height).map_err(|_| ScanError::InvalidCompactBlock(BlockHeight::from(0)))?);
+    let zip212 = zip212_enforcement(network, height);
+    let transparent_scripts = transparent.map(|t| derive_transparent_scripts(t, 20));
+
+    let (mut sap_pos, mut orch_pos, mut iorn_pos) = start_sizes;
+
+    for tx in &block.vtx {
+        let txid = TxId::from_bytes(tx.txid.as_slice().try_into().map_err(|_| ScanError::InvalidCompactBlock(height))?);
+        let tx_index = u32::try_from(tx.index).map_err(|_| ScanError::InvalidCompactBlock(height))?;
+        all_txs.push((txid, height, tx_index));
+
+        let mut wtx = WalletTx {
+            txid, height, tx_index,
+            sapling_outputs: Vec::new(), sapling_spends: Vec::new(),
+            orchard_outputs: Vec::new(), orchard_spends: Vec::new(),
+            ironwood_outputs: Vec::new(), ironwood_spends: Vec::new(),
+            transparent_outputs: Vec::new(), transparent_spends: Vec::new(),
+        };
+
+        let sap_decrypted = decrypt_compact_sapling(&tx.outputs, keys, zip212);
+        for (idx, opt) in sap_decrypted.into_iter().enumerate() {
+            let position = u64::from(sap_pos) + idx as u64;
+            if let Some(DecryptResult { note, recipient, key_index, .. }) = opt {
+                let key = &keys.sapling[key_index];
+                let nf = key.nk.as_ref().map(|nk| note.nf(nk, u64::from(position)));
+                wtx.sapling_outputs.push(SaplingOutput {
+                    index: idx as u32, note, recipient, nf, position,
+                    scope: key.scope, memo: None, is_sent: false, is_change: false,
+                });
+            }
+        }
+        sap_pos += u32::try_from(tx.outputs.len()).unwrap();
+
+        for (idx, spend) in tx.spends.iter().enumerate() {
+            if let Ok(nf) = sapling::Nullifier::from_slice(spend.nf.as_slice()) {
+                if nullifiers.sapling.contains(&nf) {
+                    wtx.sapling_spends.push(SaplingSpend { index: idx as u32, nf });
+                }
+            }
+        }
+
+        let orch_decrypted = decrypt_compact_orchard(&tx.actions, keys);
+        for (idx, opt) in orch_decrypted.into_iter().enumerate() {
+            let position = u64::from(orch_pos) + idx as u64;
+            if let Some(DecryptResult { note, recipient, key_index, .. }) = opt {
+                let key = &keys.orchard[key_index];
+                let nf = key.nk.as_ref().and_then(|fvk| Option::from(note.nullifier(fvk)));
+                wtx.orchard_outputs.push(OrchardOutput {
+                    index: idx as u32, note, recipient, nf, position,
+                    scope: key.scope, memo: None, is_sent: false, is_change: false,
+                });
+            }
+        }
+        orch_pos += u32::try_from(tx.actions.len()).unwrap();
+
+        for (idx, action) in tx.actions.iter().enumerate() {
+            if let Some(nf_bytes) = action.nullifier.as_slice().try_into().ok() {
+                if let Some(nf) = Option::from(orchard::note::Nullifier::from_bytes(nf_bytes)) {
+                    if nullifiers.orchard.contains(&nf) {
+                        wtx.orchard_spends.push(OrchardSpend { index: idx as u32, nf });
                     }
                 }
             }
         }
-    }
 
-    out
-}
+        let iorn_decrypted = decrypt_compact_ironwood(&tx.ironwood_actions, keys);
+        for (idx, opt) in iorn_decrypted.into_iter().enumerate() {
+            let position = u64::from(iorn_pos) + idx as u64;
+            if let Some(DecryptResult { note, recipient, key_index, .. }) = opt {
+                let key = &keys.orchard[key_index];
+                let nf = key.nk.as_ref().and_then(|fvk| Option::from(note.nullifier(fvk)));
+                wtx.ironwood_outputs.push(OrchardOutput {
+                    index: idx as u32, note, recipient, nf, position,
+                    scope: key.scope, memo: None, is_sent: false, is_change: false,
+                });
+            }
+        }
+        iorn_pos += u32::try_from(tx.ironwood_actions.len()).unwrap();
 
-fn txid_of(tx: &CompactTx) -> Option<TxId> {
-    tx.txid[..].try_into().ok().map(TxId::from_bytes)
-}
+        for (idx, action) in tx.ironwood_actions.iter().enumerate() {
+            if let Some(nf_bytes) = action.nullifier.as_slice().try_into().ok() {
+                if let Some(nf) = Option::from(orchard::note::Nullifier::from_bytes(nf_bytes)) {
+                    if nullifiers.ironwood.contains(&nf) {
+                        wtx.ironwood_spends.push(OrchardSpend { index: idx as u32, nf });
+                    }
+                }
+            }
+        }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::proto::{ChainMetadata, CompactOrchardAction};
+        if let Some(scripts) = &transparent_scripts {
+            for (idx, vout) in tx.vout.iter().enumerate() {
+                if scripts.contains(vout.script_pub_key.as_slice()) {
+                    let outpoint = OutPoint::new(*txid.as_ref(), idx as u32);
+                    let txout = TxOut::new(
+                        Zatoshis::from_u64(vout.value).expect("valid value"),
+                        Script(ScriptCode(vout.script_pub_key.clone())),
+                    );
+                    wtx.transparent_outputs.push(TransparentOutput { outpoint, txout, height });
+                }
+            }
+            for vin in &tx.vin {
+                if let Some(txid_bytes) = vin.prevout_txid.as_slice().try_into().ok() {
+                    let outpoint = OutPoint::new(txid_bytes, vin.prevout_index);
+                    if outpoints.contains(&outpoint) {
+                        wtx.transparent_spends.push(TransparentSpend { txid, outpoint, height });
+                    }
+                }
+            }
+        }
 
-    fn action(cmx_byte: u8) -> CompactOrchardAction {
-        CompactOrchardAction {
-            cmx: vec![cmx_byte; 32],
-            ..Default::default()
+        if !wtx.sapling_outputs.is_empty() || !wtx.sapling_spends.is_empty()
+            || !wtx.orchard_outputs.is_empty() || !wtx.orchard_spends.is_empty()
+            || !wtx.ironwood_outputs.is_empty() || !wtx.ironwood_spends.is_empty()
+            || !wtx.transparent_outputs.is_empty() || !wtx.transparent_spends.is_empty()
+        {
+            txs.push(wtx);
         }
     }
 
-    #[test]
-    fn scan_commitments_positions_from_tree_size() {
-        // Tree size 5 at end of block, 3 actions across two txs → first leaf at 2.
-        let block = CompactBlock {
-            height: 100,
-            chain_metadata: Some(ChainMetadata {
-                orchard_commitment_tree_size: 5,
-                ..Default::default()
-            }),
-            vtx: vec![
-                CompactTx {
-                    actions: vec![action(0xaa), action(0xbb)],
-                    ..Default::default()
-                },
-                CompactTx {
-                    actions: vec![action(0xcc)],
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-        let got = scan_commitments(&[block]);
-        assert_eq!(
-            got.iter()
-                .map(|c| (c.position, c.cmx[0]))
-                .collect::<Vec<_>>(),
-            vec![(2, 0xaa), (3, 0xbb), (4, 0xcc)],
-        );
+    if let Some(meta) = &block.chain_metadata {
+        if meta.sapling_commitment_tree_size != sap_pos {
+            return Err(ScanError::TreeSizeMismatch { pool: ShieldedPool::Sapling, at_height: height, given: meta.sapling_commitment_tree_size, computed: sap_pos });
+        }
+        if meta.orchard_commitment_tree_size != orch_pos {
+            return Err(ScanError::TreeSizeMismatch { pool: ShieldedPool::Orchard, at_height: height, given: meta.orchard_commitment_tree_size, computed: orch_pos });
+        }
+        if meta.ironwood_commitment_tree_size != iorn_pos {
+            return Err(ScanError::TreeSizeMismatch { pool: ShieldedPool::Ironwood, at_height: height, given: meta.ironwood_commitment_tree_size, computed: iorn_pos });
+        }
     }
 
-    #[test]
-    fn scan_commitments_skips_blocks_without_metadata() {
-        let block = CompactBlock {
-            height: 50,
-            chain_metadata: None,
-            vtx: vec![CompactTx {
-                actions: vec![action(0x11)],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert!(scan_commitments(&[block]).is_empty());
+    Ok(())
+}
+
+fn initial_tree_sizes(
+    network: &Network,
+    height: BlockHeight,
+    block: &CompactBlock,
+) -> Result<(u32, u32, u32), ScanError> {
+    fn one(
+        network: &Network, height: BlockHeight, pool: ShieldedPool,
+        final_size: u32, output_count: usize, activation: NetworkUpgrade,
+    ) -> Result<u32, ScanError> {
+        if final_size > 0 {
+            return final_size.checked_sub(u32::try_from(output_count).unwrap_or(0))
+                .ok_or(ScanError::TreeSizeUnknown(pool, height));
+        }
+        match network.activation_height(activation) {
+            Some(act) if height < act => Ok(0),
+            Some(_) => Err(ScanError::TreeSizeUnknown(pool, height)),
+            None => Ok(0),
+        }
     }
+
+    let meta = block.chain_metadata.as_ref();
+    let (s, o, i) = match meta {
+        Some(m) => (m.sapling_commitment_tree_size, m.orchard_commitment_tree_size, m.ironwood_commitment_tree_size),
+        None => (0, 0, 0),
+    };
+    let sap_count: usize = block.vtx.iter().map(|tx| tx.outputs.len()).sum();
+    let orch_count: usize = block.vtx.iter().map(|tx| tx.actions.len()).sum();
+    let iorn_count: usize = block.vtx.iter().map(|tx| tx.ironwood_actions.len()).sum();
+
+    Ok((
+        one(network, height, ShieldedPool::Sapling, s, sap_count, NetworkUpgrade::Sapling)?,
+        one(network, height, ShieldedPool::Orchard, o, orch_count, NetworkUpgrade::Nu5)?,
+        one(network, height, ShieldedPool::Ironwood, i, iorn_count, NetworkUpgrade::Nu6_3)?,
+    ))
+}
+
+fn final_tree_sizes(block: &CompactBlock) -> (u32, u32, u32) {
+    if let Some(meta) = &block.chain_metadata {
+        (meta.sapling_commitment_tree_size, meta.orchard_commitment_tree_size, meta.ironwood_commitment_tree_size)
+    } else {
+        let mut s = 0u32; let mut o = 0u32; let mut i = 0u32;
+        for tx in &block.vtx {
+            s += u32::try_from(tx.outputs.len()).unwrap();
+            o += u32::try_from(tx.actions.len()).unwrap();
+            i += u32::try_from(tx.ironwood_actions.len()).unwrap();
+        }
+        (s, o, i)
+    }
+}
+
+fn derive_transparent_scripts(key: &TransparentScanningKey, gap_limit: u32) -> HashSet<Vec<u8>> {
+    let mut scripts = HashSet::new();
+    for i in 0..gap_limit {
+        let idx = NonHardenedChildIndex::from_index(i).expect("valid index");
+        if let Ok(addr) = key.external.derive_address(idx) {
+            scripts.insert(addr.script().to_bytes());
+        }
+        if let Some(internal) = &key.internal {
+            if let Ok(addr) = internal.derive_address(idx) {
+                scripts.insert(addr.script().to_bytes());
+            }
+        }
+    }
+    scripts
 }

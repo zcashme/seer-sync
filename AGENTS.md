@@ -13,8 +13,9 @@ spend you can see from lightwalletd compact blocks.
 | **UIVK** | Incoming notes only (no nullifiers → no spends) |
 | **UFVK** | Notes + spends (nullifier keys) + sent recovery (OVKs) |
 
-`ViewKey::decode` accepts either encoding and pre-derives per-pool scanning
-keys in `src/key.rs`.
+The engine accepts either encoding and pre-derives per-pool scanning keys
+in `src/sync/decrypt.rs`. `UnifiedFullViewingKey` and
+`UnifiedIncomingViewingKey` are the only two supported user key types.
 
 ## Sibling crates (this monorepo)
 
@@ -66,6 +67,13 @@ codec — not the wallet framework.
 
 Line: **know the protocol** vs **be a wallet framework**.
 
+**Upstream-first for protocol primitives.** The IN crates already provide the
+correct abstractions for note encryption (`zcash_note_encryption::Domain` /
+`BatchDomain`), key derivation (`zcash_keys`, `zip32`), and protocol types
+(`zcash_protocol`, `zcash_primitives`, `sapling-crypto`, `orchard`). Use them.
+Only hand-roll the wallet-framework layer that is off-limits (`OUT` crates)
+or specific to this engine (sync loop, `Account` trait, raw storage).
+
 ## Features
 
 | Feature | What it enables |
@@ -74,6 +82,11 @@ Line: **know the protocol** vs **be a wallet framework**.
 | `db` | Reference SQLite `Db`, `sync()`, read path |
 | `commitment-tree` | Requires `db`. Every Orchard `cmx` + shardtree witnesses |
 | `zns-decrypt` | Layers Ironwood Name Note trial-decrypt (via `zns-verify`) **on top of** standard Orchard — does not replace it |
+
+Standard Ironwood shielded outputs (V3 note plaintext) are handled by
+`IronwoodDomain` through `zcash_note_encryption`, exactly like Orchard
+outputs. The `zns-decrypt` feature adds only the relaxed Ironwood Name
+Note trial-decrypt path via `zns-verify`.
 
 ### Decrypt order (with `zns-decrypt`)
 
@@ -88,8 +101,8 @@ Default (no feature): step 1 only. Application logic (names, memos-as-commands,
 ```
 src/
   lib.rs          public re-exports + feature-gated sync()
-  key.rs          ViewKey, KeyError
-  decrypt.rs      per-pool trial decrypt; parse_orchard (public)
+  decrypt.rs      view-key capability preparation; per-pool compact/full
+                  decryption via `zcash_note_encryption`; parse helpers
   proto.rs        include! of build.rs output (client stubs only)
   sync.rs         run(), Account, Batch, Cursor, Resume, SyncError<E>
   sync/
@@ -209,6 +222,11 @@ cargo check --features db,zns-decrypt --tests --examples
    in `zns-verify` / the consumer.
 6. **Keep orchard unified** — path + patch to `zns-orchard`; never leave
    zcash_* on crates.io orchard 0.14 while this crate is on 0.15.
+7. **Upstream-first for protocol primitives.** If a crate in the IN list
+   already defines the abstraction, use it. Do not write parallel
+   ChaCha20Poly1305, KDF, key-agreement, note-plaintext, or domain-specific
+   decrypt code. `zcash_note_encryption` provides generic trial decryption
+   for Sapling, Orchard, and Ironwood; use it directly.
 
 ## Out of scope (for now)
 

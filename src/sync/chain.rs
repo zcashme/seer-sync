@@ -1,5 +1,3 @@
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_primitives::block::BlockHash;
@@ -11,219 +9,164 @@ use crate::proto::{
     CompactBlock, RawTransaction, TransparentAddressBlockFilter, TxFilter,
 };
 
-pub const DEFAULT_MAINNET_SERVERS: &[&str] = &[
+const MAINNET_SERVERS: &[&str] = &[
     "https://zec.rocks:443",
     "https://na.zec.rocks:443",
     "https://eu.zec.rocks:443",
     "https://ap.zec.rocks:443",
 ];
+const TESTNET_SERVERS: &[&str] = &["https://testnet.zec.rocks:443"];
 
-pub const DEFAULT_TESTNET_SERVERS: &[&str] = &["https://testnet.zec.rocks:443"];
-
-/// The built-in lightwalletd server list for `network`.
-pub fn default_servers(network: Network) -> &'static [&'static str] {
+fn servers(network: Network) -> &'static [&'static str] {
     match network {
-        Network::MainNetwork => DEFAULT_MAINNET_SERVERS,
-        Network::TestNetwork => DEFAULT_TESTNET_SERVERS,
+        Network::MainNetwork => MAINNET_SERVERS,
+        Network::TestNetwork => TESTNET_SERVERS,
     }
 }
 
-pub type LwdClient = CompactTxStreamerClient<Channel>;
+#[derive(Clone)]
+pub struct LwdClient {
+    inner: CompactTxStreamerClient<Channel>,
+}
 
 #[derive(thiserror::Error, Debug)]
-pub enum ChainError {
-    #[error("chain reorg at height {0}")]
-    Reorg(BlockHeight),
-    #[error("lightwalletd RPC: {0}")]
-    Rpc(#[from] tonic::Status),
-    #[error("connecting to lightwalletd: {0}")]
-    Connect(#[from] tonic::transport::Error),
-    #[error("invalid lightwalletd url: {0}")]
-    Url(#[from] http::uri::InvalidUri),
-    #[error("tip height overflowed u32")]
-    TipOverflow,
-    #[error("all {tried} lightwalletd servers failed:\n{detail}")]
-    NoServer { tried: usize, detail: String },
+#[error("lightwalletd RPC {code}: {message}")]
+pub struct RpcError {
+    pub code: String,
+    pub message: String,
 }
 
-pub async fn connect(url: &str) -> Result<LwdClient, ChainError> {
-    let uri: http::Uri = url.parse()?;
-    let endpoint = Channel::builder(uri)
-        .tls_config(ClientTlsConfig::new().with_webpki_roots())?
-        .connect()
-        .await?;
-    Ok(CompactTxStreamerClient::new(endpoint))
-}
+#[derive(thiserror::Error, Debug)]
+#[error("no bundled lightwalletd server is available")]
+pub struct NoServer;
 
-pub async fn connect_auto(network: Network) -> Result<LwdClient, ChainError> {
-    let servers = default_servers(network);
-    let mut errors = Vec::new();
-    for &url in servers {
-        match connect(url).await {
-            Ok(mut client) => match tip_height(&mut client).await {
-                Ok(_) => return Ok(client),
-                Err(e) => errors.push(format!("  {url}: connected but not serving gRPC: {e}")),
-            },
-            Err(e) => errors.push(format!("  {url}: {e}")),
+impl From<tonic::Status> for RpcError {
+    fn from(status: tonic::Status) -> Self {
+        Self {
+            code: format!("{:?}", status.code()),
+            message: status.message().to_owned(),
         }
     }
-    Err(ChainError::NoServer {
-        tried: servers.len(),
-        detail: errors.join("\n"),
-    })
 }
 
-pub async fn tip_height(client: &mut LwdClient) -> Result<BlockHeight, ChainError> {
-    Ok(tip(client).await?.0)
-}
-
-pub async fn tip(client: &mut LwdClient) -> Result<(BlockHeight, Option<BlockHash>), ChainError> {
-    let block = client
-        .get_latest_block(tonic::Request::new(ChainSpec {}))
-        .await?
-        .into_inner();
-    let height = BlockHeight::from_u32(u32::try_from(block.height).map_err(|_| ChainError::TipOverflow)?);
-    let hash = block.hash[..].try_into().ok().map(BlockHash);
-    Ok((height, hash))
-}
-
-pub const DEFAULT_CHUNK_OUTPUTS: usize = 100_000;
-
-pub const DEFAULT_CHUNK_BLOCKS: usize = 1_000;
-
-pub fn blocks(
-    client: LwdClient,
-    from: BlockHeight,
-    to: BlockHeight,
-    max_outputs: usize,
-    prev_hash: Option<BlockHash>,
-) -> impl Stream<Item = Result<Vec<CompactBlock>, ChainError>> {
-    let (tx, rx) = mpsc::channel(1);
-    tokio::spawn(async move {
-        if let Err(e) = download(
-            client,
-            u32::from(from),
-            u32::from(to),
-            max_outputs,
-            prev_hash,
-            &tx,
-        )
-        .await
-        {
-            tx.send(Err(e)).await.ok();
-        }
-    });
-    ReceiverStream::new(rx)
-}
-
-async fn download(
-    mut client: LwdClient,
-    from: u32,
-    to: u32,
-    max_outputs: usize,
-    prev_hash: Option<BlockHash>,
-    tx: &mpsc::Sender<Result<Vec<CompactBlock>, ChainError>>,
-) -> Result<(), ChainError> {
-    let req = BlockRange {
-        start: Some(BlockId {
-            height: from as u64,
-            hash: vec![],
-        }),
-        end: Some(BlockId {
-            height: to as u64,
-            hash: vec![],
-        }),
-        pool_types: vec![],
-    };
-    let mut stream = client
-        .get_block_range(tonic::Request::new(req))
-        .await?
-        .into_inner();
-
-    let mut chunk: Vec<CompactBlock> = Vec::new();
-    let mut output_count = 0usize;
-    let mut prev_hash: Option<Vec<u8>> = prev_hash.map(|h| h.0.to_vec());
-
-    while let Some(block_result) = stream.next().await {
-        let block = block_result?;
-
-        if let Some(ref ph) = prev_hash {
-            if !block.prev_hash.is_empty() && &block.prev_hash != ph {
-                return Err(ChainError::Reorg(BlockHeight::from_u32(block.height as u32)));
+impl LwdClient {
+    pub async fn connect_auto(network: Network) -> Result<Self, NoServer> {
+        for &url in servers(network) {
+            if let Ok(mut client) = Self::connect(url).await {
+                if client.latest_block().await.is_ok() {
+                    return Ok(client);
+                }
             }
         }
-        prev_hash = Some(block.hash.clone());
 
-        let block_outputs: usize = block
-            .vtx
-            .iter()
-            .map(|t| t.outputs.len() + t.actions.len() + t.ironwood_actions.len())
-            .sum();
+        Err(NoServer)
+    }
 
-        let chunk_full =
-            output_count + block_outputs > max_outputs || chunk.len() >= DEFAULT_CHUNK_BLOCKS;
-        if chunk_full && !chunk.is_empty() {
-            if tx.send(Ok(std::mem::take(&mut chunk))).await.is_err() {
-                return Ok(());
-            }
-            output_count = 0;
+    async fn connect(url: &'static str) -> Result<Self, tonic::transport::Error> {
+        let uri = url
+            .parse::<http::Uri>()
+            .expect("bundled lightwalletd URLs are valid HTTP URIs");
+        let channel = Channel::builder(uri)
+            .tls_config(ClientTlsConfig::new().with_webpki_roots())?
+            .connect()
+            .await?;
+
+        Ok(Self {
+            inner: CompactTxStreamerClient::new(channel),
+        })
+    }
+
+    pub async fn latest_block(&mut self) -> Result<(BlockHeight, BlockHash), RpcError> {
+        let block = self
+            .inner
+            .get_latest_block(tonic::Request::new(ChainSpec {}))
+            .await?
+            .into_inner();
+
+        Ok((
+            BlockHeight::from_u32(
+                u32::try_from(block.height)
+                    .expect("lightwalletd block heights fit Zcash's block-height type"),
+            ),
+            BlockHash(
+                block
+                    .hash
+                    .as_slice()
+                    .try_into()
+                    .expect("lightwalletd block hashes are 32 bytes"),
+            ),
+        ))
+    }
+
+    pub(crate) async fn blocks(
+        &mut self,
+        from: BlockHeight,
+        to: BlockHeight,
+    ) -> Result<impl Stream<Item = Result<CompactBlock, RpcError>>, RpcError> {
+        let stream = self
+            .inner
+            .get_block_range(tonic::Request::new(BlockRange {
+                start: Some(BlockId {
+                    height: u64::from(u32::from(from)),
+                    hash: Vec::new(),
+                }),
+                end: Some(BlockId {
+                    height: u64::from(u32::from(to)),
+                    hash: Vec::new(),
+                }),
+                pool_types: Vec::new(),
+            }))
+            .await?
+            .into_inner();
+
+        Ok(stream.map(|result| result.map_err(RpcError::from)))
+    }
+
+    pub(crate) async fn raw_transaction(
+        &mut self,
+        txid: &TxId,
+    ) -> Result<RawTransaction, RpcError> {
+        Ok(self
+            .inner
+            .get_transaction(tonic::Request::new(TxFilter {
+                block: None,
+                index: 0,
+                hash: txid.as_ref().to_vec(),
+            }))
+            .await?
+            .into_inner())
+    }
+
+    pub(crate) async fn taddress_transactions(
+        &mut self,
+        address: &str,
+        from: BlockHeight,
+        to: BlockHeight,
+    ) -> Result<Vec<RawTransaction>, RpcError> {
+        let mut stream = self
+            .inner
+            .get_taddress_transactions(tonic::Request::new(TransparentAddressBlockFilter {
+                address: address.to_owned(),
+                range: Some(BlockRange {
+                    start: Some(BlockId {
+                        height: u64::from(u32::from(from)),
+                        hash: Vec::new(),
+                    }),
+                    end: Some(BlockId {
+                        height: u64::from(u32::from(to)),
+                        hash: Vec::new(),
+                    }),
+                    pool_types: Vec::new(),
+                }),
+            }))
+            .await?
+            .into_inner();
+        let mut transactions = Vec::new();
+
+        while let Some(transaction) = stream.next().await {
+            transactions.push(transaction?);
         }
 
-        output_count += block_outputs;
-        chunk.push(block);
+        Ok(transactions)
     }
-
-    if !chunk.is_empty() {
-        tx.send(Ok(chunk)).await.ok();
-    }
-    Ok(())
-}
-
-/// Every transaction touching `address` (as recipient or spender) in
-/// `[from, to]`, served from the lightwalletd address index.
-pub async fn fetch_taddress_transactions(
-    client: &mut LwdClient,
-    address: String,
-    from: BlockHeight,
-    to: BlockHeight,
-) -> Result<Vec<RawTransaction>, ChainError> {
-    let filter = TransparentAddressBlockFilter {
-        address,
-        range: Some(BlockRange {
-            start: Some(BlockId {
-                height: u64::from(u32::from(from)),
-                hash: vec![],
-            }),
-            end: Some(BlockId {
-                height: u64::from(u32::from(to)),
-                hash: vec![],
-            }),
-            pool_types: vec![],
-        }),
-    };
-    let mut stream = client
-        .get_taddress_transactions(tonic::Request::new(filter))
-        .await?
-        .into_inner();
-    let mut out = Vec::new();
-    while let Some(tx) = stream.next().await {
-        out.push(tx?);
-    }
-    Ok(out)
-}
-
-pub async fn fetch_raw_transaction(
-    client: &mut LwdClient,
-    txid: &TxId,
-) -> Result<RawTransaction, ChainError> {
-    let filter = TxFilter {
-        block: None,
-        index: 0,
-        hash: txid.as_ref().to_vec(),
-    };
-    let raw = client
-        .get_transaction(tonic::Request::new(filter))
-        .await?
-        .into_inner();
-    Ok(raw)
 }

@@ -5,8 +5,8 @@
 use std::sync::Mutex;
 
 use seer_sync::{
-    chain, run, Account, Batch, BlockHeight, Cursor, Network, Nullifier, Pool,
-    Resume, ShieldedNote, ViewKey,
+    chain, run, Account, Batch, BlockHeight, Cursor, Network, Nullifier, Pool, Resume,
+    ShieldedNote, ViewKey,
 };
 
 struct Memory {
@@ -84,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         birthday: BlockHeight::from_u32(birthday),
         state: Mutex::default(),
     };
-    let client = chain::connect_auto(Network::MainNetwork).await?;
+    let client = chain::LwdClient::connect_auto(Network::MainNetwork).await?;
     let tip = run(client, &key, Network::MainNetwork, &account).await?;
 
     let s = account.state.lock().unwrap();

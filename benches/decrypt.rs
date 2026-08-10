@@ -1,6 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, SamplingMode, Throughput};
-use futures::TryStreamExt;
-use seer_sync::chain::{blocks, connect_auto, tip_height};
+use seer_sync::chain::{BlockRangeItem, LwdClient};
 use seer_sync::scan_compact;
 use seer_sync::{BlockHeight, Network, ViewKey};
 use std::time::Duration;
@@ -12,10 +11,10 @@ fn bench(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
     let blocks = rt.block_on(async {
-        let mut client = connect_auto(Network::MainNetwork)
+        let mut client = LwdClient::connect_auto(Network::MainNetwork)
             .await
             .expect("connecting to lightwalletd");
-        let tip = tip_height(&mut client).await.expect("tip height");
+        let tip = client.latest_block().await.expect("tip height").0;
         let from = std::env::var("BENCH_FROM")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -25,10 +24,17 @@ fn bench(c: &mut Criterion) {
             "[bench] fetching [{from}..{tip}] ({} blocks)",
             u32::from(tip) - u32::from(from) + 1
         );
-        blocks(client, from, tip, usize::MAX, None)
-            .try_concat()
-            .await
-            .expect("fetch range")
+        let mut range = client.blocks(from, tip, None).await.expect("open range");
+        let mut blocks = Vec::new();
+        loop {
+            match range.next_chunk(usize::MAX).await.expect("fetch range") {
+                BlockRangeItem::Blocks(chunk) => blocks.extend(chunk),
+                BlockRangeItem::Discontinuity(_) => panic!("chain discontinuity"),
+                BlockRangeItem::IncompleteRange { .. } => panic!("incomplete range"),
+                BlockRangeItem::Complete => break,
+            }
+        }
+        blocks
     });
 
     let view_key = ViewKey::decode(&Network::MainNetwork, UFVK).expect("decoding hardcoded UFVK");

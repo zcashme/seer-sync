@@ -260,7 +260,7 @@ impl PoolBalance {
     pub fn total(&self) -> Zatoshis {
         (((self.orchard + self.ironwood).and_then(|s| s + self.sapling))
             .and_then(|s| s + self.transparent))
-            .expect("summed pool balances exceed MAX_MONEY")
+        .expect("summed pool balances exceed MAX_MONEY")
     }
 }
 
@@ -749,15 +749,14 @@ impl Account for Db {
     fn apply(&self, at: Cursor, batch: &Batch) -> Result<(), Self::Error> {
         let tx = self.conn.unchecked_transaction()?;
         let mut ids: HashMap<TxId, i64> = HashMap::new();
-        let mut id_for =
-            |txid: &TxId, height: u32, index: Option<u32>| -> rusqlite::Result<i64> {
-                if let Some(id) = ids.get(txid) {
-                    return Ok(*id);
-                }
-                let id = self.upsert_transaction(txid.as_ref(), Some(height), index)?;
-                ids.insert(*txid, id);
-                Ok(id)
-            };
+        let mut id_for = |txid: &TxId, height: u32, index: Option<u32>| -> rusqlite::Result<i64> {
+            if let Some(id) = ids.get(txid) {
+                return Ok(*id);
+            }
+            let id = self.upsert_transaction(txid.as_ref(), Some(height), index)?;
+            ids.insert(*txid, id);
+            Ok(id)
+        };
 
         // Notes before spends: a note received and spent in the same batch
         // must exist before its spend mark lands.
@@ -872,7 +871,11 @@ mod tests {
     #[test]
     fn sync_state_roundtrip() {
         let db = Db::open_in_memory().unwrap();
-        assert_eq!(db.get_sync_state().unwrap(), None, "fresh db: no account row");
+        assert_eq!(
+            db.get_sync_state().unwrap(),
+            None,
+            "fresh db: no account row"
+        );
         let state = SyncState {
             height: 42,
             hash: Some([7u8; 32]),
@@ -1091,7 +1094,10 @@ mod tests {
         assert_eq!(txs[1].sent, Zatoshis::const_from_u64(3_000_000));
         assert_eq!(txs[1].spent, Zatoshis::const_from_u64(5_000_000));
         assert_eq!(txs[1].kind, TxKind::Shielded);
-        assert!(txs[1].orchard && txs[1].sapling, "spends orchard, sends sapling");
+        assert!(
+            txs[1].orchard && txs[1].sapling,
+            "spends orchard, sends sapling"
+        );
         assert_eq!(txs[1].recipients.as_deref(), Some("u1recipient"));
     }
 
@@ -1101,7 +1107,8 @@ mod tests {
 
         // t-funds arrive, then get spent into an orchard note: shielding.
         let funding = mined_tx(&db, &[1u8; 32], 100);
-        db.insert_transparent_output(funding, 0, "t1example", &[0x76], 2_000_000).unwrap();
+        db.insert_transparent_output(funding, 0, "t1example", &[0x76], 2_000_000)
+            .unwrap();
         let shield = mined_tx(&db, &[2u8; 32], 110);
         db.mark_transparent_spent(&[1u8; 32], 0, shield).unwrap();
         db.insert_orchard_note(&OrchardNoteInsert {
@@ -1147,10 +1154,16 @@ mod tests {
         assert_eq!(outs.len(), 1);
         assert_eq!(outs[0].height, Some(100));
         assert_eq!(outs[0].spent_height, None);
-        assert_eq!(db.transactions().unwrap()[0].received, Zatoshis::const_from_u64(2_000_000));
+        assert_eq!(
+            db.transactions().unwrap()[0].received,
+            Zatoshis::const_from_u64(2_000_000)
+        );
 
         let spender = mined_tx(&db, &[6u8; 32], 120);
-        assert_eq!(db.mark_transparent_spent(&[5u8; 32], 0, spender).unwrap(), 1);
+        assert_eq!(
+            db.mark_transparent_spent(&[5u8; 32], 0, spender).unwrap(),
+            1
+        );
         assert_eq!(db.balance().unwrap().transparent, Zatoshis::ZERO);
         assert_eq!(db.transparent_outputs().unwrap()[0].spent_height, Some(120));
 
