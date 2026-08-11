@@ -1,6 +1,3 @@
-use std::collections::HashSet;
-
-use zcash_primitives::block::BlockHash;
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 use zcash_protocol::ShieldedPool;
@@ -8,11 +5,10 @@ use zcash_protocol::consensus::{BlockHeight, Network, NetworkUpgrade, Parameters
 use zcash_protocol::value::Zatoshis;
 use zcash_transparent::address::Script;
 use zcash_transparent::bundle::{OutPoint, TxOut};
-use zcash_transparent::keys::{IncomingViewingKey as TransparentIvk, NonHardenedChildIndex};
-use zcash_script::script::{Code as ScriptCode, Evaluable as _};
+use zcash_script::script::Code as ScriptCode;
 use zip32::Scope;
 
-use crate::proto::CompactBlock;
+use crate::proto::{CompactBlock, GetAddressUtxosReply};
 use crate::sync::decrypt::{
     decrypt_compact_ironwood, decrypt_compact_orchard, decrypt_compact_sapling,
     decrypt_full_ironwood, decrypt_full_orchard, decrypt_full_sapling,
@@ -20,18 +16,56 @@ use crate::sync::decrypt::{
     DecryptResult, ScanningKeys,
 };
 
-pub(crate) struct Nullifiers {
+pub struct Nullifiers {
     pub sapling: Vec<sapling::Nullifier>,
     pub orchard: Vec<orchard::note::Nullifier>,
     pub ironwood: Vec<orchard::note::Nullifier>,
 }
 
-pub(crate) struct TransparentScanningKey {
-    pub external: zcash_transparent::keys::ExternalIvk,
-    pub internal: Option<zcash_transparent::keys::InternalIvk>,
+impl Nullifiers {
+    pub fn update_with(&mut self, transactions: &[WalletTx]) {
+        let sapling_spent: Vec<_> = transactions
+            .iter()
+            .flat_map(|tx| tx.sapling_spends.iter().map(|s| s.nf))
+            .collect();
+        let orchard_spent: Vec<_> = transactions
+            .iter()
+            .flat_map(|tx| tx.orchard_spends.iter().map(|s| s.nf))
+            .collect();
+        let ironwood_spent: Vec<_> = transactions
+            .iter()
+            .flat_map(|tx| tx.ironwood_spends.iter().map(|s| s.nf))
+            .collect();
+
+        self.sapling.retain(|nf| !sapling_spent.iter().any(|s| s == nf));
+        self.orchard.retain(|nf| !orchard_spent.iter().any(|s| s == nf));
+        self.ironwood.retain(|nf| !ironwood_spent.iter().any(|s| s == nf));
+
+        self.sapling.extend(
+            transactions
+                .iter()
+                .flat_map(|tx| tx.sapling_outputs.iter())
+                .filter(|output| !output.is_sent)
+                .filter_map(|output| output.nf),
+        );
+        self.orchard.extend(
+            transactions
+                .iter()
+                .flat_map(|tx| tx.orchard_outputs.iter())
+                .filter(|output| !output.is_sent)
+                .filter_map(|output| output.nf),
+        );
+        self.ironwood.extend(
+            transactions
+                .iter()
+                .flat_map(|tx| tx.ironwood_outputs.iter())
+                .filter(|output| !output.is_sent)
+                .filter_map(|output| output.nf),
+        );
+    }
 }
 
-pub(crate) struct WalletOutput<Note, Nf, Recipient> {
+pub struct WalletOutput<Note, Nf, Recipient> {
     pub index: u32,
     pub note: Note,
     pub recipient: Recipient,
@@ -43,35 +77,35 @@ pub(crate) struct WalletOutput<Note, Nf, Recipient> {
     pub is_change: bool,
 }
 
-pub(crate) type SaplingOutput =
+pub type SaplingOutput =
     WalletOutput<sapling::Note, sapling::Nullifier, sapling::PaymentAddress>;
 
-pub(crate) type OrchardOutput =
+pub type OrchardOutput =
     WalletOutput<orchard::Note, orchard::note::Nullifier, orchard::Address>;
 
-pub(crate) struct SaplingSpend {
+pub struct SaplingSpend {
     pub index: u32,
     pub nf: sapling::Nullifier,
 }
 
-pub(crate) struct OrchardSpend {
+pub struct OrchardSpend {
     pub index: u32,
     pub nf: orchard::note::Nullifier,
 }
 
-pub(crate) struct TransparentOutput {
+pub struct TransparentOutput {
     pub outpoint: OutPoint,
     pub txout: TxOut,
     pub height: BlockHeight,
 }
 
-pub(crate) struct TransparentSpend {
+pub struct TransparentSpend {
     pub txid: TxId,
     pub outpoint: OutPoint,
     pub height: BlockHeight,
 }
 
-pub(crate) struct WalletTx {
+pub struct WalletTx {
     pub txid: TxId,
     pub height: BlockHeight,
     pub tx_index: u32,
@@ -86,185 +120,59 @@ pub(crate) struct WalletTx {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ScanError {
+pub enum ScanError {
     #[error("invalid compact block at height {0}")]
     InvalidCompactBlock(BlockHeight),
     #[error("block height discontinuity: expected {prev_height} + 1, got {new_height}")]
     BlockHeightDiscontinuity { prev_height: BlockHeight, new_height: BlockHeight },
-    #[error("previous hash mismatch at height {0}")]
-    PrevHashMismatch(BlockHeight),
     #[error("note commitment tree size unknown for {0:?} at height {1}")]
     TreeSizeUnknown(ShieldedPool, BlockHeight),
-    #[error("note commitment tree size mismatch for {0:?} at height {1}: given {given}, computed {computed}")]
+    #[error("note commitment tree size mismatch for {pool:?} at height {at_height}: given {given}, computed {computed}")]
     TreeSizeMismatch { pool: ShieldedPool, at_height: BlockHeight, given: u32, computed: u32 },
 }
 
-pub(crate) fn scan_compact(
+pub fn scan_compact(
     blocks: &[CompactBlock],
     keys: &ScanningKeys,
-    transparent: Option<&TransparentScanningKey>,
     network: Network,
     nullifiers: &Nullifiers,
-    outpoints: &HashSet<OutPoint>,
-    prior: Option<(BlockHeight, BlockHash)>,
-) -> Result<(Vec<WalletTx>, Vec<(TxId, BlockHeight, u32)>), ScanError> {
+) -> Result<Vec<WalletTx>, ScanError> {
     let mut txs = Vec::new();
-    let mut all_txs = Vec::new();
-    let mut prev = prior;
     let mut prev_tree_sizes: Option<(u32, u32, u32)> = None;
 
     for block in blocks {
         let height = BlockHeight::from(u32::try_from(block.height).map_err(|_| ScanError::InvalidCompactBlock(BlockHeight::from(0)))?);
-        let hash: [u8; 32] = block.hash.as_slice().try_into().map_err(|_| ScanError::InvalidCompactBlock(height))?;
 
-        if let Some((prev_height, prev_hash)) = prev {
-            if height != prev_height + 1 {
-                return Err(ScanError::BlockHeightDiscontinuity { prev_height, new_height: height });
-            }
-            if block.prev_hash != prev_hash.0.as_slice() {
-                return Err(ScanError::PrevHashMismatch(height));
-            }
-        }
-
-        let start = match prev_tree_sizes {
+        let tree_sizes_at_block_start = match prev_tree_sizes {
             Some(sizes) => sizes,
             None => initial_tree_sizes(&network, height, block)?,
         };
 
-        scan_block(block, keys, transparent, &network, nullifiers, outpoints,
-            start, &mut txs, &mut all_txs)?;
+        scan_block(block, keys, &network, nullifiers,
+            tree_sizes_at_block_start, &mut txs)?;
 
         prev_tree_sizes = Some(final_tree_sizes(block));
-        prev = Some((height, BlockHash(hash)));
     }
 
-    Ok((txs, all_txs))
-}
-
-pub(crate) fn scan_full(
-    txs: &mut Vec<WalletTx>,
-    full_txs: &[(TxId, BlockHeight, u32, Transaction)],
-    keys: &ScanningKeys,
-    network: Network,
-) -> Result<(), ScanError> {
-    for (txid, height, tx_index, tx) in full_txs {
-        let zip212 = zip212_enforcement(&network, *height);
-
-        let pos = txs.iter().position(|t| t.txid == *txid);
-        let wtx = match pos {
-            Some(i) => &mut txs[i],
-            None => {
-                txs.push(WalletTx {
-                    txid: *txid, height: *height, tx_index: *tx_index,
-                    sapling_outputs: Vec::new(), sapling_spends: Vec::new(),
-                    orchard_outputs: Vec::new(), orchard_spends: Vec::new(),
-                    ironwood_outputs: Vec::new(), ironwood_spends: Vec::new(),
-                    transparent_outputs: Vec::new(), transparent_spends: Vec::new(),
-                });
-                txs.last_mut().expect("just pushed")
-            }
-        };
-
-        if let Some(bundle) = tx.sapling_bundle() {
-            let outputs = bundle.shielded_outputs();
-            let full = decrypt_full_sapling(outputs, keys, zip212);
-            for (idx, opt) in full.into_iter().enumerate() {
-                if let Some(o) = wtx.sapling_outputs.iter_mut().find(|o| o.index == idx as u32) {
-                    if let Some(DecryptResult { memo: Some(memo), .. }) = opt {
-                        o.memo = Some(memo);
-                    }
-                }
-            }
-            let outgoing = recover_outgoing_sapling(outputs, keys, zip212);
-                for (idx, opt) in outgoing.into_iter().enumerate() {
-                    if opt.is_some() && !wtx.sapling_outputs.iter().any(|o| o.index == idx as u32) {
-                        if let Some(DecryptResult { note, recipient, memo: Some(memo), key_index }) = opt {
-                            wtx.sapling_outputs.push(SaplingOutput {
-                                index: idx as u32, note, recipient, nf: None,
-                                position: 0u64,
-                                scope: if key_index == 0 { Scope::External } else { Scope::Internal },
-                                memo: Some(memo), is_sent: true, is_change: false,
-                            });
-                        }
-                    }
-                }
-        }
-
-        if let Some(bundle) = tx.orchard_bundle() {
-            let actions: Vec<_> = bundle.actions().iter().cloned().collect();
-            let full = decrypt_full_orchard(&actions, keys);
-            for (idx, opt) in full.into_iter().enumerate() {
-                if let Some(o) = wtx.orchard_outputs.iter_mut().find(|o| o.index == idx as u32) {
-                    if let Some(DecryptResult { memo: Some(memo), .. }) = opt {
-                        o.memo = Some(memo);
-                    }
-                }
-            }
-            let outgoing = recover_outgoing_orchard(&actions, keys);
-                for (idx, opt) in outgoing.into_iter().enumerate() {
-                    if opt.is_some() && !wtx.orchard_outputs.iter().any(|o| o.index == idx as u32) {
-                        if let Some(DecryptResult { note, recipient, memo: Some(memo), key_index }) = opt {
-                            wtx.orchard_outputs.push(OrchardOutput {
-                                index: idx as u32, note, recipient, nf: None,
-                                position: 0u64,
-                                scope: if key_index == 0 { Scope::External } else { Scope::Internal },
-                                memo: Some(memo), is_sent: true, is_change: false,
-                            });
-                        }
-                    }
-                }
-        }
-
-        if let Some(bundle) = tx.ironwood_bundle() {
-            let actions: Vec<_> = bundle.actions().iter().cloned().collect();
-            let full = decrypt_full_ironwood(&actions, keys);
-            for (idx, opt) in full.into_iter().enumerate() {
-                if let Some(o) = wtx.ironwood_outputs.iter_mut().find(|o| o.index == idx as u32) {
-                    if let Some(DecryptResult { memo: Some(memo), .. }) = opt {
-                        o.memo = Some(memo);
-                    }
-                }
-            }
-            let outgoing = recover_outgoing_ironwood(&actions, keys);
-                for (idx, opt) = outgoing.into_iter().enumerate() {
-                    if opt.is_some() && !wtx.ironwood_outputs.iter().any(|o| o.index == idx as u32) {
-                        if let Some(DecryptResult { note, recipient, memo: Some(memo), key_index }) = opt {
-                            wtx.ironwood_outputs.push(OrchardOutput {
-                                index: idx as u32, note, recipient, nf: None,
-                                position: 0u64,
-                                scope: if key_index == 0 { Scope::External } else { Scope::Internal },
-                                memo: Some(memo), is_sent: true, is_change: false,
-                            });
-                        }
-                    }
-                }
-        }
-    }
-
-    Ok(())
+    Ok(txs)
 }
 
 fn scan_block(
     block: &CompactBlock,
     keys: &ScanningKeys,
-    transparent: Option<&TransparentScanningKey>,
     network: &Network,
     nullifiers: &Nullifiers,
-    outpoints: &HashSet<OutPoint>,
-    start_sizes: (u32, u32, u32),
-    txs: &mut Vec<WalletTx>,
-    all_txs: &mut Vec<(TxId, BlockHeight, u32)>,
+    tree_sizes_at_block_start: (u32, u32, u32),
+    detected_txs: &mut Vec<WalletTx>,
 ) -> Result<(), ScanError> {
     let height = BlockHeight::from(u32::try_from(block.height).map_err(|_| ScanError::InvalidCompactBlock(BlockHeight::from(0)))?);
     let zip212 = zip212_enforcement(network, height);
-    let transparent_scripts = transparent.map(|t| derive_transparent_scripts(t, 20));
 
-    let (mut sap_pos, mut orch_pos, mut iorn_pos) = start_sizes;
+    let (mut sap_pos, mut orch_pos, mut iorn_pos) = tree_sizes_at_block_start;
 
     for tx in &block.vtx {
         let txid = TxId::from_bytes(tx.txid.as_slice().try_into().map_err(|_| ScanError::InvalidCompactBlock(height))?);
         let tx_index = u32::try_from(tx.index).map_err(|_| ScanError::InvalidCompactBlock(height))?;
-        all_txs.push((txid, height, tx_index));
 
         let mut wtx = WalletTx {
             txid, height, tx_index,
@@ -344,33 +252,11 @@ fn scan_block(
             }
         }
 
-        if let Some(scripts) = &transparent_scripts {
-            for (idx, vout) in tx.vout.iter().enumerate() {
-                if scripts.contains(vout.script_pub_key.as_slice()) {
-                    let outpoint = OutPoint::new(*txid.as_ref(), idx as u32);
-                    let txout = TxOut::new(
-                        Zatoshis::from_u64(vout.value).expect("valid value"),
-                        Script(ScriptCode(vout.script_pub_key.clone())),
-                    );
-                    wtx.transparent_outputs.push(TransparentOutput { outpoint, txout, height });
-                }
-            }
-            for vin in &tx.vin {
-                if let Some(txid_bytes) = vin.prevout_txid.as_slice().try_into().ok() {
-                    let outpoint = OutPoint::new(txid_bytes, vin.prevout_index);
-                    if outpoints.contains(&outpoint) {
-                        wtx.transparent_spends.push(TransparentSpend { txid, outpoint, height });
-                    }
-                }
-            }
-        }
-
         if !wtx.sapling_outputs.is_empty() || !wtx.sapling_spends.is_empty()
             || !wtx.orchard_outputs.is_empty() || !wtx.orchard_spends.is_empty()
             || !wtx.ironwood_outputs.is_empty() || !wtx.ironwood_spends.is_empty()
-            || !wtx.transparent_outputs.is_empty() || !wtx.transparent_spends.is_empty()
         {
-            txs.push(wtx);
+            detected_txs.push(wtx);
         }
     }
 
@@ -389,6 +275,97 @@ fn scan_block(
     Ok(())
 }
 
+pub fn scan(
+    txs: &mut Vec<WalletTx>,
+    full_txs: &[(TxId, BlockHeight, Transaction)],
+    keys: &ScanningKeys,
+    network: Network,
+) -> Result<(), ScanError> {
+    for (txid, height, tx) in full_txs {
+        let zip212 = zip212_enforcement(&network, *height);
+
+        let Some(wtx) = txs.iter_mut().find(|t| t.txid == *txid) else {
+            continue;
+        };
+
+        if let Some(bundle) = tx.sapling_bundle() {
+            let outputs = bundle.shielded_outputs();
+            let full = decrypt_full_sapling(outputs, keys, zip212);
+            for (idx, opt) in full.into_iter().enumerate() {
+                if let Some(o) = wtx.sapling_outputs.iter_mut().find(|o| o.index == idx as u32) {
+                    if let Some(DecryptResult { memo: Some(memo), .. }) = opt {
+                        o.memo = Some(memo);
+                    }
+                }
+            }
+            let outgoing = recover_outgoing_sapling(outputs, keys, zip212);
+                for (idx, opt) in outgoing.into_iter().enumerate() {
+                    if opt.is_some() && !wtx.sapling_outputs.iter().any(|o| o.index == idx as u32) {
+                        if let Some(DecryptResult { note, recipient, memo: Some(memo), key_index }) = opt {
+                            wtx.sapling_outputs.push(SaplingOutput {
+                                index: idx as u32, note, recipient, nf: None,
+                                position: 0u64,
+                                scope: if key_index == 0 { Scope::External } else { Scope::Internal },
+                                memo: Some(memo), is_sent: true, is_change: false,
+                            });
+                        }
+                    }
+                }
+        }
+
+        if let Some(bundle) = tx.orchard_bundle() {
+            let actions: Vec<_> = bundle.actions().iter().cloned().collect();
+            let full = decrypt_full_orchard(&actions, keys);
+            for (idx, opt) in full.into_iter().enumerate() {
+                if let Some(o) = wtx.orchard_outputs.iter_mut().find(|o| o.index == idx as u32) {
+                    if let Some(DecryptResult { memo: Some(memo), .. }) = opt {
+                        o.memo = Some(memo);
+                    }
+                }
+            }
+            let outgoing = recover_outgoing_orchard(&actions, keys);
+                for (idx, opt) in outgoing.into_iter().enumerate() {
+                    if opt.is_some() && !wtx.orchard_outputs.iter().any(|o| o.index == idx as u32) {
+                        if let Some(DecryptResult { note, recipient, memo: Some(memo), key_index }) = opt {
+                            wtx.orchard_outputs.push(OrchardOutput {
+                                index: idx as u32, note, recipient, nf: None,
+                                position: 0u64,
+                                scope: if key_index == 0 { Scope::External } else { Scope::Internal },
+                                memo: Some(memo), is_sent: true, is_change: false,
+                            });
+                        }
+                    }
+                }
+        }
+
+        if let Some(bundle) = tx.ironwood_bundle() {
+            let actions: Vec<_> = bundle.actions().iter().cloned().collect();
+            let full = decrypt_full_ironwood(&actions, keys);
+            for (idx, opt) in full.into_iter().enumerate() {
+                if let Some(o) = wtx.ironwood_outputs.iter_mut().find(|o| o.index == idx as u32) {
+                    if let Some(DecryptResult { memo: Some(memo), .. }) = opt {
+                        o.memo = Some(memo);
+                    }
+                }
+            }
+            let outgoing = recover_outgoing_ironwood(&actions, keys);
+                for (idx, opt) in outgoing.into_iter().enumerate() {
+                    if opt.is_some() && !wtx.ironwood_outputs.iter().any(|o| o.index == idx as u32) {
+                        if let Some(DecryptResult { note, recipient, memo: Some(memo), key_index }) = opt {
+                            wtx.ironwood_outputs.push(OrchardOutput {
+                                index: idx as u32, note, recipient, nf: None,
+                                position: 0u64,
+                                scope: if key_index == 0 { Scope::External } else { Scope::Internal },
+                                memo: Some(memo), is_sent: true, is_change: false,
+                            });
+                        }
+                    }
+                }
+        }
+    }
+
+    Ok(())
+}
 fn initial_tree_sizes(
     network: &Network,
     height: BlockHeight,
@@ -439,18 +416,30 @@ fn final_tree_sizes(block: &CompactBlock) -> (u32, u32, u32) {
     }
 }
 
-fn derive_transparent_scripts(key: &TransparentScanningKey, gap_limit: u32) -> HashSet<Vec<u8>> {
-    let mut scripts = HashSet::new();
-    for i in 0..gap_limit {
-        let idx = NonHardenedChildIndex::from_index(i).expect("valid index");
-        if let Ok(addr) = key.external.derive_address(idx) {
-            scripts.insert(addr.script().to_bytes());
-        }
-        if let Some(internal) = &key.internal {
-            if let Ok(addr) = internal.derive_address(idx) {
-                scripts.insert(addr.script().to_bytes());
-            }
-        }
+pub fn scan_transparent(utxos: &[GetAddressUtxosReply]) -> Vec<TransparentOutput> {
+    let mut outputs = Vec::with_capacity(utxos.len());
+    for utxo in utxos {
+        let txid = match utxo.txid.as_slice().try_into() {
+            Ok(bytes) => TxId::from_bytes(bytes),
+            Err(_) => continue,
+        };
+        let index = match u32::try_from(utxo.index) {
+            Ok(idx) => idx,
+            Err(_) => continue,
+        };
+        let value = match Zatoshis::from_nonnegative_i64(utxo.value_zat) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let height = match BlockHeight::try_from(utxo.height) {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+        outputs.push(TransparentOutput {
+            outpoint: OutPoint::new(*txid.as_ref(), index),
+            txout: TxOut::new(value, Script(ScriptCode(utxo.script.clone()))),
+            height,
+        });
     }
-    scripts
+    outputs
 }

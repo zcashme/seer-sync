@@ -6,7 +6,8 @@ use zcash_protocol::TxId;
 
 use crate::proto::{
     compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, ChainSpec,
-    CompactBlock, RawTransaction, TransparentAddressBlockFilter, TxFilter,
+    CompactBlock, GetAddressUtxosArg, GetAddressUtxosReply, RawTransaction,
+    TransparentAddressBlockFilter, TxFilter,
 };
 
 const MAINNET_SERVERS: &[&str] = &[
@@ -168,5 +169,64 @@ impl LwdClient {
         }
 
         Ok(transactions)
+    }
+
+    /// Returns true if `prev_hash` does not connect to the last trusted block.
+    pub(crate) fn detect_reorg(
+        &self,
+        prior: Option<(BlockHeight, BlockHash)>,
+        prev_hash: BlockHash,
+    ) -> Option<BlockHeight> {
+        if let Some((height, hash)) = prior {
+            if prev_hash != hash {
+                return Some(height);
+            }
+        }
+        None
+    }
+
+    /// Fetches the full serialized transaction for every provided txid in parallel.
+    pub(crate) async fn fetch_raw_transactions(
+        &mut self,
+        txids: &[(TxId, BlockHeight)],
+    ) -> Result<Vec<(TxId, BlockHeight, RawTransaction)>, RpcError> {
+        let mut handles = Vec::with_capacity(txids.len());
+        for &(txid, height) in txids {
+            let mut client = self.clone();
+            handles.push(tokio::spawn(async move {
+                client
+                    .raw_transaction(&txid)
+                    .await
+                    .map(|raw| (txid, height, raw))
+            }));
+        }
+
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let result = handle.await.expect("fetch task panicked")?;
+            results.push(result);
+        }
+
+        Ok(results)
+    }
+
+    /// Returns unspent transparent outputs for the given addresses at or above
+    /// `start_height`.
+    pub(crate) async fn address_utxos(
+        &mut self,
+        addresses: &[String],
+        start_height: BlockHeight,
+    ) -> Result<Vec<GetAddressUtxosReply>, RpcError> {
+        let reply = self
+            .inner
+            .get_address_utxos(tonic::Request::new(GetAddressUtxosArg {
+                addresses: addresses.to_vec(),
+                start_height: u64::from(u32::from(start_height)),
+                max_entries: 0,
+            }))
+            .await?
+            .into_inner();
+
+        Ok(reply.address_utxos)
     }
 }

@@ -21,25 +21,17 @@ exclude = [
 ]
 
 [features]
-# `cargo add seer-sync` syncs against lightwalletd out of the box — the gRPC
-# client and live engine are core. `db` is the only knob: opt-in persistence via
-# the reference SQLite consumer. Without it you bring your own store and consume
-# the engine's notes directly.
 default = []
-db = ["dep:rusqlite"]
-# Layer Ironwood Name Note trial-decrypt (relaxed cmx via zns-verify) on top of
-# the standard Orchard path — does not replace it.
-zns-decrypt = ["dep:zns-verify", "zns-verify/decrypt"]
 
 [dependencies]
-# ── Core (always compiled, sans-IO) ──────────────────────────────────────────
+# ── Core ──────────────────────────────────────────
 # Per-pool note-encryption primitives.
 zcash_note_encryption = "0.4"
 # Local monorepo: path → zns-orchard. crates.io: version 0.15.5 (upstream Ironwood).
 # [patch.crates-io] keeps zcash_keys/primitives on the same local orchard identity.
 orchard = { version = "0.15.5", path = "../zns-orchard", default-features = false, features = ["std"] }
 sapling = { package = "sapling-crypto", version = "0.7", default-features = false, features = ["std"] }
-# Upstream Zcash stack (crates.io) — Ironwood / orchard-0.15 line.
+# — Ironwood / orchard-0.15 line.
 zcash_protocol = { version = "0.10", default-features = false, features = ["std"] }
 zcash_keys = { version = "0.15", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
 zcash_transparent = { version = "0.9", default-features = false, features = ["std"] }
@@ -60,10 +52,9 @@ tokio-stream = "0.1"
 http = "1"
 thiserror = "2"
 
-# ── `db` (persistence, optional) ─────────────────────────────────────────────
-rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+# ── Persistence (always compiled) ────────────────────────────────────────────
+rusqlite = { version = "0.32", features = ["bundled"] }
 zcash_script = "0.4"
-zns-verify = { version = "0.0.2", path = "../zns-verify", optional = true }
 
 [build-dependencies]
 tonic-prost-build = { version = "0.14", default-features = false }
@@ -89,4 +80,3 @@ harness = false
 
 [[example]]
 name = "balance"
-required-features = ["db"]
