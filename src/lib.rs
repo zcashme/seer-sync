@@ -7,3 +7,12 @@
 pub mod db;
 pub mod proto;
 pub mod sync;
+
+pub use db::{Db, DbError};
+pub use sync::chain::LwdClient;
+pub use sync::decrypt::ScanningKeys;
+pub use sync::scan::Nullifiers;
+pub use sync::{run, Account, Cursor, Resume, SyncError};
+
+pub use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};
+pub use zcash_protocol::consensus::{BlockHeight, Network};

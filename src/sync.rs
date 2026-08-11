@@ -60,7 +60,7 @@ pub enum SyncError {
     },
 }
 
-pub(crate) async fn run<A: Account>(
+pub async fn run<A: Account>(
     mut client: LwdClient,
     keys: &ScanningKeys,
     network: Network,

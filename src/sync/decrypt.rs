@@ -9,14 +9,14 @@ use zip32::Scope;
 
 use crate::proto::{CompactOrchardAction, CompactSaplingOutput};
 
-pub(crate) struct ScanningKey<Ivk, Nk, Ovk> {
+pub struct ScanningKey<Ivk, Nk, Ovk> {
     pub ivk: Ivk,
     pub nk: Option<Nk>,
     pub ovk: Option<Ovk>,
     pub scope: Scope,
 }
 
-pub(crate) struct ScanningKeys {
+pub struct ScanningKeys {
     pub sapling: Vec<
         ScanningKey<
             sapling::note_encryption::PreparedIncomingViewingKey,
@@ -34,7 +34,7 @@ pub(crate) struct ScanningKeys {
 }
 
 impl ScanningKeys {
-    pub(crate) fn from_ufvk(ufvk: &UnifiedFullViewingKey) -> Self {
+    pub fn from_ufvk(ufvk: &UnifiedFullViewingKey) -> Self {
         let mut sapling = Vec::new();
         let mut orchard = Vec::new();
 
@@ -65,7 +65,7 @@ impl ScanningKeys {
         ScanningKeys { sapling, orchard }
     }
 
-    pub(crate) fn from_uivk(uivk: &UnifiedIncomingViewingKey) -> Self {
+    pub fn from_uivk(uivk: &UnifiedIncomingViewingKey) -> Self {
         let mut sapling = Vec::new();
         let mut orchard = Vec::new();
 

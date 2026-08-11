@@ -79,4 +79,4 @@ name = "decrypt"
 harness = false
 
 [[example]]
-name = "balance"
+name = "sync"

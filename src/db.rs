@@ -159,6 +159,30 @@ impl Db {
         )?;
         Ok(())
     }
+
+    /// Total unspent balance across all shielded pools, in zatoshis.
+    /// Note values are stored in the note blob; this extracts the 8-byte
+    /// little-endian value at offset 43 (after the 43-byte recipient).
+    pub fn balance(&self) -> Result<u64, DbError> {
+        let mut total: u64 = 0;
+        for table in NOTES_TABLES {
+            let rows: Vec<Vec<u8>> = self.conn
+                .prepare(&format!(
+                    "SELECT note FROM {table} WHERE spent = 0"
+                ))?
+                .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for blob in rows {
+                // Value is at bytes 43..51 (after 43-byte recipient).
+                if blob.len() >= 51 {
+                    let mut arr = [0u8; 8];
+                    arr.copy_from_slice(&blob[43..51]);
+                    total = total.saturating_add(u64::from_le_bytes(arr));
+                }
+            }
+        }
+        Ok(total)
+    }
 }
 
 // ─── Account impl ────────────────────────────────────────────────────────────
