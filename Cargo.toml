@@ -80,3 +80,6 @@ harness = false
 
 [[example]]
 name = "sync"
+
+[[example]]
+name = "balance"

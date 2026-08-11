@@ -60,13 +60,12 @@ pub enum SyncError {
     },
 }
 
-pub async fn run<A: Account>(
+pub(crate) async fn run<A: Account>(
     mut client: LwdClient,
     keys: &ScanningKeys,
     network: Network,
     account: &A,
-) -> Result<(), SyncError> {
-    let mut rewind_by = 1;
+) -> Result<(), SyncError> {    let mut rewind_by = 1;
 
     let mut recent_hashes: Vec<(BlockHeight, BlockHash)> = Vec::with_capacity(100);
 

@@ -150,6 +150,11 @@ impl Db {
         Ok(())
     }
 
+    /// Borrow the underlying connection (for read-only queries).
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     /// Initialise the account row if it doesn't exist yet.
     pub fn init_account(&self, birthday: BlockHeight) -> Result<(), DbError> {
         self.conn.execute(
