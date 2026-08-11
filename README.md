@@ -1,44 +1,103 @@
 # seer-sync
 
-View-key-only Zcash chain sync — a **non-spendable wallet** whose job is to
-track every note you can see from a viewing key, as accurately as the chain
-allows.
+```
+   _____ ________________     _______  ___   ________
+  / ___// ____/ ____/ __ \   / ___/\ \/ / | / / ____/
+  \__ \/ __/ / __/ / /_/ /   \__ \  \  /  |/ / /
+ ___/ / /___/ /___/ _, _/   ___/ /  / / /|  / /___
+/____/_____/_____/_/ |_|   /____/  /_/_/ |_|\____/
 
-Give it a **UIVK** (incoming) or **UFVK** (full), a lightwalletd endpoint, and
-either the bundled SQLite store or your own persistence behind the [`Account`](https://docs.rs/seer-sync/latest/seer_sync/trait.Account.html)
-trait. It trial-decrypts compact blocks, detects spends, recovers memos and sent
-recipients from full transactions, and follows reorgs without pulling in
-`zcash_client_backend` or `zcash_client_sqlite`.
+  sync a view key, see your ZEC
+```
+
+A **view-key-only** Zcash chain sync engine. Give it a UIVK or UFVK, a
+lightwalletd endpoint, and a place to store notes — it trial-decrypts compact
+blocks, detects spends, recovers memos, and follows reorgs. No spending keys,
+no `zcash_client_backend`, no `zcash_client_sqlite`.
 
 ## Usage
 
 ```toml
 [dependencies]
-seer-sync = { version = "0.1", features = ["db"] }
+seer-sync = "0.3"
 ```
+
+```rust
+use seer_sync::{run, BlockHeight, Db, Network};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let db = Db::open("seer.db")?;
+    db.init_account(BlockHeight::from_u32(3_000_000))?;
+
+    run("uview1...", Network::MainNetwork, &db).await?;
+
+    println!("{} zat", db.balance()?);
+    Ok(())
+}
+```
+
+That's it. `run` parses the view key, connects to a server, syncs from the
+birthday to the tip, and keeps polling for new blocks.
 
 ```bash
-cargo run --release --features db --example balance -- '<ufvk>' <birthday> [db]
+# Try it yourself
+cargo run --release --example sync -- '<view-key>' <birthday> [db-path]
+cargo run --release --example balance -- [db-path]
 ```
 
-## Features
+## How it works
 
-- **Linear tip sync** — one `GetBlockRange` stream, chunked by output cost with
-  backpressure so download overlaps decrypt.
-- **Crash-safe cursor** — resume from the last applied batch; transport retries
-  are bounded.
-- **Reorgs** — `prev_hash` continuity from the stored seam; rewind and walk
-  back until the chain reconnects.
-- **Two-phase scan** — compact trial decrypt, then full-tx fetch for memos and
-  outgoing recipients.
-- **Transparent tracking** (opt-in) — BIP-44 discovery with gap limit, same
-  `run()` loop as shielded.
-- **Commitment firehose** (opt-in) — every Orchard `cmx` with leaf position,
-  plus shardtree witnesses for inclusion proofs.
+```
+  lightwalletd              seer-sync                         SQLite
+  ────────────              ─────────                         ──────
+  ┌─────────┐  compact    ┌───────────┐   WalletTx[]    ┌──────────┐
+  │GetBlock │ ──────────► │ trial     │ ─────────────► │  txs     │
+  │  Range  │             │ decrypt   │                 │  notes   │
+  └─────────┘             │           │                 │  spends  │
+                          │ reorg     │                 └──────────┘
+  ┌─────────┐  full tx    │  detect   │
+  │GetTx    │ ──────────► │ rewind   │
+  └─────────┘             └───────────┘
+```
+
+1. **Stream** compact blocks from lightwalletd (`GetBlockRange`)
+2. **Detect** reorgs by checking each block's `prev_hash` against local state
+3. **Scan** — batch trial-decrypt sapling + orchard + ironwood outputs
+4. **Enrich** — fetch full transactions for memos and outgoing note recovery
+5. **Apply** — persist to SQLite, update checkpoint
+
+## Reorg handling
+
+When a block's `prev_hash` doesn't match our local state, the chain forked.
+We keep a sliding window of the last 100 block hashes in memory, rewind by
+`rewind_by` blocks, and re-stream from the network. The anchor block's
+`prev_hash` is checked against our **local** hash from the window — a mismatch
+means the fork is deeper, so we double `rewind_by` and repeat. Exponential
+backoff finds the fork point in O(log n) iterations.
+
+## Schema
+
+```
+account       birthday, sync_height, sync_hash
+txs           txid, block_height, tx_index, amount, is_outgoing
+sapling_notes txid, output_index, block_height, nf, note, recipient, memo,
+              scope, position, is_sent, is_change, spent, spent_height, ...
+orchard_notes (same)
+ironwood_notes (same)
+```
+
+Spends are columns on the note they consume (`spent`, `spent_height`,
+`spent_txid`, `spent_index`) — no separate spend tables.
+
+## Pools
+
+- **Sapling** — trial decrypt + nullifier spend detection
+- **Orchard** — trial decrypt + nullifier spend detection
+- **Ironwood** — trial decrypt + nullifier spend detection (ZIP 2005)
 
 ## License
 
 MIT
 
-[Documentation](https://docs.rs/seer-sync) |
 [Repository](https://github.com/zcashme/seer-sync)
