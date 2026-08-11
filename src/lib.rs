@@ -4,5 +4,6 @@
 //! (UFVK) and accurately tracks every note and spend you can see, using only
 //! compact blocks from lightwalletd.
 
+pub mod db;
 pub mod proto;
 pub mod sync;
