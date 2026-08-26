@@ -83,3 +83,6 @@ name = "sync"
 
 [[example]]
 name = "balance"
+
+[[example]]
+name = "taddr_txs"

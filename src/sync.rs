@@ -34,11 +34,25 @@ pub trait Account {
 
     fn rewind(&self, to: BlockHeight) -> Result<(), Box<dyn Error + Send + Sync>>;
 
-    fn apply(
+    fn apply_transactions(
         &self,
         at: Cursor,
         transactions: &[WalletTx],
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
+
+    /// Receive raw compact blocks and full transactions for custom decryption.
+    ///
+    /// Called after [`apply_transactions`] with the same cursor. The default
+    /// implementation does nothing — consumers that don't need raw data
+    /// (e.g. the reference [`Db`](crate::db::Db)) are unaffected.
+    fn apply_blocks(
+        &self,
+        _at: Cursor,
+        _blocks: &[crate::proto::CompactBlock],
+        _full_txs: &[(TxId, BlockHeight, Transaction)],
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -160,7 +174,7 @@ pub(crate) async fn run<A: Account>(
                 && (blocks.len() == BLOCKS_PER_BATCH
                     || output_count + block_output_count > OUTPUTS_PER_BATCH)
             {
-                let cursor = apply_blocks(
+                let cursor = process_batch(
                     &mut fetch_client,
                     keys,
                     network,
@@ -180,7 +194,7 @@ pub(crate) async fn run<A: Account>(
         }
 
         if !blocks.is_empty() {
-            apply_blocks(
+            process_batch(
                 &mut fetch_client,
                 keys,
                 network,
@@ -195,7 +209,7 @@ pub(crate) async fn run<A: Account>(
     }
 }
 
-async fn apply_blocks<A: Account>(
+async fn process_batch<A: Account>(
     client: &mut LwdClient,
     keys: &ScanningKeys,
     network: Network,
@@ -220,7 +234,7 @@ async fn apply_blocks<A: Account>(
 
     scan(&mut transactions, &full_transactions, keys, network)?;
 
-    let block = blocks.last().expect("apply_blocks is called with blocks");
+    let block = blocks.last().expect("process_batch is called with blocks");
     let height = BlockHeight::try_from(block.height)
         .map_err(|_| ScanError::InvalidCompactBlock(BlockHeight::from(0)))?;
     let hash: [u8; 32] = block
@@ -233,7 +247,11 @@ async fn apply_blocks<A: Account>(
         hash: BlockHash(hash),
     };
     account
-        .apply(cursor, &transactions)
+        .apply_transactions(cursor, &transactions)
+        .map_err(|source| SyncError::Account { source })?;
+
+    account
+        .apply_blocks(cursor, blocks, &full_transactions)
         .map_err(|source| SyncError::Account { source })?;
 
     Ok(cursor)

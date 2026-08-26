@@ -138,7 +138,7 @@ impl LwdClient {
             .into_inner())
     }
 
-    pub(crate) async fn taddress_transactions(
+    pub async fn taddress_transactions(
         &mut self,
         address: &str,
         from: BlockHeight,

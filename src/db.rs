@@ -267,7 +267,7 @@ impl Account for Db {
         Ok(())
     }
 
-    fn apply(
+    fn apply_transactions(
         &self,
         at: Cursor,
         transactions: &[WalletTx],
