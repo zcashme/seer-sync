@@ -27,9 +27,9 @@ default = []
 # ── Core ──────────────────────────────────────────
 # Per-pool note-encryption primitives.
 zcash_note_encryption = "0.4"
-# Local monorepo: path → zns-orchard. crates.io: version 0.15.5 (upstream Ironwood).
-# [patch.crates-io] keeps zcash_keys/primitives on the same local orchard identity.
-orchard = { version = "0.15.5", path = "../zns-orchard", default-features = false, features = ["std"] }
+# ZNS fork of orchard, published to crates.io as `zns-orchard` (lib name stays
+# `orchard`). [patch.crates-io] keeps zcash_keys/primitives on the same fork identity.
+orchard = { version = "0.15.5", default-features = false, features = ["std"] }
 sapling = { package = "sapling-crypto", version = "0.7", default-features = false, features = ["std"] }
 # — Ironwood / orchard-0.15 line.
 zcash_protocol = { version = "0.10", default-features = false, features = ["std"] }
@@ -67,12 +67,12 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.14", default-features = false, features = ["transport", "router", "codegen"] }
 zcash_keys = { version = "0.15", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
 zip32 = "0.2"
-orchard = { version = "0.15.5", path = "../zns-orchard", default-features = false, features = ["std"] }
 zcash_note_encryption = "0.4"
 
-# One orchard identity for the whole monorepo graph (stripped on crates.io publish).
+# One orchard identity for the whole graph.
 [patch.crates-io]
-orchard = { path = "../zns-orchard" }
+# Tag of the last commit whose package name is still `orchard` (pre-rename).
+orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.15.5" }
 
 [[bench]]
 name = "decrypt"
