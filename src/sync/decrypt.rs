@@ -126,7 +126,7 @@ pub(crate) fn decrypt_compact_sapling(
 
     let mut results: Vec<Option<DecryptResult<sapling::Note, sapling::PaymentAddress>>> =
         (0..outputs.len()).map(|_| None).collect();
-    for (idx, r) in indices.into_iter().zip(raw.into_iter()) {
+    for (idx, r) in indices.into_iter().zip(raw) {
         if let Some(((note, recipient), key_index)) = r {
             results[idx] = Some(DecryptResult {
                 note,
@@ -161,7 +161,7 @@ pub(crate) fn decrypt_compact_orchard(
 
     let mut results: Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> =
         (0..actions.len()).map(|_| None).collect();
-    for (idx, r) in indices.into_iter().zip(raw.into_iter()) {
+    for (idx, r) in indices.into_iter().zip(raw) {
         if let Some(((note, recipient), key_index)) = r {
             results[idx] = Some(DecryptResult {
                 note,
@@ -197,7 +197,7 @@ pub(crate) fn decrypt_compact_ironwood(
 
     let mut results: Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> =
         (0..actions.len()).map(|_| None).collect();
-    for (idx, r) in indices.into_iter().zip(raw.into_iter()) {
+    for (idx, r) in indices.into_iter().zip(raw) {
         if let Some(((note, recipient), key_index)) = r {
             results[idx] = Some(DecryptResult {
                 note,
@@ -477,7 +477,7 @@ pub(crate) fn decrypt_compact_ironwood_relaxed(
     let mut ordinary: Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> =
         (0..actions.len()).map(|_| None).collect();
     let mut relaxed = Vec::new();
-    for ((idx, ca), r) in parsed.into_iter().zip(raw.into_iter()) {
+    for ((idx, ca), r) in parsed.into_iter().zip(raw) {
         if let Some(((candidate, recipient), key_index)) = r {
             if rseed_guard(&candidate) {
                 ordinary[idx] = Some(DecryptResult {

@@ -212,6 +212,7 @@ impl LwdClient {
 
     /// Returns unspent transparent outputs for the given addresses at or above
     /// `start_height`.
+    #[allow(dead_code)] // gRPC wrapper kept for transparent-history consumers
     pub(crate) async fn address_utxos(
         &mut self,
         addresses: &[String],
