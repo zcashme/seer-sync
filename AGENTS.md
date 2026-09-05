@@ -81,20 +81,25 @@ or specific to this engine (sync loop, `Account` trait, raw storage).
 | *(default none)* | Engine + keys + scan; bring your own `Account` |
 | `db` | Reference SQLite `Db`, `sync()`, read path |
 | `commitment-tree` | Requires `db`. Every Orchard `cmx` + shardtree witnesses |
-| `zns-decrypt` | Layers Ironwood Name Note trial-decrypt (via `zns-verify`) **on top of** standard Orchard — does not replace it |
+| `zns-decrypt` | Forwards to `orchard/unsafe-zns`: Ironwood actions are trial-decrypted with the fork's `ZnsIronwoodDomain`, and each result is routed by the rseed guard — self-consistent notes take the ordinary path; the rest are surfaced unverified (`WalletTx.relaxed_ironwood_outputs`) for the caller to check bindings. |
 
 Standard Ironwood shielded outputs (V3 note plaintext) are handled by
 `IronwoodDomain` through `zcash_note_encryption`, exactly like Orchard
-outputs. The `zns-decrypt` feature adds only the relaxed Ironwood Name
-Note trial-decrypt path via `zns-verify`.
+outputs.
 
 ### Decrypt order (with `zns-decrypt`)
 
-1. **Standard Orchard** — `OrchardDomain`, ZIP-212 / cmx check (lead byte `0x02`).
-2. **Unclaimed actions only** — relaxed Ironwood via `zns-verify` (V3 / Name Notes; no cmx check; caller verifies bindings).
+One unified pass: Ironwood actions are trial-decrypted with the fork's
+`ZnsIronwoodDomain` and each result is routed by the rseed guard —
+self-consistent notes take the ordinary path (byte-identical to the standard
+domain), the rest surface as unverified candidates for the consumer to check
+(`zns_verify::verify_name_note`). The fork's domain is used directly
+(matching the mint's pattern); `zns-verify` stays for consumers without the
+fork. Application logic (names, memos-as-commands, binding verification)
+stays in the consumer (`zns-resolver`), not here.
 
-Default (no feature): step 1 only. Application logic (names, memos-as-commands,
-`verify_name_note`) stays in the consumer (`zns-resolver`), not here.
+Default (no feature): standard `IronwoodDomain` only — Name Notes remain
+invisible.
 
 ## Layout
 
