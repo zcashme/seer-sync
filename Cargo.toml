@@ -22,6 +22,10 @@ exclude = [
 
 [features]
 default = []
+# Relaxed Ironwood trial decryption for notes whose commitment is supplied by
+# the action rather than derived from the plaintext rseed (see zns-orchard's
+# `unsafe-zns`). Results are surfaced unverified; the caller checks bindings.
+zns-decrypt = ["orchard/unsafe-zns"]
 
 [dependencies]
 # ── Core ──────────────────────────────────────────
@@ -71,8 +75,8 @@ zcash_note_encryption = "0.4"
 
 # One orchard identity for the whole graph.
 [patch.crates-io]
-# Tag of the last commit whose package name is still `orchard` (pre-rename).
-orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.15.5" }
+# Canonical unified tag of the ZNS orchard fork (package name `orchard`).
+orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.15.5.2" }
 
 [[bench]]
 name = "decrypt"
