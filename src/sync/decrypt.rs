@@ -1,4 +1,9 @@
-use orchard::note_encryption::{CompactAction, IronwoodDomain, OrchardDomain};
+use orchard::note_encryption::CompactAction;
+#[cfg(not(feature = "zns-decrypt"))]
+use orchard::note_encryption::IronwoodDomain;
+use orchard::note_encryption::OrchardDomain;
+#[cfg(feature = "zns-decrypt")]
+use orchard::note_encryption::{CandidateNote, ZnsIronwoodDomain};
 use sapling::note_encryption::{CompactOutputDescription, SaplingDomain, Zip212Enforcement};
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 use zcash_note_encryption::{
@@ -121,7 +126,7 @@ pub(crate) fn decrypt_compact_sapling(
 
     let mut results: Vec<Option<DecryptResult<sapling::Note, sapling::PaymentAddress>>> =
         (0..outputs.len()).map(|_| None).collect();
-    for (idx, r) in indices.into_iter().zip(raw.into_iter()) {
+    for (idx, r) in indices.into_iter().zip(raw) {
         if let Some(((note, recipient), key_index)) = r {
             results[idx] = Some(DecryptResult {
                 note,
@@ -156,7 +161,7 @@ pub(crate) fn decrypt_compact_orchard(
 
     let mut results: Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> =
         (0..actions.len()).map(|_| None).collect();
-    for (idx, r) in indices.into_iter().zip(raw.into_iter()) {
+    for (idx, r) in indices.into_iter().zip(raw) {
         if let Some(((note, recipient), key_index)) = r {
             results[idx] = Some(DecryptResult {
                 note,
@@ -169,6 +174,7 @@ pub(crate) fn decrypt_compact_orchard(
     results
 }
 
+#[cfg(not(feature = "zns-decrypt"))]
 pub(crate) fn decrypt_compact_ironwood(
     actions: &[CompactOrchardAction],
     keys: &ScanningKeys,
@@ -191,7 +197,7 @@ pub(crate) fn decrypt_compact_ironwood(
 
     let mut results: Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> =
         (0..actions.len()).map(|_| None).collect();
-    for (idx, r) in indices.into_iter().zip(raw.into_iter()) {
+    for (idx, r) in indices.into_iter().zip(raw) {
         if let Some(((note, recipient), key_index)) = r {
             results[idx] = Some(DecryptResult {
                 note,
@@ -262,6 +268,7 @@ pub(crate) fn decrypt_full_orchard<T>(
         .collect()
 }
 
+#[cfg(not(feature = "zns-decrypt"))]
 pub(crate) fn decrypt_full_ironwood<T>(
     actions: &[orchard::Action<T>],
     keys: &ScanningKeys,
@@ -372,6 +379,7 @@ pub(crate) fn recover_outgoing_orchard<T>(
         .collect()
 }
 
+#[cfg(not(feature = "zns-decrypt"))]
 pub(crate) fn recover_outgoing_ironwood<T>(
     actions: &[orchard::Action<T>],
     keys: &ScanningKeys,
@@ -409,6 +417,165 @@ pub(crate) fn recover_outgoing_ironwood<T>(
             None
         })
         .collect()
+}
+
+// ── Relaxed Ironwood scan (`zns-decrypt`) ──────────────────────────────────
+//
+// Trial-decrypt with the fork's `ZnsIronwoodDomain` and route each result
+// with the rseed guard: self-consistent notes take the ordinary path
+// (byte-identical to the standard domain); the rest surface unverified.
+
+/// True when the decrypted note self-consistently produces its published
+/// commitment, i.e. it is an ordinary note under the standard rseed rule.
+#[cfg(feature = "zns-decrypt")]
+fn rseed_guard(candidate: &CandidateNote) -> bool {
+    use orchard::note::ExtractedNoteCommitment;
+
+    ExtractedNoteCommitment::from(candidate.note().commitment()).to_bytes()
+        == candidate.cmx().to_bytes()
+}
+
+/// An Ironwood note the rseed guard could not self-validate: (action index
+/// in the bundle, decrypted note + published cmx, action's public nullifier,
+/// raw memo, is_sent). Unverified — the caller must check the binding.
+#[cfg(feature = "zns-decrypt")]
+pub type RelaxedIronwoodOutput = (
+    usize,
+    CandidateNote,
+    orchard::note::Nullifier,
+    Option<[u8; 512]>,
+    bool,
+);
+
+#[cfg(feature = "zns-decrypt")]
+pub(crate) fn decrypt_compact_ironwood_relaxed(
+    actions: &[CompactOrchardAction],
+    keys: &ScanningKeys,
+) -> (
+    Vec<Option<DecryptResult<orchard::Note, orchard::Address>>>,
+    Vec<RelaxedIronwoodOutput>,
+) {
+    let ivks: Vec<_> = keys.orchard.iter().map(|k| k.ivk.clone()).collect();
+    if ivks.is_empty() {
+        return ((0..actions.len()).map(|_| None).collect(), Vec::new());
+    }
+
+    let mut parsed = Vec::new();
+    for (i, a) in actions.iter().enumerate() {
+        if let Some(ca) = parse_compact_orchard(a) {
+            parsed.push((i, ca));
+        }
+    }
+
+    let pairs: Vec<_> = parsed
+        .iter()
+        .map(|(_, ca)| (ZnsIronwoodDomain::for_compact_action(ca), ca.clone()))
+        .collect();
+
+    let raw = try_compact_note_decryption(&ivks, &pairs);
+
+    let mut ordinary: Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> =
+        (0..actions.len()).map(|_| None).collect();
+    let mut relaxed = Vec::new();
+    for ((idx, ca), r) in parsed.into_iter().zip(raw) {
+        if let Some(((candidate, recipient), key_index)) = r {
+            if rseed_guard(&candidate) {
+                ordinary[idx] = Some(DecryptResult {
+                    note: *candidate.note(),
+                    recipient,
+                    memo: None,
+                    key_index,
+                });
+            } else {
+                relaxed.push((idx, candidate, ca.nullifier(), None, false));
+            }
+        }
+    }
+    (ordinary, relaxed)
+}
+
+#[cfg(feature = "zns-decrypt")]
+pub(crate) fn decrypt_full_ironwood_relaxed<T: Clone>(
+    actions: &[orchard::Action<T>],
+    keys: &ScanningKeys,
+) -> (
+    Vec<Option<DecryptResult<orchard::Note, orchard::Address>>>,
+    Vec<RelaxedIronwoodOutput>,
+) {
+    let ivks: Vec<_> = keys.orchard.iter().map(|k| k.ivk.clone()).collect();
+    if ivks.is_empty() {
+        return ((0..actions.len()).map(|_| None).collect(), Vec::new());
+    }
+
+    let pairs: Vec<_> = actions
+        .iter()
+        .map(|a| (ZnsIronwoodDomain::for_action(a), a.clone()))
+        .collect();
+
+    let raw = batch_try_note_decryption(&ivks, &pairs);
+
+    let mut ordinary: Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> =
+        (0..actions.len()).map(|_| None).collect();
+    let mut relaxed = Vec::new();
+    for (idx, r) in raw.into_iter().enumerate() {
+        if let Some(((candidate, recipient, memo), key_index)) = r {
+            if rseed_guard(&candidate) {
+                ordinary[idx] = Some(DecryptResult {
+                    note: *candidate.note(),
+                    recipient,
+                    memo: Some(memo),
+                    key_index,
+                });
+            } else {
+                relaxed.push((idx, candidate, *actions[idx].nullifier(), Some(memo), false));
+            }
+        }
+    }
+    (ordinary, relaxed)
+}
+
+#[cfg(feature = "zns-decrypt")]
+pub(crate) fn recover_outgoing_ironwood_relaxed<T>(
+    actions: &[orchard::Action<T>],
+    keys: &ScanningKeys,
+) -> (
+    Vec<Option<DecryptResult<orchard::Note, orchard::Address>>>,
+    Vec<RelaxedIronwoodOutput>,
+) {
+    let ovks: Vec<&orchard::keys::OutgoingViewingKey> = keys
+        .orchard
+        .iter()
+        .filter_map(|k| k.ovk.as_ref())
+        .collect();
+    if ovks.is_empty() {
+        return ((0..actions.len()).map(|_| None).collect(), Vec::new());
+    }
+
+    let mut ordinary: Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> =
+        (0..actions.len()).map(|_| None).collect();
+    let mut relaxed = Vec::new();
+    for (idx, action) in actions.iter().enumerate() {
+        let domain = ZnsIronwoodDomain::for_action(action);
+        let nf = *action.nullifier();
+        for (i, ovk) in ovks.iter().enumerate() {
+            if let Some((candidate, recipient, memo)) =
+                domain.try_decrypt_sent(action, ovk)
+            {
+                if rseed_guard(&candidate) {
+                    ordinary[idx] = Some(DecryptResult {
+                        note: *candidate.note(),
+                        recipient,
+                        memo: Some(memo),
+                        key_index: i,
+                    });
+                } else {
+                    relaxed.push((idx, candidate, nf, Some(memo), true));
+                }
+                break;
+            }
+        }
+    }
+    (ordinary, relaxed)
 }
 
 fn parse_compact_sapling(o: &CompactSaplingOutput) -> Option<CompactOutputDescription> {

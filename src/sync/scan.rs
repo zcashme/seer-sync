@@ -10,10 +10,17 @@ use zip32::Scope;
 
 use crate::proto::{CompactBlock, GetAddressUtxosReply};
 use crate::sync::decrypt::{
-    decrypt_compact_ironwood, decrypt_compact_orchard, decrypt_compact_sapling,
-    decrypt_full_ironwood, decrypt_full_orchard, decrypt_full_sapling,
-    recover_outgoing_ironwood, recover_outgoing_orchard, recover_outgoing_sapling,
-    DecryptResult, ScanningKeys,
+    decrypt_compact_orchard, decrypt_compact_sapling, decrypt_full_orchard, decrypt_full_sapling,
+    recover_outgoing_orchard, recover_outgoing_sapling, DecryptResult, ScanningKeys,
+};
+#[cfg(not(feature = "zns-decrypt"))]
+use crate::sync::decrypt::{
+    decrypt_compact_ironwood, decrypt_full_ironwood, recover_outgoing_ironwood,
+};
+#[cfg(feature = "zns-decrypt")]
+use crate::sync::decrypt::{
+    decrypt_compact_ironwood_relaxed, decrypt_full_ironwood_relaxed,
+    recover_outgoing_ironwood_relaxed, RelaxedIronwoodOutput,
 };
 
 pub struct Nullifiers {
@@ -115,6 +122,10 @@ pub struct WalletTx {
     pub orchard_spends: Vec<OrchardSpend>,
     pub ironwood_outputs: Vec<OrchardOutput>,
     pub ironwood_spends: Vec<OrchardSpend>,
+    /// Ironwood notes the rseed guard could not self-validate. Unverified —
+    /// the caller must check bindings before use.
+    #[cfg(feature = "zns-decrypt")]
+    pub relaxed_ironwood_outputs: Vec<RelaxedIronwoodOutput>,
     pub transparent_outputs: Vec<TransparentOutput>,
     pub transparent_spends: Vec<TransparentSpend>,
 }
@@ -180,6 +191,8 @@ fn scan_block(
             orchard_outputs: Vec::new(), orchard_spends: Vec::new(),
             ironwood_outputs: Vec::new(), ironwood_spends: Vec::new(),
             transparent_outputs: Vec::new(), transparent_spends: Vec::new(),
+            #[cfg(feature = "zns-decrypt")]
+            relaxed_ironwood_outputs: Vec::new(),
         };
 
         let sap_decrypted = decrypt_compact_sapling(&tx.outputs, keys, zip212);
@@ -187,7 +200,7 @@ fn scan_block(
             let position = u64::from(sap_pos) + idx as u64;
             if let Some(DecryptResult { note, recipient, key_index, .. }) = opt {
                 let key = &keys.sapling[key_index];
-                let nf = key.nk.as_ref().map(|nk| note.nf(nk, u64::from(position)));
+                let nf = key.nk.as_ref().map(|nk| note.nf(nk, position));
                 wtx.sapling_outputs.push(SaplingOutput {
                     index: idx as u32, note, recipient, nf, position,
                     scope: key.scope, memo: None, is_sent: false, is_change: false,
@@ -219,42 +232,76 @@ fn scan_block(
         orch_pos += u32::try_from(tx.actions.len()).unwrap();
 
         for (idx, action) in tx.actions.iter().enumerate() {
-            if let Some(nf_bytes) = action.nullifier.as_slice().try_into().ok() {
-                if let Some(nf) = Option::from(orchard::note::Nullifier::from_bytes(nf_bytes)) {
-                    if nullifiers.orchard.contains(&nf) {
-                        wtx.orchard_spends.push(OrchardSpend { index: idx as u32, nf });
-                    }
+            if let Some(nf) = action
+                .nullifier
+                .as_slice()
+                .try_into()
+                .ok()
+                .and_then(|b| orchard::note::Nullifier::from_bytes(b).into())
+            {
+                if nullifiers.orchard.contains(&nf) {
+                    wtx.orchard_spends.push(OrchardSpend { index: idx as u32, nf });
                 }
             }
         }
 
-        let iorn_decrypted = decrypt_compact_ironwood(&tx.ironwood_actions, keys);
-        for (idx, opt) in iorn_decrypted.into_iter().enumerate() {
-            let position = u64::from(iorn_pos) + idx as u64;
-            if let Some(DecryptResult { note, recipient, key_index, .. }) = opt {
-                let key = &keys.orchard[key_index];
-                let nf = key.nk.as_ref().and_then(|fvk| Option::from(note.nullifier(fvk)));
-                wtx.ironwood_outputs.push(OrchardOutput {
-                    index: idx as u32, note, recipient, nf, position,
-                    scope: key.scope, memo: None, is_sent: false, is_change: false,
-                });
+        #[cfg(not(feature = "zns-decrypt"))]
+        {
+            let iorn_decrypted = decrypt_compact_ironwood(&tx.ironwood_actions, keys);
+            for (idx, opt) in iorn_decrypted.into_iter().enumerate() {
+                let position = u64::from(iorn_pos) + idx as u64;
+                if let Some(DecryptResult { note, recipient, key_index, .. }) = opt {
+                    let key = &keys.orchard[key_index];
+                    let nf = key.nk.as_ref().and_then(|fvk| Option::from(note.nullifier(fvk)));
+                    wtx.ironwood_outputs.push(OrchardOutput {
+                        index: idx as u32, note, recipient, nf, position,
+                        scope: key.scope, memo: None, is_sent: false, is_change: false,
+                    });
+                }
             }
+        }
+        #[cfg(feature = "zns-decrypt")]
+        {
+            let (iorn_decrypted, relaxed_hits) =
+                decrypt_compact_ironwood_relaxed(&tx.ironwood_actions, keys);
+            for (idx, opt) in iorn_decrypted.into_iter().enumerate() {
+                let position = u64::from(iorn_pos) + idx as u64;
+                if let Some(DecryptResult { note, recipient, key_index, .. }) = opt {
+                    let key = &keys.orchard[key_index];
+                    let nf = key.nk.as_ref().and_then(|fvk| Option::from(note.nullifier(fvk)));
+                    wtx.ironwood_outputs.push(OrchardOutput {
+                        index: idx as u32, note, recipient, nf, position,
+                        scope: key.scope, memo: None, is_sent: false, is_change: false,
+                    });
+                }
+            }
+            wtx.relaxed_ironwood_outputs.extend(relaxed_hits);
         }
         iorn_pos += u32::try_from(tx.ironwood_actions.len()).unwrap();
 
         for (idx, action) in tx.ironwood_actions.iter().enumerate() {
-            if let Some(nf_bytes) = action.nullifier.as_slice().try_into().ok() {
-                if let Some(nf) = Option::from(orchard::note::Nullifier::from_bytes(nf_bytes)) {
-                    if nullifiers.ironwood.contains(&nf) {
-                        wtx.ironwood_spends.push(OrchardSpend { index: idx as u32, nf });
-                    }
+            if let Some(nf) = action
+                .nullifier
+                .as_slice()
+                .try_into()
+                .ok()
+                .and_then(|b| orchard::note::Nullifier::from_bytes(b).into())
+            {
+                if nullifiers.ironwood.contains(&nf) {
+                    wtx.ironwood_spends.push(OrchardSpend { index: idx as u32, nf });
                 }
             }
         }
 
+        #[cfg(feature = "zns-decrypt")]
+        let detected_relaxed = !wtx.relaxed_ironwood_outputs.is_empty();
+        #[cfg(not(feature = "zns-decrypt"))]
+        let detected_relaxed = false;
+
         if !wtx.sapling_outputs.is_empty() || !wtx.sapling_spends.is_empty()
             || !wtx.orchard_outputs.is_empty() || !wtx.orchard_spends.is_empty()
             || !wtx.ironwood_outputs.is_empty() || !wtx.ironwood_spends.is_empty()
+            || detected_relaxed
         {
             detected_txs.push(wtx);
         }
@@ -276,7 +323,7 @@ fn scan_block(
 }
 
 pub fn scan(
-    txs: &mut Vec<WalletTx>,
+    txs: &mut [WalletTx],
     full_txs: &[(TxId, BlockHeight, Transaction)],
     keys: &ScanningKeys,
     network: Network,
@@ -339,6 +386,8 @@ pub fn scan(
         }
 
         if let Some(bundle) = tx.ironwood_bundle() {
+            #[cfg(not(feature = "zns-decrypt"))]
+            {
             let actions: Vec<_> = bundle.actions().iter().cloned().collect();
             let full = decrypt_full_ironwood(&actions, keys);
             for (idx, opt) in full.into_iter().enumerate() {
@@ -361,6 +410,44 @@ pub fn scan(
                         }
                     }
                 }
+        }
+            #[cfg(feature = "zns-decrypt")]
+            {
+            let actions: Vec<_> = bundle.actions().iter().cloned().collect();
+            let (full, ivk_hits) = decrypt_full_ironwood_relaxed(&actions, keys);
+            for (idx, opt) in full.into_iter().enumerate() {
+                if let Some(o) = wtx.ironwood_outputs.iter_mut().find(|o| o.index == idx as u32) {
+                    if let Some(DecryptResult { memo: Some(memo), .. }) = opt {
+                        o.memo = Some(memo);
+                    }
+                }
+            }
+            let (ovk_ordinary, ovk_hits) = recover_outgoing_ironwood_relaxed(&actions, keys);
+            for (idx, opt) in ovk_ordinary.into_iter().enumerate() {
+                if opt.is_some() && !wtx.ironwood_outputs.iter().any(|o| o.index == idx as u32) {
+                    if let Some(DecryptResult { note, recipient, memo: Some(memo), key_index }) = opt {
+                        wtx.ironwood_outputs.push(OrchardOutput {
+                            index: idx as u32, note, recipient, nf: None,
+                            position: 0u64,
+                            scope: if key_index == 0 { Scope::External } else { Scope::Internal },
+                            memo: Some(memo), is_sent: true, is_change: false,
+                        });
+                    }
+                }
+            }
+            // Update-or-insert by action index; the OVK pass runs last, so its
+            // is_sent: true wins.
+            for hit in ivk_hits.into_iter().chain(ovk_hits) {
+                match wtx
+                    .relaxed_ironwood_outputs
+                    .iter_mut()
+                    .find(|c| c.0 == hit.0)
+                {
+                    Some(slot) => *slot = hit,
+                    None => wtx.relaxed_ironwood_outputs.push(hit),
+                }
+            }
+            }
         }
     }
 

@@ -1,7 +1,7 @@
 [package]
 name = "seer-sync"
 description = "View-key-only Zcash chain sync"
-version = "0.3.1"
+version = "0.4.0"
 authors = ["Julian Abraham <julesverne505@gmail.com>"]
 edition = "2021"
 # Ironwood stack (orchard 0.15 / zcash_keys ≥0.15 / zcash_primitives ≥0.29).
@@ -22,14 +22,18 @@ exclude = [
 
 [features]
 default = []
+# Relaxed Ironwood trial decryption for notes whose commitment is supplied by
+# the action rather than derived from the plaintext rseed (see zns-orchard's
+# `unsafe-zns`). Results are surfaced unverified; the caller checks bindings.
+zns-decrypt = ["orchard/unsafe-zns"]
 
 [dependencies]
 # ── Core ──────────────────────────────────────────
 # Per-pool note-encryption primitives.
 zcash_note_encryption = "0.4"
-# ZNS fork of orchard, published to crates.io as `zns-orchard` (lib name stays
-# `orchard`). [patch.crates-io] keeps zcash_keys/primitives on the same fork identity.
-orchard = { version = "0.15.5", default-features = false, features = ["std"] }
+# ZNS orchard fork — git dep on the canonical unified tag (package name `orchard`).
+# Direct git dep (not crates.io + patch) so `cargo publish` resolves the real thing.
+orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.15.5.2", default-features = false, features = ["std"] }
 sapling = { package = "sapling-crypto", version = "0.7", default-features = false, features = ["std"] }
 # — Ironwood / orchard-0.15 line.
 zcash_protocol = { version = "0.10", default-features = false, features = ["std"] }
@@ -71,8 +75,8 @@ zcash_note_encryption = "0.4"
 
 # One orchard identity for the whole graph.
 [patch.crates-io]
-# Tag of the last commit whose package name is still `orchard` (pre-rename).
-orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.15.5" }
+# Canonical unified tag of the ZNS orchard fork (package name `orchard`).
+orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.15.5.2" }
 
 [[bench]]
 name = "decrypt"
