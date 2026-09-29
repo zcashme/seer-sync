@@ -79,7 +79,8 @@ pub(crate) async fn run<A: Account>(
     keys: &ScanningKeys,
     network: Network,
     account: &A,
-) -> Result<(), SyncError> {    let mut rewind_by = 1;
+) -> Result<(), SyncError> {
+    let mut rewind_by = 1;
 
     let mut recent_hashes: Vec<(BlockHeight, BlockHash)> = Vec::with_capacity(100);
 
@@ -137,9 +138,7 @@ pub(crate) async fn run<A: Account>(
                 nullifiers = new_nf;
                 recent_hashes.retain(|(h, _)| *h < rewind_to);
                 let (tip, _) = client.latest_block().await?;
-                stream = client
-                    .blocks(rewind_to.saturating_sub(1), tip)
-                    .await?;
+                stream = client.blocks(rewind_to.saturating_sub(1), tip).await?;
                 prior = if recent_hashes.len() >= 2 {
                     Some(recent_hashes[recent_hashes.len() - 2])
                 } else {
@@ -253,6 +252,17 @@ async fn process_batch<A: Account>(
     account
         .apply_blocks(cursor, blocks, &full_transactions)
         .map_err(|source| SyncError::Account { source })?;
+
+    // update_with only has ordinary output nullifiers. Reload the watch list
+    // the account just stored, so the next batch also sees anchors and name
+    // tips written by this one.
+    let Resume {
+        nullifiers: reloaded,
+        ..
+    } = account
+        .resume()
+        .map_err(|source| SyncError::Account { source })?;
+    *nullifiers = reloaded;
 
     Ok(cursor)
 }

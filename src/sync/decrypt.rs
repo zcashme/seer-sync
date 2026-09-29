@@ -252,9 +252,7 @@ pub(crate) fn decrypt_full_orchard<T>(
         .map(|action| {
             let domain = OrchardDomain::for_action(action);
             for (key_index, ivk) in ivks.iter().enumerate() {
-                if let Some((note, recipient, memo)) =
-                    try_note_decryption(&domain, ivk, action)
-                {
+                if let Some((note, recipient, memo)) = try_note_decryption(&domain, ivk, action) {
                     return Some(DecryptResult {
                         note,
                         recipient,
@@ -283,9 +281,7 @@ pub(crate) fn decrypt_full_ironwood<T>(
         .map(|action| {
             let domain = IronwoodDomain::for_action(action);
             for (key_index, ivk) in ivks.iter().enumerate() {
-                if let Some((note, recipient, memo)) =
-                    try_note_decryption(&domain, ivk, action)
-                {
+                if let Some((note, recipient, memo)) = try_note_decryption(&domain, ivk, action) {
                     return Some(DecryptResult {
                         note,
                         recipient,
@@ -304,11 +300,8 @@ pub(crate) fn recover_outgoing_sapling(
     keys: &ScanningKeys,
     zip212: Zip212Enforcement,
 ) -> Vec<Option<DecryptResult<sapling::Note, sapling::PaymentAddress>>> {
-    let ovks: Vec<&sapling::keys::OutgoingViewingKey> = keys
-        .sapling
-        .iter()
-        .filter_map(|k| k.ovk.as_ref())
-        .collect();
+    let ovks: Vec<&sapling::keys::OutgoingViewingKey> =
+        keys.sapling.iter().filter_map(|k| k.ovk.as_ref()).collect();
 
     if ovks.is_empty() {
         return (0..outputs.len()).map(|_| None).collect();
@@ -344,11 +337,8 @@ pub(crate) fn recover_outgoing_orchard<T>(
     actions: &[orchard::Action<T>],
     keys: &ScanningKeys,
 ) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
-    let ovks: Vec<&orchard::keys::OutgoingViewingKey> = keys
-        .orchard
-        .iter()
-        .filter_map(|k| k.ovk.as_ref())
-        .collect();
+    let ovks: Vec<&orchard::keys::OutgoingViewingKey> =
+        keys.orchard.iter().filter_map(|k| k.ovk.as_ref()).collect();
 
     if ovks.is_empty() {
         return (0..actions.len()).map(|_| None).collect();
@@ -384,11 +374,8 @@ pub(crate) fn recover_outgoing_ironwood<T>(
     actions: &[orchard::Action<T>],
     keys: &ScanningKeys,
 ) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
-    let ovks: Vec<&orchard::keys::OutgoingViewingKey> = keys
-        .orchard
-        .iter()
-        .filter_map(|k| k.ovk.as_ref())
-        .collect();
+    let ovks: Vec<&orchard::keys::OutgoingViewingKey> =
+        keys.orchard.iter().filter_map(|k| k.ovk.as_ref()).collect();
 
     if ovks.is_empty() {
         return (0..actions.len()).map(|_| None).collect();
@@ -542,11 +529,8 @@ pub(crate) fn recover_outgoing_ironwood_relaxed<T>(
     Vec<Option<DecryptResult<orchard::Note, orchard::Address>>>,
     Vec<RelaxedIronwoodOutput>,
 ) {
-    let ovks: Vec<&orchard::keys::OutgoingViewingKey> = keys
-        .orchard
-        .iter()
-        .filter_map(|k| k.ovk.as_ref())
-        .collect();
+    let ovks: Vec<&orchard::keys::OutgoingViewingKey> =
+        keys.orchard.iter().filter_map(|k| k.ovk.as_ref()).collect();
     if ovks.is_empty() {
         return ((0..actions.len()).map(|_| None).collect(), Vec::new());
     }
@@ -558,9 +542,7 @@ pub(crate) fn recover_outgoing_ironwood_relaxed<T>(
         let domain = ZnsIronwoodDomain::for_action(action);
         let nf = *action.nullifier();
         for (i, ovk) in ovks.iter().enumerate() {
-            if let Some((candidate, recipient, memo)) =
-                domain.try_decrypt_sent(action, ovk)
-            {
+            if let Some((candidate, recipient, memo)) = domain.try_decrypt_sent(action, ovk) {
                 if rseed_guard(&candidate) {
                     ordinary[idx] = Some(DecryptResult {
                         note: *candidate.note(),

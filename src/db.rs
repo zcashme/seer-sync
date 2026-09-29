@@ -26,9 +26,7 @@ use zcash_primitives::transaction::TxId;
 use zcash_protocol::consensus::BlockHeight;
 use zip32::Scope;
 
-use crate::sync::scan::{
-    Nullifiers, OrchardOutput, SaplingOutput, WalletTx,
-};
+use crate::sync::scan::{Nullifiers, OrchardOutput, SaplingOutput, WalletTx};
 use crate::sync::{Account, Cursor, Resume};
 
 // ─── errors ──────────────────────────────────────────────────────────────────
@@ -40,8 +38,6 @@ pub enum DbError {
     #[error("corrupted data: {0}")]
     Corrupt(String),
 }
-
-
 
 // ─── Db handle ───────────────────────────────────────────────────────────────
 
@@ -171,10 +167,9 @@ impl Db {
     pub fn balance(&self) -> Result<u64, DbError> {
         let mut total: u64 = 0;
         for table in NOTES_TABLES {
-            let rows: Vec<Vec<u8>> = self.conn
-                .prepare(&format!(
-                    "SELECT note FROM {table} WHERE spent = 0"
-                ))?
+            let rows: Vec<Vec<u8>> = self
+                .conn
+                .prepare(&format!("SELECT note FROM {table} WHERE spent = 0"))?
                 .query_map([], |row| row.get::<_, Vec<u8>>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
             for blob in rows {
@@ -252,10 +247,7 @@ impl Account for Db {
         }
 
         // 3. Delete txs on the dead chain.
-        tx.execute(
-            "DELETE FROM txs WHERE block_height >= ?",
-            params![to],
-        )?;
+        tx.execute("DELETE FROM txs WHERE block_height >= ?", params![to])?;
 
         // 4. Update checkpoint (sync_hash will be fixed by the next apply).
         tx.execute(
@@ -281,7 +273,10 @@ impl Account for Db {
                 || wtx.ironwood_outputs.iter().any(|o| o.is_sent);
 
             // Total value of all our notes in this tx.
-            let amount: u64 = wtx.sapling_outputs.iter().map(|o| o.note.value().inner())
+            let amount: u64 = wtx
+                .sapling_outputs
+                .iter()
+                .map(|o| o.note.value().inner())
                 .chain(wtx.orchard_outputs.iter().map(|o| o.note.value().inner()))
                 .chain(wtx.ironwood_outputs.iter().map(|o| o.note.value().inner()))
                 .sum();
@@ -356,7 +351,8 @@ const NOTES_TABLES: &[&str] = &["sapling_notes", "orchard_notes", "ironwood_note
 
 impl Db {
     fn load_nullifiers(&self) -> Result<Nullifiers, DbError> {
-        let sapling = self.conn
+        let sapling = self
+            .conn
             .prepare("SELECT nf FROM sapling_notes WHERE nf IS NOT NULL AND spent = 0")?
             .query_map([], |row| {
                 let bytes: Vec<u8> = row.get(0)?;
@@ -374,10 +370,17 @@ impl Db {
         let orchard = self.load_orchard_nullifiers("orchard_notes")?;
         let ironwood = self.load_orchard_nullifiers("ironwood_notes")?;
 
-        Ok(Nullifiers { sapling, orchard, ironwood })
+        Ok(Nullifiers {
+            sapling,
+            orchard,
+            ironwood,
+        })
     }
 
-    fn load_orchard_nullifiers(&self, table: &str) -> Result<Vec<orchard::note::Nullifier>, DbError> {
+    fn load_orchard_nullifiers(
+        &self,
+        table: &str,
+    ) -> Result<Vec<orchard::note::Nullifier>, DbError> {
         self.conn
             .prepare(&format!(
                 "SELECT nf FROM {table} WHERE nf IS NOT NULL AND spent = 0"
@@ -391,14 +394,13 @@ impl Db {
                         Box::new(DbError::Corrupt("orchard nf not 32 bytes".into())),
                     )
                 })?;
-                Option::from(orchard::note::Nullifier::from_bytes(arr))
-                    .ok_or_else(|| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            32,
-                            rusqlite::types::Type::Blob,
-                            Box::new(DbError::Corrupt("invalid orchard nullifier".into())),
-                        )
-                    })
+                Option::from(orchard::note::Nullifier::from_bytes(arr)).ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        32,
+                        rusqlite::types::Type::Blob,
+                        Box::new(DbError::Corrupt("invalid orchard nullifier".into())),
+                    )
+                })
             })?
             .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
@@ -413,16 +415,16 @@ impl Db {
 /// Serialize a sapling note into a blob.
 fn serialize_sapling_note(note: &sapling::Note) -> Vec<u8> {
     let mut buf = Vec::with_capacity(84);
-    buf.extend_from_slice(&note.recipient().to_bytes());     // 43
+    buf.extend_from_slice(&note.recipient().to_bytes()); // 43
     buf.extend_from_slice(&note.value().inner().to_le_bytes()); // 8
     match note.rseed() {
         sapling::note::Rseed::BeforeZip212(fr) => {
             buf.push(0);
-            buf.extend_from_slice(&fr.to_bytes());            // 32
+            buf.extend_from_slice(&fr.to_bytes()); // 32
         }
         sapling::note::Rseed::AfterZip212(seed) => {
             buf.push(1);
-            buf.extend_from_slice(seed);                        // 32
+            buf.extend_from_slice(seed); // 32
         }
     }
     buf
@@ -433,9 +435,9 @@ fn serialize_orchard_note(note: &orchard::Note) -> Vec<u8> {
     use orchard::note::NoteVersion;
     let mut buf = Vec::with_capacity(116);
     buf.extend_from_slice(&note.recipient().to_raw_address_bytes()); // 43
-    buf.extend_from_slice(&note.value().inner().to_le_bytes());     // 8
-    buf.extend_from_slice(&note.rho().to_bytes());                   // 32
-    buf.extend_from_slice(note.rseed().as_bytes());                  // 32
+    buf.extend_from_slice(&note.value().inner().to_le_bytes()); // 8
+    buf.extend_from_slice(&note.rho().to_bytes()); // 32
+    buf.extend_from_slice(note.rseed().as_bytes()); // 32
     buf.push(match note.version() {
         NoteVersion::V2 => 0,
         NoteVersion::V3 => 1,
