@@ -58,7 +58,9 @@ pub async fn run<A: Account>(
     let client = LwdClient::connect_auto(network)
         .await
         .map_err(|_| SeerSyncError::Account {
-            source: Box::new(db::DbError::Corrupt("no lightwalletd server available".into())),
+            source: Box::new(db::DbError::Corrupt(
+                "no lightwalletd server available".into(),
+            )),
         })?;
 
     // Run the sync engine.
