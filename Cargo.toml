@@ -24,16 +24,17 @@ default = []
 # Relaxed Ironwood trial decryption for notes whose commitment is supplied by
 # the action rather than derived from the plaintext rseed (see zns-orchard's
 # `unsafe-zns`). Results are surfaced unverified; the caller checks bindings.
-zns-decrypt = ["orchard/unsafe-zns"]
+zns-decrypt = ["dep:zns_orchard"]
 
 [dependencies]
 # ── Core ──────────────────────────────────────────
 # Per-pool note-encryption primitives.
 zcash_note_encryption = "0.5.1"
-# ZNS orchard fork — git dep on the tag ported onto upstream 0.16.0
-# (package version 0.16.0, satisfies zcash_primitives 0.31-pre's `^0.16`).
-# Direct git dep (not crates.io + patch) so `cargo publish` resolves the real thing.
-orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.16.0-pre.1", default-features = false, features = ["std"] }
+# Upstream orchard, the same crate zcash_keys and zcash_primitives use.
+orchard = { version = "0.16", default-features = false, features = ["std"] }
+# The ZNS orchard fork, for the relaxed Ironwood scan only. Its library is also
+# named `orchard`, so it is renamed; values cross by their byte encodings.
+zns_orchard = { package = "zns-orchard", version = "0.16.0", optional = true, default-features = false, features = ["std", "unsafe-zns"] }
 sapling = { package = "sapling-crypto", version = "0.9", default-features = false, features = ["std"] }
 # NU7 stack — crates.io pre-releases carrying `BranchId::Nu7` (0x7719_0ad9,
 # testnet-activated).
@@ -66,17 +67,13 @@ tonic-prost-build = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 futures = "0.3"
+rand = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.14", default-features = false, features = ["transport", "router", "codegen"] }
 zcash_keys = { version = "0.17.0-pre.1", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
 zip32 = "0.3"
 zcash_note_encryption = "0.5.1"
-
-# One orchard identity for the whole graph.
-[patch.crates-io]
-# Canonical unified tag of the ZNS orchard fork (package name `orchard`).
-orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.16.0-pre.1" }
 
 [[example]]
 name = "sync"

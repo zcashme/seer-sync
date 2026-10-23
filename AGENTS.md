@@ -21,22 +21,23 @@ in `src/sync/decrypt.rs`. `UnifiedFullViewingKey` and
 
 | Path | Role |
 |------|------|
-| `../zns-orchard` | **Our orchard** (fork of upstream 0.15.5 + `unsafe-zns`). Path + version + `[patch.crates-io]`. |
+| `../zns-orchard` | ZNS orchard fork (`zns-orchard` on crates.io, library name `orchard`). Used only by `zns-decrypt`. |
 | `../zns-verify` | ZNS commitment verify + optional relaxed Ironwood decrypt (`zns-decrypt` feature). |
-| `../zns-resolver` | App consumer: `impl Account`, enables `zns-decrypt`, also patches orchard → zns-orchard. |
+| `../zns-resolver` | App consumer: `impl Account`, enables `zns-decrypt`. |
 
-**Always one orchard identity** in the monorepo:
+**Two orchards, one boundary.** Everything uses upstream `orchard`, the crate
+`zcash_keys` and `zcash_primitives` use. The fork comes in renamed, only for
+the relaxed Ironwood scan:
 
 ```toml
-orchard = { version = "0.15.5", path = "../zns-orchard", default-features = false, features = ["std"] }
-
-[patch.crates-io]
-orchard = { path = "../zns-orchard" }
+orchard = { version = "0.16", default-features = false, features = ["std"] }
+zns_orchard = { package = "zns-orchard", version = "0.16.0", optional = true, ... }
 ```
 
-`version` is required for crates.io publish (path is stripped); `path` + `patch`
-keep local builds on zns-orchard so types unify with zcash_keys/primitives.
-Never leave the graph on two orchard versions.
+No `[patch]`: a patch never reaches downstream crates, so the crate builds
+as published. Fork types stay inside `zns-decrypt`; keys and actions enter
+and ordinary notes leave through `sync::decrypt::zns`, by byte encodings. A
+disagreement is `ScanError::ForkEncoding`.
 
 ## Dependency boundary
 
@@ -44,7 +45,7 @@ Never leave the graph on two orchard versions.
 
 | Crate | Pin |
 |-------|-----|
-| orchard | path `../zns-orchard` (0.15.5) |
+| orchard | 0.16 (upstream); `zns-orchard` 0.16.0 under `zns-decrypt` |
 | sapling-crypto | 0.7 |
 | zcash_note_encryption | 0.4 |
 | zcash_protocol | 0.10 |
@@ -81,7 +82,7 @@ or specific to this engine (sync loop, `Account` trait, raw storage).
 | *(default none)* | Engine + keys + scan; bring your own `Account` |
 | `db` | Reference SQLite `Db`, `sync()`, read path |
 | `commitment-tree` | Requires `db`. Every Orchard `cmx` + shardtree witnesses |
-| `zns-decrypt` | Forwards to `orchard/unsafe-zns`: Ironwood actions are trial-decrypted with the fork's `ZnsIronwoodDomain`, and each result is routed by the rseed guard — self-consistent notes take the ordinary path; the rest are surfaced unverified (`WalletTx.relaxed_ironwood_outputs`) for the caller to check bindings. |
+| `zns-decrypt` | Pulls in `zns-orchard` with `unsafe-zns`: Ironwood actions are trial-decrypted with the fork's `ZnsIronwoodDomain`, and each result is routed by the rseed guard — self-consistent notes take the ordinary path; the rest are surfaced unverified (`WalletTx.relaxed_ironwood_outputs`) for the caller to check bindings. |
 
 Standard Ironwood shielded outputs (V3 note plaintext) are handled by
 `IronwoodDomain` through `zcash_note_encryption`, exactly like Orchard
@@ -219,8 +220,9 @@ cargo check --features db,zns-decrypt --tests --examples
 5. **Do not teach the engine ZNS protocol** (names, verbs, prev_rcm). The
    `zns-decrypt` feature only supplies the decrypt *path*; verification stays
    in `zns-verify` / the consumer.
-6. **Keep orchard unified** — path + patch to `zns-orchard`; never leave
-   zcash_* on crates.io orchard 0.14 while this crate is on 0.15.
+6. **Keep fork types behind the boundary** — upstream `orchard` everywhere;
+   `zns_orchard` only inside `zns-decrypt`, crossing through
+   `sync::decrypt::zns`. No `[patch]`.
 7. **Upstream-first for protocol primitives.** If a crate in the IN list
    already defines the abstraction, use it. Do not write parallel
    ChaCha20Poly1305, KDF, key-agreement, note-plaintext, or domain-specific

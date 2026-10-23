@@ -133,6 +133,9 @@ pub struct WalletTx {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScanError {
+    #[cfg(feature = "zns-decrypt")]
+    #[error(transparent)]
+    ForkEncoding(#[from] crate::sync::decrypt::EncodingMismatch),
     #[error("invalid compact block at height {0}")]
     InvalidCompactBlock(BlockHeight),
     #[error("block height discontinuity: expected {prev_height} + 1, got {new_height}")]
@@ -347,7 +350,7 @@ fn scan_block<P: Parameters>(
         #[cfg(feature = "zns-decrypt")]
         {
             let (iorn_decrypted, relaxed_hits) =
-                decrypt_compact_ironwood_relaxed(&tx.ironwood_actions, keys);
+                decrypt_compact_ironwood_relaxed(&tx.ironwood_actions, keys)?;
             for (idx, opt) in iorn_decrypted.into_iter().enumerate() {
                 let position = u64::from(iorn_pos) + idx as u64;
                 if let Some(DecryptResult {
@@ -625,7 +628,7 @@ pub fn scan<P: Parameters>(
             #[cfg(feature = "zns-decrypt")]
             {
                 let actions: Vec<_> = bundle.actions().iter().cloned().collect();
-                let (full, ivk_hits) = decrypt_full_ironwood_relaxed(&actions, keys);
+                let (full, ivk_hits) = decrypt_full_ironwood_relaxed(&actions, keys)?;
                 for (idx, opt) in full.into_iter().enumerate() {
                     if let Some(o) = wtx
                         .ironwood_outputs
@@ -640,7 +643,7 @@ pub fn scan<P: Parameters>(
                         }
                     }
                 }
-                let (ovk_ordinary, ovk_hits) = recover_outgoing_ironwood_relaxed(&actions, keys);
+                let (ovk_ordinary, ovk_hits) = recover_outgoing_ironwood_relaxed(&actions, keys)?;
                 for (idx, opt) in ovk_ordinary.into_iter().enumerate() {
                     if opt.is_some() && !wtx.ironwood_outputs.iter().any(|o| o.index == idx as u32)
                     {
@@ -856,6 +859,8 @@ mod tests {
         ScanningKeys {
             sapling: Vec::new(),
             orchard: Vec::new(),
+            #[cfg(feature = "zns-decrypt")]
+            zns_orchard: Vec::new(),
         }
     }
 
