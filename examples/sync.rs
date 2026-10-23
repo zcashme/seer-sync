@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Db::open(&path)?;
     db.init_account(BlockHeight::from_u32(birthday))?;
 
-    run(&view_key, Network::MainNetwork, &db).await?;
+    run(&view_key, &Network::MainNetwork, &db).await?;
 
     Ok(())
 }

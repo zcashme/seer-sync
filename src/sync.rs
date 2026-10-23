@@ -12,7 +12,7 @@ use tokio::time::sleep;
 use tokio_stream::StreamExt;
 use zcash_primitives::block::BlockHash;
 use zcash_primitives::transaction::{Transaction, TxId};
-use zcash_protocol::consensus::{BlockHeight, BranchId, Network};
+use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
 
 const OUTPUTS_PER_BATCH: usize = 100_000;
 const BLOCKS_PER_BATCH: usize = 1_000;
@@ -42,7 +42,7 @@ pub trait Account {
 
     /// Receive raw compact blocks and full transactions for custom decryption.
     ///
-    /// Called after [`apply_transactions`] with the same cursor. The default
+    /// Called after [`apply_transactions`](Self::apply_transactions) with the same cursor. The default
     /// implementation does nothing — consumers that don't need raw data
     /// (e.g. the reference [`Db`](crate::db::Db)) are unaffected.
     fn apply_blocks(
@@ -74,10 +74,10 @@ pub enum SyncError {
     },
 }
 
-pub(crate) async fn run<A: Account>(
+pub(crate) async fn run<P: Parameters + Send + 'static, A: Account>(
     mut client: LwdClient,
     keys: &ScanningKeys,
-    network: Network,
+    params: &P,
     account: &A,
 ) -> Result<(), SyncError> {
     let mut rewind_by = 1;
@@ -176,7 +176,7 @@ pub(crate) async fn run<A: Account>(
                 let cursor = process_batch(
                     &mut fetch_client,
                     keys,
-                    network,
+                    params,
                     account,
                     &mut nullifiers,
                     &blocks,
@@ -196,7 +196,7 @@ pub(crate) async fn run<A: Account>(
             process_batch(
                 &mut fetch_client,
                 keys,
-                network,
+                params,
                 account,
                 &mut nullifiers,
                 &blocks,
@@ -208,15 +208,15 @@ pub(crate) async fn run<A: Account>(
     }
 }
 
-async fn process_batch<A: Account>(
+async fn process_batch<P: Parameters + Send + 'static, A: Account>(
     client: &mut LwdClient,
     keys: &ScanningKeys,
-    network: Network,
+    params: &P,
     account: &A,
     nullifiers: &mut Nullifiers,
     blocks: &[crate::proto::CompactBlock],
 ) -> Result<Cursor, SyncError> {
-    let mut transactions = scan_compact(blocks, keys, network, nullifiers)?;
+    let mut transactions = scan_compact(blocks, keys, params, nullifiers)?;
 
     nullifiers.update_with(&transactions);
 
@@ -225,13 +225,13 @@ async fn process_batch<A: Account>(
 
     let mut full_transactions = Vec::with_capacity(raw_transactions.len());
     for (txid, height, raw) in raw_transactions {
-        let branch_id = BranchId::for_height(&network, height);
+        let branch_id = BranchId::for_height(params, height);
         let parsed = Transaction::read(raw.data.as_slice(), branch_id)
             .map_err(|source| SyncError::Transaction { txid, source })?;
         full_transactions.push((txid, height, parsed));
     }
 
-    scan(&mut transactions, &full_transactions, keys, network)?;
+    scan(&mut transactions, &full_transactions, keys, params)?;
 
     let block = blocks.last().expect("process_batch is called with blocks");
     let height = BlockHeight::try_from(block.height)

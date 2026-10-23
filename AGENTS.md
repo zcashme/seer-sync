@@ -143,7 +143,7 @@ trait Account {
 | `Cursor` | fully applied height + optional seam `BlockHash` |
 | `Batch` | notes, spends, transparent outs/spends, optional commitments |
 
-`run(client, keys, network, account) -> Result<Option<Cursor>, SyncError<A::Error>>`.
+`run(client, keys, params, account) -> Result<Option<Cursor>, SyncError<A::Error>>`.
 
 ### Errors
 
@@ -165,7 +165,7 @@ Public chain API uses **`BlockHeight`** / **`BlockHash`**, not raw `u32` /
 - `tip` / `tip_height` / `blocks(from, to, …)` / `fetch_taddress_transactions`
 - `ChainError::Reorg(BlockHeight)`
 - `Db::set_birthday(BlockHeight)`
-- `connect_auto(Network)` picks mainnet vs testnet lightwalletd lists
+- `connect_auto(&params)` picks the lightwalletd list from `params.network_type()` and accepts only a server whose `chain_name` matches
 
 Proto still speaks `u64` heights internally; convert at the boundary.
 

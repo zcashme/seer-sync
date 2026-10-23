@@ -1,12 +1,12 @@
 use tokio_stream::{Stream, StreamExt};
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_primitives::block::BlockHash;
-use zcash_protocol::consensus::{BlockHeight, Network};
+use zcash_protocol::consensus::{BlockHeight, NetworkType, Parameters};
 use zcash_protocol::TxId;
 
 use crate::proto::{
     compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, ChainSpec,
-    CompactBlock, GetAddressUtxosArg, GetAddressUtxosReply, RawTransaction,
+    CompactBlock, Empty, GetAddressUtxosArg, GetAddressUtxosReply, RawTransaction,
     TransparentAddressBlockFilter, TxFilter,
 };
 
@@ -18,10 +18,22 @@ const MAINNET_SERVERS: &[&str] = &[
 ];
 const TESTNET_SERVERS: &[&str] = &["https://testnet.zec.rocks:443"];
 
-fn servers(network: Network) -> &'static [&'static str] {
+/// The network a lightwalletd `chain_name` names, or `None` if unrecognised.
+fn chain_type(chain_name: &str) -> Option<NetworkType> {
+    match chain_name {
+        "main" => Some(NetworkType::Main),
+        "test" => Some(NetworkType::Test),
+        "regtest" => Some(NetworkType::Regtest),
+        _ => None,
+    }
+}
+
+/// Bundled servers for `network`. Regtest has none.
+fn servers(network: NetworkType) -> &'static [&'static str] {
     match network {
-        Network::MainNetwork => MAINNET_SERVERS,
-        Network::TestNetwork => TESTNET_SERVERS,
+        NetworkType::Main => MAINNET_SERVERS,
+        NetworkType::Test => TESTNET_SERVERS,
+        NetworkType::Regtest => &[],
     }
 }
 
@@ -51,10 +63,16 @@ impl From<tonic::Status> for RpcError {
 }
 
 impl LwdClient {
-    pub async fn connect_auto(network: Network) -> Result<Self, NoServer> {
+    /// Connect to the first bundled server that serves `params`' chain.
+    ///
+    /// A server is accepted only if it answers `GetLightdInfo` and reports the
+    /// chain name for `params.network_type()`, so a wrong-chain server is
+    /// skipped rather than feeding its head into sync.
+    pub async fn connect_auto<P: Parameters>(params: &P) -> Result<Self, NoServer> {
+        let network = params.network_type();
         for &url in servers(network) {
             if let Ok(mut client) = Self::connect(url).await {
-                if client.latest_block().await.is_ok() {
+                if client.serves_chain(network).await {
                     return Ok(client);
                 }
             }
@@ -75,6 +93,15 @@ impl LwdClient {
         Ok(Self {
             inner: CompactTxStreamerClient::new(channel),
         })
+    }
+
+    /// Whether this server reports the chain `network` names. Any RPC failure
+    /// counts as not serving it.
+    async fn serves_chain(&mut self, network: NetworkType) -> bool {
+        match self.inner.get_lightd_info(Empty {}).await {
+            Ok(info) => chain_type(&info.into_inner().chain_name) == Some(network),
+            Err(_) => false,
+        }
     }
 
     pub async fn latest_block(&mut self) -> Result<(BlockHeight, BlockHash), RpcError> {
