@@ -95,13 +95,14 @@ impl LwdClient {
         })
     }
 
-    /// Whether this server reports the chain `network` names. Any RPC failure
-    /// counts as not serving it.
+    /// Whether this server reports the chain `network` names and can serve its
+    /// tip. Any RPC failure counts as not serving it.
     async fn serves_chain(&mut self, network: NetworkType) -> bool {
-        match self.inner.get_lightd_info(Empty {}).await {
-            Ok(info) => chain_type(&info.into_inner().chain_name) == Some(network),
-            Err(_) => false,
-        }
+        let Ok(info) = self.inner.get_lightd_info(Empty {}).await else {
+            return false;
+        };
+        chain_type(&info.into_inner().chain_name) == Some(network)
+            && self.latest_block().await.is_ok()
     }
 
     pub async fn latest_block(&mut self) -> Result<(BlockHeight, BlockHash), RpcError> {
@@ -256,5 +257,24 @@ impl LwdClient {
             .into_inner();
 
         Ok(reply.address_utxos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chain_type_maps_each_lightwalletd_chain_name() {
+        assert_eq!(chain_type("main"), Some(NetworkType::Main));
+        assert_eq!(chain_type("test"), Some(NetworkType::Test));
+        assert_eq!(chain_type("regtest"), Some(NetworkType::Regtest));
+    }
+
+    #[test]
+    fn chain_type_rejects_unknown_chain_names() {
+        assert_eq!(chain_type(""), None);
+        assert_eq!(chain_type("Main"), None);
+        assert_eq!(chain_type("mainnet"), None);
     }
 }

@@ -42,9 +42,9 @@ pub trait Account {
 
     /// Receive raw compact blocks and full transactions for custom decryption.
     ///
-    /// Called after [`apply_transactions`](Self::apply_transactions) with the same cursor. The default
-    /// implementation does nothing — consumers that don't need raw data
-    /// (e.g. the reference [`Db`](crate::db::Db)) are unaffected.
+    /// Called after [`apply_transactions`](Self::apply_transactions) with the same
+    /// cursor. The default implementation does nothing — consumers that don't
+    /// need raw data (e.g. the reference [`Db`](crate::db::Db)) are unaffected.
     fn apply_blocks(
         &self,
         _at: Cursor,
@@ -74,7 +74,7 @@ pub enum SyncError {
     },
 }
 
-pub(crate) async fn run<P: Parameters + Send + 'static, A: Account>(
+pub(crate) async fn run<P: Parameters + Sync, A: Account>(
     mut client: LwdClient,
     keys: &ScanningKeys,
     params: &P,
@@ -208,7 +208,7 @@ pub(crate) async fn run<P: Parameters + Send + 'static, A: Account>(
     }
 }
 
-async fn process_batch<P: Parameters + Send + 'static, A: Account>(
+async fn process_batch<P: Parameters + Sync, A: Account>(
     client: &mut LwdClient,
     keys: &ScanningKeys,
     params: &P,

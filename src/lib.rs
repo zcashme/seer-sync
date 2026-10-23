@@ -40,7 +40,7 @@ use sync::SyncError as SeerSyncError;
 /// must serve its chain. Parses the view key string (UFVK or UIVK), connects
 /// to a server, and runs the sync engine until caught up to the chain tip,
 /// then polls for new blocks.
-pub async fn run<P: Parameters + Send + 'static, A: Account>(
+pub async fn run<P: Parameters + Sync, A: Account>(
     view_key: &str,
     params: &P,
     account: &A,
