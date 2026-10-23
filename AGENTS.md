@@ -143,7 +143,7 @@ trait Account {
 | `Cursor` | fully applied height + optional seam `BlockHash` |
 | `Batch` | notes, spends, transparent outs/spends, optional commitments |
 
-`run(client, keys, params, account) -> Result<Option<Cursor>, SyncError<A::Error>>`.
+`run(client, keys, params, account) -> Result<(), SyncError>`.
 
 ### Errors
 
