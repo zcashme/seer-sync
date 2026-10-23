@@ -40,7 +40,7 @@ use sync::SyncError as SeerSyncError;
 /// the sync engine until caught up to the chain tip, then polls for new blocks.
 ///
 /// `params` names the network: the view key must decode for it, and one of the
-/// bundled lightwalletd servers for that network must serve its chain. Regtest
+/// bundled lightwalletd servers for that network must answer. Regtest
 /// has no bundled servers, so `run` fails for it.
 pub async fn run<P: Parameters + Sync, A: Account>(
     view_key: &str,

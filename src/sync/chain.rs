@@ -6,7 +6,7 @@ use zcash_protocol::TxId;
 
 use crate::proto::{
     compact_tx_streamer_client::CompactTxStreamerClient, BlockId, BlockRange, ChainSpec,
-    CompactBlock, Empty, GetAddressUtxosArg, GetAddressUtxosReply, RawTransaction,
+    CompactBlock, GetAddressUtxosArg, GetAddressUtxosReply, RawTransaction,
     TransparentAddressBlockFilter, TxFilter,
 };
 
@@ -17,16 +17,6 @@ const MAINNET_SERVERS: &[&str] = &[
     "https://ap.zec.rocks:443",
 ];
 const TESTNET_SERVERS: &[&str] = &["https://testnet.zec.rocks:443"];
-
-/// The network a lightwalletd `chain_name` names, or `None` if unrecognised.
-fn chain_type(chain_name: &str) -> Option<NetworkType> {
-    match chain_name {
-        "main" => Some(NetworkType::Main),
-        "test" => Some(NetworkType::Test),
-        "regtest" => Some(NetworkType::Regtest),
-        _ => None,
-    }
-}
 
 /// Bundled servers for `network`. Regtest has none.
 fn servers(network: NetworkType) -> &'static [&'static str] {
@@ -63,16 +53,12 @@ impl From<tonic::Status> for RpcError {
 }
 
 impl LwdClient {
-    /// Connect to the first bundled server that serves `params`' chain.
-    ///
-    /// A server is accepted only if it answers `GetLightdInfo` and reports the
-    /// chain name for `params.network_type()`, so a wrong-chain server is
-    /// skipped rather than feeding its head into sync.
+    /// Connect to the first bundled server for `params.network_type()` that
+    /// serves its tip.
     pub async fn connect_auto<P: Parameters>(params: &P) -> Result<Self, NoServer> {
-        let network = params.network_type();
-        for &url in servers(network) {
+        for &url in servers(params.network_type()) {
             if let Ok(mut client) = Self::connect(url).await {
-                if client.serves_chain(network).await {
+                if client.latest_block().await.is_ok() {
                     return Ok(client);
                 }
             }
@@ -93,16 +79,6 @@ impl LwdClient {
         Ok(Self {
             inner: CompactTxStreamerClient::new(channel),
         })
-    }
-
-    /// Whether this server reports the chain `network` names and can serve its
-    /// tip. Any RPC failure counts as not serving it.
-    async fn serves_chain(&mut self, network: NetworkType) -> bool {
-        let Ok(info) = self.inner.get_lightd_info(Empty {}).await else {
-            return false;
-        };
-        chain_type(&info.into_inner().chain_name) == Some(network)
-            && self.latest_block().await.is_ok()
     }
 
     pub async fn latest_block(&mut self) -> Result<(BlockHeight, BlockHash), RpcError> {
@@ -257,24 +233,5 @@ impl LwdClient {
             .into_inner();
 
         Ok(reply.address_utxos)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn chain_type_maps_each_lightwalletd_chain_name() {
-        assert_eq!(chain_type("main"), Some(NetworkType::Main));
-        assert_eq!(chain_type("test"), Some(NetworkType::Test));
-        assert_eq!(chain_type("regtest"), Some(NetworkType::Regtest));
-    }
-
-    #[test]
-    fn chain_type_rejects_unknown_chain_names() {
-        assert_eq!(chain_type(""), None);
-        assert_eq!(chain_type("Main"), None);
-        assert_eq!(chain_type("mainnet"), None);
     }
 }

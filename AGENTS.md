@@ -165,7 +165,7 @@ Public chain API uses **`BlockHeight`** / **`BlockHash`**, not raw `u32` /
 - `tip` / `tip_height` / `blocks(from, to, …)` / `fetch_taddress_transactions`
 - `ChainError::Reorg(BlockHeight)`
 - `Db::set_birthday(BlockHeight)`
-- `connect_auto(&params)` picks the lightwalletd list from `params.network_type()` and accepts only a server whose `chain_name` matches
+- `connect_auto(&params)` picks the lightwalletd list from `params.network_type()`
 
 Proto still speaks `u64` heights internally; convert at the boundary.
 
