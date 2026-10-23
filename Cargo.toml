@@ -1,10 +1,10 @@
 [package]
 name = "seer-sync"
 description = "View-key-only Zcash chain sync"
-version = "0.6.0"
+version = "0.7.0"
 authors = ["Julian Abraham <julesverne505@gmail.com>"]
 edition = "2021"
-# NU7 stack (orchard 0.16 / zcash_keys 0.17-pre / zcash_primitives 0.31-pre,
+# NU7 stack (orchard 0.16 / zcash_keys 0.17 / zcash_primitives 0.31,
 # BranchId::Nu7 = 0x7719_0ad9, testnet-activated).
 rust-version = "1.88"
 license = "MIT"
@@ -21,25 +21,21 @@ exclude = [
 
 [features]
 default = []
-# Relaxed Ironwood trial decryption for notes whose commitment is supplied by
-# the action rather than derived from the plaintext rseed (see zns-orchard's
-# `unsafe-zns`). Results are surfaced unverified; the caller checks bindings.
-zns-decrypt = ["orchard/unsafe-zns"]
+# Relaxed Ironwood scan for Name Notes, via zns-verify. Results are unverified.
+zns-decrypt = ["dep:zns-verify"]
 
 [dependencies]
 # ── Core ──────────────────────────────────────────
 # Per-pool note-encryption primitives.
 zcash_note_encryption = "0.5.1"
-# ZNS orchard fork — git dep on the tag ported onto upstream 0.16.0
-# (package version 0.16.0, satisfies zcash_primitives 0.31-pre's `^0.16`).
-# Direct git dep (not crates.io + patch) so `cargo publish` resolves the real thing.
-orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.16.0-pre.1", default-features = false, features = ["std"] }
+# Upstream orchard, the same crate zcash_keys and zcash_primitives use.
+orchard = { version = "0.16", default-features = false, features = ["std"] }
+zns-verify = { version = "0.2", optional = true, features = ["decrypt"] }
 sapling = { package = "sapling-crypto", version = "0.9", default-features = false, features = ["std"] }
-# NU7 stack — crates.io pre-releases carrying `BranchId::Nu7` (0x7719_0ad9,
-# testnet-activated).
-zcash_protocol = { version = "0.11.0-pre.0", default-features = false, features = ["std"] }
-zcash_keys = { version = "0.17.0-pre.1", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
-zcash_transparent = { version = "0.11.0-pre.1", default-features = false, features = ["std"] }
+# NU7 stack, carrying `BranchId::Nu7` (0x7719_0ad9, testnet-activated).
+zcash_protocol = { version = "0.11", default-features = false, features = ["std"] }
+zcash_keys = { version = "0.17", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
+zcash_transparent = { version = "0.11", default-features = false, features = ["std"] }
 zip32 = "0.3"
 # Decoder for the generated proto *message* types (the gRPC client is generated
 # alongside them; see build.rs).
@@ -48,7 +44,7 @@ prost = "0.14"
 # ── Network / async cluster (the live layer) ─────────────────────────────────
 # Full-transaction parsing for memo enrichment (a note's memo lives in the full
 # ciphertext that compact blocks truncate).
-zcash_primitives = { version = "0.31.0-pre.1", default-features = false }
+zcash_primitives = { version = "0.31", default-features = false }
 # gRPC + async (driver layer).
 tonic = { version = "0.14", default-features = false, features = ["transport", "tls-ring", "tls-webpki-roots", "codegen"] }
 tonic-prost = "0.14"
@@ -69,14 +65,9 @@ futures = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.14", default-features = false, features = ["transport", "router", "codegen"] }
-zcash_keys = { version = "0.17.0-pre.1", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
+zcash_keys = { version = "0.17", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
 zip32 = "0.3"
 zcash_note_encryption = "0.5.1"
-
-# One orchard identity for the whole graph.
-[patch.crates-io]
-# Canonical unified tag of the ZNS orchard fork (package name `orchard`).
-orchard = { git = "https://github.com/zcashme/orchard.git", tag = "zns-orchard-v0.16.0-pre.1" }
 
 [[example]]
 name = "sync"

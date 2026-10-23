@@ -19,7 +19,7 @@ no `zcash_client_backend`, no `zcash_client_sqlite`.
 
 ```toml
 [dependencies]
-seer-sync = "0.6"
+seer-sync = "0.7"
 ```
 
 ```rust

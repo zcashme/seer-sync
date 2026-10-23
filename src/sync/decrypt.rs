@@ -2,8 +2,6 @@ use orchard::note_encryption::CompactAction;
 #[cfg(not(feature = "zns-decrypt"))]
 use orchard::note_encryption::IronwoodDomain;
 use orchard::note_encryption::OrchardDomain;
-#[cfg(feature = "zns-decrypt")]
-use orchard::note_encryption::{CandidateNote, ZnsIronwoodDomain};
 use sapling::note_encryption::{
     CompactOutputDescription, SaplingDomain, Zip212Enforcement, COMPACT_NOTE_SIZE,
 };
@@ -13,6 +11,8 @@ use zcash_note_encryption::{
     try_note_decryption, try_output_recovery_with_ovk, EphemeralKeyBytes,
 };
 use zip32::Scope;
+#[cfg(feature = "zns-decrypt")]
+use zns_verify::decrypt::{CandidateNote, ZnsIronwoodDomain};
 
 use crate::proto::{CompactOrchardAction, CompactSaplingOutput};
 
@@ -410,7 +410,7 @@ pub(crate) fn recover_outgoing_ironwood<T>(
 
 // ── Relaxed Ironwood scan (`zns-decrypt`) ──────────────────────────────────
 //
-// Trial-decrypt with the fork's `ZnsIronwoodDomain` and route each result
+// Trial-decrypt with zns-verify's `ZnsIronwoodDomain` and route each result
 // with the rseed guard: self-consistent notes take the ordinary path
 // (byte-identical to the standard domain); the rest surface unverified.
 
