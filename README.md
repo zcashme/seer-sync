@@ -19,7 +19,7 @@ no `zcash_client_backend`, no `zcash_client_sqlite`.
 
 ```toml
 [dependencies]
-seer-sync = "0.4"
+seer-sync = "0.6"
 ```
 
 ```rust
@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Db::open("seer.db")?;
     db.init_account(BlockHeight::from_u32(3_000_000))?;
 
-    run("uview1...", Network::MainNetwork, &db).await?;
+    run("uview1...", &Network::MainNetwork, &db).await?;
 
     println!("{} zat", db.balance()?);
     Ok(())

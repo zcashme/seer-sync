@@ -4,7 +4,9 @@ use orchard::note_encryption::IronwoodDomain;
 use orchard::note_encryption::OrchardDomain;
 #[cfg(feature = "zns-decrypt")]
 use orchard::note_encryption::{CandidateNote, ZnsIronwoodDomain};
-use sapling::note_encryption::{CompactOutputDescription, SaplingDomain, Zip212Enforcement, COMPACT_NOTE_SIZE};
+use sapling::note_encryption::{
+    CompactOutputDescription, SaplingDomain, Zip212Enforcement, COMPACT_NOTE_SIZE,
+};
 use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 use zcash_note_encryption::{
     batch::{try_compact_note_decryption, try_note_decryption as batch_try_note_decryption},

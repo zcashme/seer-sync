@@ -1,7 +1,7 @@
 use tokio_stream::{Stream, StreamExt};
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_primitives::block::BlockHash;
-use zcash_protocol::consensus::{BlockHeight, Network};
+use zcash_protocol::consensus::{BlockHeight, NetworkType, Parameters};
 use zcash_protocol::TxId;
 
 use crate::proto::{
@@ -18,10 +18,12 @@ const MAINNET_SERVERS: &[&str] = &[
 ];
 const TESTNET_SERVERS: &[&str] = &["https://testnet.zec.rocks:443"];
 
-fn servers(network: Network) -> &'static [&'static str] {
+/// Bundled servers for `network`. Regtest has none.
+fn servers(network: NetworkType) -> &'static [&'static str] {
     match network {
-        Network::MainNetwork => MAINNET_SERVERS,
-        Network::TestNetwork => TESTNET_SERVERS,
+        NetworkType::Main => MAINNET_SERVERS,
+        NetworkType::Test => TESTNET_SERVERS,
+        NetworkType::Regtest => &[],
     }
 }
 
@@ -51,8 +53,10 @@ impl From<tonic::Status> for RpcError {
 }
 
 impl LwdClient {
-    pub async fn connect_auto(network: Network) -> Result<Self, NoServer> {
-        for &url in servers(network) {
+    /// Connect to the first bundled server for `params.network_type()` that
+    /// serves its tip.
+    pub async fn connect_auto<P: Parameters>(params: &P) -> Result<Self, NoServer> {
+        for &url in servers(params.network_type()) {
             if let Ok(mut client) = Self::connect(url).await {
                 if client.latest_block().await.is_ok() {
                     return Ok(client);

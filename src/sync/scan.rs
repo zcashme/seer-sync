@@ -1,6 +1,6 @@
 use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 use zcash_primitives::transaction::{Transaction, TxId};
-use zcash_protocol::consensus::{BlockHeight, Network, NetworkUpgrade, Parameters};
+use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::ShieldedPool;
 use zcash_script::script::Code as ScriptCode;
@@ -151,10 +151,10 @@ pub enum ScanError {
     },
 }
 
-pub fn scan_compact(
+pub fn scan_compact<P: Parameters>(
     blocks: &[CompactBlock],
     keys: &ScanningKeys,
-    network: Network,
+    params: &P,
     nullifiers: &Nullifiers,
 ) -> Result<Vec<WalletTx>, ScanError> {
     let mut txs = Vec::new();
@@ -168,13 +168,13 @@ pub fn scan_compact(
 
         let tree_sizes_at_block_start = match prev_tree_sizes {
             Some(sizes) => sizes,
-            None => initial_tree_sizes(&network, height, block)?,
+            None => initial_tree_sizes(params, height, block)?,
         };
 
         scan_block(
             block,
             keys,
-            &network,
+            params,
             nullifiers,
             tree_sizes_at_block_start,
             &mut txs,
@@ -186,10 +186,10 @@ pub fn scan_compact(
     Ok(txs)
 }
 
-fn scan_block(
+fn scan_block<P: Parameters>(
     block: &CompactBlock,
     keys: &ScanningKeys,
-    network: &Network,
+    params: &P,
     nullifiers: &Nullifiers,
     tree_sizes_at_block_start: (u32, u32, u32),
     detected_txs: &mut Vec<WalletTx>,
@@ -198,7 +198,7 @@ fn scan_block(
         u32::try_from(block.height)
             .map_err(|_| ScanError::InvalidCompactBlock(BlockHeight::from(0)))?,
     );
-    let zip212 = zip212_enforcement(network, height);
+    let zip212 = zip212_enforcement(params, height);
 
     let (mut sap_pos, mut orch_pos, mut iorn_pos) = tree_sizes_at_block_start;
 
@@ -466,14 +466,14 @@ fn action_nullifier(action: &CompactOrchardAction) -> Option<orchard::note::Null
         .and_then(|bytes| orchard::note::Nullifier::from_bytes(bytes).into())
 }
 
-pub fn scan(
+pub fn scan<P: Parameters>(
     txs: &mut [WalletTx],
     full_txs: &[(TxId, BlockHeight, Transaction)],
     keys: &ScanningKeys,
-    network: Network,
+    params: &P,
 ) -> Result<(), ScanError> {
     for (txid, height, tx) in full_txs {
-        let zip212 = zip212_enforcement(&network, *height);
+        let zip212 = zip212_enforcement(params, *height);
 
         let Some(wtx) = txs.iter_mut().find(|t| t.txid == *txid) else {
             continue;
@@ -687,13 +687,13 @@ pub fn scan(
 
     Ok(())
 }
-fn initial_tree_sizes(
-    network: &Network,
+fn initial_tree_sizes<P: Parameters>(
+    params: &P,
     height: BlockHeight,
     block: &CompactBlock,
 ) -> Result<(u32, u32, u32), ScanError> {
-    fn one(
-        network: &Network,
+    fn one<P: Parameters>(
+        params: &P,
         height: BlockHeight,
         pool: ShieldedPool,
         final_size: u32,
@@ -705,7 +705,7 @@ fn initial_tree_sizes(
                 .checked_sub(u32::try_from(output_count).unwrap_or(0))
                 .ok_or(ScanError::TreeSizeUnknown(pool, height));
         }
-        match network.activation_height(activation) {
+        match params.activation_height(activation) {
             Some(act) if height < act => Ok(0),
             Some(_) => Err(ScanError::TreeSizeUnknown(pool, height)),
             None => Ok(0),
@@ -727,7 +727,7 @@ fn initial_tree_sizes(
 
     Ok((
         one(
-            network,
+            params,
             height,
             ShieldedPool::Sapling,
             s,
@@ -735,7 +735,7 @@ fn initial_tree_sizes(
             NetworkUpgrade::Sapling,
         )?,
         one(
-            network,
+            params,
             height,
             ShieldedPool::Orchard,
             o,
@@ -743,7 +743,7 @@ fn initial_tree_sizes(
             NetworkUpgrade::Nu5,
         )?,
         one(
-            network,
+            params,
             height,
             ShieldedPool::Ironwood,
             i,
@@ -806,6 +806,7 @@ mod tests {
     use super::*;
     use crate::proto::{CompactSaplingSpend, CompactTx};
     use crate::sync::decrypt::ScanningKeys;
+    use zcash_protocol::consensus::Network;
 
     fn nf_bytes(tag: u8) -> [u8; 32] {
         let mut bytes = [0u8; 32];
@@ -866,7 +867,7 @@ mod tests {
         scan_compact(
             &[block(ironwood, sapling_spends)],
             &keys(),
-            Network::MainNetwork,
+            &Network::MainNetwork,
             nullifiers,
         )
         .expect("scan")

@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let network = Network::MainNetwork;
 
     println!("connecting to a mainnet lightwalletd server...");
-    let mut client = LwdClient::connect_auto(network).await?;
+    let mut client = LwdClient::connect_auto(&network).await?;
 
     println!(
         "querying {} for transactions in heights {}..{}",

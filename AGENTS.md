@@ -143,19 +143,15 @@ trait Account {
 | `Cursor` | fully applied height + optional seam `BlockHash` |
 | `Batch` | notes, spends, transparent outs/spends, optional commitments |
 
-`run(client, keys, network, account) -> Result<Option<Cursor>, SyncError<A::Error>>`.
+`run(client, keys, params, account) -> Result<(), SyncError>`.
 
 ### Errors
 
 ```text
-SyncError<E>  = Chain(ChainError) | Key(KeyError) | Account(E)
-DbError       = Sqlite(...) | BirthdayUnset          // feature db
-ChainError    = Reorg(BlockHeight) | Rpc | Connect | …
+SyncError     = Chain(RpcError) | Connect(NoServer) | ViewKey
+              | Scan(ScanError) | Transaction { txid, source } | Account { source }
+DbError       = Sqlite(...) | Corrupt(String)
 ```
-
-`From<ChainError>` / `From<KeyError>` for `SyncError<E>` are **hand-written** —
-`thiserror`'s `#[from]` does not emit them on a generic enum. Do not reintroduce
-`AccountError = Box<dyn Error>`.
 
 ### Heights
 
@@ -165,7 +161,7 @@ Public chain API uses **`BlockHeight`** / **`BlockHash`**, not raw `u32` /
 - `tip` / `tip_height` / `blocks(from, to, …)` / `fetch_taddress_transactions`
 - `ChainError::Reorg(BlockHeight)`
 - `Db::set_birthday(BlockHeight)`
-- `connect_auto(Network)` picks mainnet vs testnet lightwalletd lists
+- `connect_auto(&params)` picks the lightwalletd list from `params.network_type()`
 
 Proto still speaks `u64` heights internally; convert at the boundary.
 
@@ -212,8 +208,6 @@ cargo check --features db,zns-decrypt --tests --examples
 - **Unit / offline:** `src/db.rs` tests, `scan_commitments` position tests,
   `tests/sync_loop.rs` (mock lightwalletd, synthetic compact blocks).
 - **No live mainnet integration** in-tree. Prefer deterministic offline fixtures.
-- **Bench** `benches/decrypt.rs`: live fetch once in setup, then time
-  `scan_compact` only.
 
 ## Conventions
 

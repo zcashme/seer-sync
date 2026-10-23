@@ -2,7 +2,7 @@
 //!
 //! Stores received notes, detected spends, and the sync checkpoint in a single
 //! SQLite database.  Implements the [`Account`] trait so it can be passed
-//! directly to [`sync::run`](crate::sync::run).
+//! directly to [`run`](crate::run).
 //!
 //! ## Schema
 //!
@@ -196,7 +196,7 @@ impl Account for Db {
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
-            .map_err(|e| DbError::from(e))?;
+            .map_err(DbError::from)?;
 
         let checkpoint = match (sync_height, sync_hash) {
             (Some(h), Some(h_bytes)) => {
