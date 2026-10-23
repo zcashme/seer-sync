@@ -5,7 +5,7 @@ pub mod scan;
 use std::error::Error;
 use std::time::Duration;
 
-use self::chain::{LwdClient, RpcError};
+use self::chain::{LwdClient, NoServer, RpcError};
 use self::decrypt::ScanningKeys;
 use self::scan::{scan, scan_compact, Nullifiers, ScanError, WalletTx};
 use tokio::time::sleep;
@@ -59,6 +59,10 @@ pub trait Account {
 pub enum SyncError {
     #[error(transparent)]
     Chain(#[from] RpcError),
+    #[error(transparent)]
+    Connect(#[from] NoServer),
+    #[error("view key is neither a UFVK nor a UIVK for this network")]
+    ViewKey,
     #[error(transparent)]
     Scan(#[from] ScanError),
     #[error("failed to parse transaction {txid}: {source}")]

@@ -148,14 +148,10 @@ trait Account {
 ### Errors
 
 ```text
-SyncError<E>  = Chain(ChainError) | Key(KeyError) | Account(E)
-DbError       = Sqlite(...) | BirthdayUnset          // feature db
-ChainError    = Reorg(BlockHeight) | Rpc | Connect | …
+SyncError     = Chain(RpcError) | Connect(NoServer) | ViewKey
+              | Scan(ScanError) | Transaction { txid, source } | Account { source }
+DbError       = Sqlite(...) | Corrupt(String)
 ```
-
-`From<ChainError>` / `From<KeyError>` for `SyncError<E>` are **hand-written** —
-`thiserror`'s `#[from]` does not emit them on a generic enum. Do not reintroduce
-`AccountError = Box<dyn Error>`.
 
 ### Heights
 

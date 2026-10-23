@@ -40,8 +40,8 @@ use sync::SyncError as SeerSyncError;
 /// the sync engine until caught up to the chain tip, then polls for new blocks.
 ///
 /// `params` names the network: the view key must decode for it, and one of the
-/// bundled lightwalletd servers for that network must answer. Regtest
-/// has no bundled servers, so `run` fails for it.
+/// bundled lightwalletd servers for that network must answer. Regtest has no
+/// bundled servers, so `run` fails for it with [`SyncError::Connect`].
 pub async fn run<P: Parameters + Sync, A: Account>(
     view_key: &str,
     params: &P,
@@ -53,19 +53,11 @@ pub async fn run<P: Parameters + Sync, A: Account>(
     } else if let Ok(uivk) = UnifiedIncomingViewingKey::decode(params, view_key) {
         ScanningKeys::from_uivk(&uivk)
     } else {
-        return Err(SeerSyncError::Account {
-            source: Box::new(db::DbError::Corrupt("invalid view key".into())),
-        });
+        return Err(SeerSyncError::ViewKey);
     };
 
     // Connect to a lightwalletd server.
-    let client = LwdClient::connect_auto(params)
-        .await
-        .map_err(|_| SeerSyncError::Account {
-            source: Box::new(db::DbError::Corrupt(
-                "no lightwalletd server available".into(),
-            )),
-        })?;
+    let client = LwdClient::connect_auto(params).await?;
 
     // Run the sync engine.
     sync::run(client, &keys, params, account).await
