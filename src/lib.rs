@@ -36,8 +36,9 @@ use sync::SyncError as SeerSyncError;
 
 /// Sync a view key from a lightwalletd server into the given account store.
 ///
-/// `params` names the network: the view key must decode for it, and the server
-/// must serve its chain. Parses the view key string (UFVK or UIVK), connects
+/// `params` names the network: the view key must decode for it, and one of the
+/// bundled lightwalletd servers for that network must serve its chain. Regtest
+/// has no bundled servers, so `run` fails for it. Parses the view key string (UFVK or UIVK), connects
 /// to a server, and runs the sync engine until caught up to the chain tip,
 /// then polls for new blocks.
 pub async fn run<P: Parameters + Sync, A: Account>(

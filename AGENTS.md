@@ -212,8 +212,6 @@ cargo check --features db,zns-decrypt --tests --examples
 - **Unit / offline:** `src/db.rs` tests, `scan_commitments` position tests,
   `tests/sync_loop.rs` (mock lightwalletd, synthetic compact blocks).
 - **No live mainnet integration** in-tree. Prefer deterministic offline fixtures.
-- **Bench** `benches/decrypt.rs`: live fetch once in setup, then time
-  `scan_compact` only.
 
 ## Conventions
 

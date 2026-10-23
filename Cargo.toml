@@ -15,7 +15,6 @@ keywords = ["zcash", "sync", "lightwalletd", "viewing-key", "orchard"]
 exclude = [
     "AGENTS.md",
     "docs/",
-    "bench-data/",
     "Cargo.lock",
     ".gitignore",
 ]
