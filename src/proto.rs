@@ -1,2 +1,11 @@
 #![allow(clippy::all, unused_imports, missing_docs, dead_code)]
 include!(concat!(env!("OUT_DIR"), "/cash.z.wallet.sdk.rpc.rs"));
+
+#[cfg(test)]
+pub(crate) mod server {
+    #![allow(clippy::all, unused_imports, missing_docs, dead_code)]
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/test-server/cash.z.wallet.sdk.rpc.rs"
+    ));
+}
