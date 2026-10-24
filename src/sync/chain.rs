@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use tokio_stream::{Stream, StreamExt};
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_primitives::block::BlockHash;
@@ -17,6 +19,10 @@ const MAINNET_SERVERS: &[&str] = &[
     "https://ap.zec.rocks:443",
 ];
 const TESTNET_SERVERS: &[&str] = &["https://testnet.zec.rocks:443"];
+
+/// How long one bundled server may take to connect and serve its tip.
+/// A stall moves on to the next server instead of holding the caller there.
+const SERVER_ATTEMPT: Duration = Duration::from_secs(30);
 
 /// Bundled servers for `network`. Regtest has none.
 fn servers(network: NetworkType) -> &'static [&'static str] {
@@ -54,13 +60,16 @@ impl From<tonic::Status> for RpcError {
 
 impl LwdClient {
     /// Connect to the first bundled server for `params.network_type()` that
-    /// serves its tip.
+    /// serves its tip within `SERVER_ATTEMPT`; a stall tries the next server.
     pub async fn connect_auto<P: Parameters>(params: &P) -> Result<Self, NoServer> {
         for &url in servers(params.network_type()) {
-            if let Ok(mut client) = Self::connect(url).await {
-                if client.latest_block().await.is_ok() {
-                    return Ok(client);
-                }
+            let probe = async {
+                let mut client = Self::connect(url).await.ok()?;
+                client.latest_block().await.ok()?;
+                Some(client)
+            };
+            if let Ok(Some(client)) = tokio::time::timeout(SERVER_ATTEMPT, probe).await {
+                return Ok(client);
             }
         }
 
@@ -233,5 +242,23 @@ impl LwdClient {
             .into_inner();
 
         Ok(reply.address_utxos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use zcash_protocol::consensus::{MainNetwork, NetworkUpgrade};
+
+    use super::*;
+
+    /// Live: needs network access to the bundled mainnet servers.
+    /// Run with `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore = "live mainnet"]
+    async fn connect_auto_reaches_a_mainnet_tip() {
+        let mut client = LwdClient::connect_auto(&MainNetwork).await.unwrap();
+        let (tip, _) = client.latest_block().await.unwrap();
+        let nu5 = MainNetwork.activation_height(NetworkUpgrade::Nu5).unwrap();
+        assert!(tip > nu5, "mainnet tip {tip} is past NU5");
     }
 }
