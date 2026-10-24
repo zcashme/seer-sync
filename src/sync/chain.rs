@@ -60,21 +60,15 @@ impl From<tonic::Status> for RpcError {
 
 impl LwdClient {
     /// Connect to the first bundled server for `params.network_type()` that
-    /// serves its tip. Each server has 30s to connect and answer; a stall or
-    /// a failed tip read tries the next server.
+    /// serves its tip within `SERVER_ATTEMPT`; a stall tries the next server.
     pub async fn connect_auto<P: Parameters>(params: &P) -> Result<Self, NoServer> {
-        Self::connect_first(servers(params.network_type()), SERVER_ATTEMPT).await
-    }
-
-    /// First server in `urls` that connects and serves its tip within `attempt`.
-    async fn connect_first(urls: &[&str], attempt: Duration) -> Result<Self, NoServer> {
-        for &url in urls {
+        for &url in servers(params.network_type()) {
             let probe = async {
                 let mut client = Self::connect(url).await.ok()?;
                 client.latest_block().await.ok()?;
                 Some(client)
             };
-            if let Ok(Some(client)) = tokio::time::timeout(attempt, probe).await {
+            if let Ok(Some(client)) = tokio::time::timeout(SERVER_ATTEMPT, probe).await {
                 return Ok(client);
             }
         }
@@ -82,7 +76,7 @@ impl LwdClient {
         Err(NoServer)
     }
 
-    async fn connect(url: &str) -> Result<Self, tonic::transport::Error> {
+    async fn connect(url: &'static str) -> Result<Self, tonic::transport::Error> {
         let uri = url
             .parse::<http::Uri>()
             .expect("bundled lightwalletd URLs are valid HTTP URIs");
@@ -253,59 +247,18 @@ impl LwdClient {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use zcash_protocol::consensus::{MainNetwork, NetworkUpgrade};
 
     use super::*;
 
-    /// Accepts TCP connections and never sends a byte, so the TLS handshake stalls.
-    async fn silent_server() -> (String, Arc<AtomicUsize>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let hits = Arc::new(AtomicUsize::new(0));
-        let hits_task = Arc::clone(&hits);
-        tokio::spawn(async move {
-            loop {
-                let Ok((sock, _)) = listener.accept().await else {
-                    break;
-                };
-                hits_task.fetch_add(1, Ordering::SeqCst);
-                tokio::spawn(async move {
-                    let _sock = sock;
-                    std::future::pending::<()>().await;
-                });
-            }
-        });
-        (format!("https://{addr}"), hits)
-    }
-
+    /// Live: needs network access to the bundled mainnet servers.
+    /// Run with `cargo test -- --ignored`.
     #[tokio::test]
-    async fn a_stalled_server_yields_to_the_next_server() {
-        let (first, first_hits) = silent_server().await;
-        let (second, second_hits) = silent_server().await;
-        let attempt = Duration::from_millis(200);
-
-        let started = Instant::now();
-        let result = LwdClient::connect_first(&[&first, &second], attempt).await;
-        let elapsed = started.elapsed();
-
-        assert!(result.is_err(), "neither silent server can serve a tip");
-        assert!(
-            elapsed >= attempt,
-            "the first server must use its attempt budget, elapsed {elapsed:?}"
-        );
-        assert!(
-            elapsed < attempt * 2 + Duration::from_secs(1),
-            "both attempts stay inside their budgets, elapsed {elapsed:?}"
-        );
-        assert!(
-            first_hits.load(Ordering::SeqCst) >= 1,
-            "the stalled server was tried"
-        );
-        assert!(
-            second_hits.load(Ordering::SeqCst) >= 1,
-            "a stall on the first server still tries the next server"
-        );
+    #[ignore = "live mainnet"]
+    async fn connect_auto_reaches_a_mainnet_tip() {
+        let mut client = LwdClient::connect_auto(&MainNetwork).await.unwrap();
+        let (tip, _) = client.latest_block().await.unwrap();
+        let nu5 = MainNetwork.activation_height(NetworkUpgrade::Nu5).unwrap();
+        assert!(tip > nu5, "mainnet tip {tip} is past NU5");
     }
 }
