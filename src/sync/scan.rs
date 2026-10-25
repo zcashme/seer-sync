@@ -29,52 +29,6 @@ pub struct Nullifiers {
     pub ironwood: Vec<orchard::note::Nullifier>,
 }
 
-impl Nullifiers {
-    pub fn update_with(&mut self, transactions: &[WalletTx]) {
-        let sapling_spent: Vec<_> = transactions
-            .iter()
-            .flat_map(|tx| tx.sapling_spends.iter().map(|s| s.nf))
-            .collect();
-        let orchard_spent: Vec<_> = transactions
-            .iter()
-            .flat_map(|tx| tx.orchard_spends.iter().map(|s| s.nf))
-            .collect();
-        let ironwood_spent: Vec<_> = transactions
-            .iter()
-            .flat_map(|tx| tx.ironwood_spends.iter().map(|s| s.nf))
-            .collect();
-
-        self.sapling
-            .retain(|nf| !sapling_spent.iter().any(|s| s == nf));
-        self.orchard
-            .retain(|nf| !orchard_spent.iter().any(|s| s == nf));
-        self.ironwood
-            .retain(|nf| !ironwood_spent.iter().any(|s| s == nf));
-
-        self.sapling.extend(
-            transactions
-                .iter()
-                .flat_map(|tx| tx.sapling_outputs.iter())
-                .filter(|output| !output.is_sent)
-                .filter_map(|output| output.nf),
-        );
-        self.orchard.extend(
-            transactions
-                .iter()
-                .flat_map(|tx| tx.orchard_outputs.iter())
-                .filter(|output| !output.is_sent)
-                .filter_map(|output| output.nf),
-        );
-        self.ironwood.extend(
-            transactions
-                .iter()
-                .flat_map(|tx| tx.ironwood_outputs.iter())
-                .filter(|output| !output.is_sent)
-                .filter_map(|output| output.nf),
-        );
-    }
-}
-
 pub struct WalletOutput<Note, Nf, Recipient> {
     pub index: u32,
     pub note: Note,
@@ -151,16 +105,19 @@ pub enum ScanError {
     },
 }
 
+/// Scans until the first block with a kept transaction and returns how many
+/// blocks it scanned. Applying that block can change the account's watch list,
+/// so later blocks must be matched against the list reloaded after it.
 pub fn scan_compact<P: Parameters>(
     blocks: &[CompactBlock],
     keys: &ScanningKeys,
     params: &P,
     nullifiers: &Nullifiers,
-) -> Result<Vec<WalletTx>, ScanError> {
+) -> Result<(Vec<WalletTx>, usize), ScanError> {
     let mut txs = Vec::new();
     let mut prev_tree_sizes: Option<(u32, u32, u32)> = None;
 
-    for block in blocks {
+    for (scanned, block) in blocks.iter().enumerate() {
         let height = BlockHeight::from(
             u32::try_from(block.height)
                 .map_err(|_| ScanError::InvalidCompactBlock(BlockHeight::from(0)))?,
@@ -180,10 +137,14 @@ pub fn scan_compact<P: Parameters>(
             &mut txs,
         )?;
 
+        if !txs.is_empty() {
+            return Ok((txs, scanned + 1));
+        }
+
         prev_tree_sizes = Some(final_tree_sizes(block));
     }
 
-    Ok(txs)
+    Ok((txs, blocks.len()))
 }
 
 fn scan_block<P: Parameters>(
@@ -871,6 +832,7 @@ mod tests {
             nullifiers,
         )
         .expect("scan")
+        .0
     }
 
     fn spend_tags(tx: &WalletTx) -> Vec<(u32, u8)> {
@@ -924,5 +886,24 @@ mod tests {
         );
         assert_eq!(txs.len(), 1);
         assert_eq!(spend_tags(&txs[0]), vec![(0, 1), (1, 2)]);
+    }
+
+    #[test]
+    fn scan_stops_after_the_first_block_with_a_kept_transaction() {
+        let nullifiers = Nullifiers {
+            sapling: Vec::new(),
+            orchard: Vec::new(),
+            ironwood: vec![orchard_nf(1), orchard_nf(2)],
+        };
+        let blocks = [
+            block(vec![ironwood_action(3)], Vec::new()),
+            block(vec![ironwood_action(1)], Vec::new()),
+            block(vec![ironwood_action(2)], Vec::new()),
+        ];
+        let (txs, scanned) =
+            scan_compact(&blocks, &keys(), &Network::MainNetwork, &nullifiers).expect("scan");
+        assert_eq!(scanned, 2);
+        assert_eq!(txs.len(), 1);
+        assert_eq!(spend_tags(&txs[0]), vec![(0, 1)]);
     }
 }

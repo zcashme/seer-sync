@@ -218,55 +218,60 @@ async fn process_batch<P: Parameters + Sync, A: Account>(
     params: &P,
     account: &A,
     nullifiers: &mut Nullifiers,
-    blocks: &[crate::proto::CompactBlock],
+    mut blocks: &[crate::proto::CompactBlock],
 ) -> Result<Cursor, SyncError> {
-    let mut transactions = scan_compact(blocks, keys, params, nullifiers)?;
+    // The account owns the watch list, and a note received in one block can be
+    // spent in the next. So each segment ends at a block with a kept
+    // transaction, and the list is reloaded before the next segment is matched.
+    loop {
+        let (mut transactions, scanned) = scan_compact(blocks, keys, params, nullifiers)?;
+        let (segment, rest) = blocks.split_at(scanned);
 
-    nullifiers.update_with(&transactions);
+        let txids: Vec<(TxId, BlockHeight)> =
+            transactions.iter().map(|t| (t.txid, t.height)).collect();
+        let raw_transactions = client.fetch_raw_transactions(&txids).await?;
 
-    let txids: Vec<(TxId, BlockHeight)> = transactions.iter().map(|t| (t.txid, t.height)).collect();
-    let raw_transactions = client.fetch_raw_transactions(&txids).await?;
+        let mut full_transactions = Vec::with_capacity(raw_transactions.len());
+        for (txid, height, raw) in raw_transactions {
+            let branch_id = BranchId::for_height(params, height);
+            let parsed = Transaction::read(raw.data.as_slice(), branch_id)
+                .map_err(|source| SyncError::Transaction { txid, source })?;
+            full_transactions.push((txid, height, parsed));
+        }
 
-    let mut full_transactions = Vec::with_capacity(raw_transactions.len());
-    for (txid, height, raw) in raw_transactions {
-        let branch_id = BranchId::for_height(params, height);
-        let parsed = Transaction::read(raw.data.as_slice(), branch_id)
-            .map_err(|source| SyncError::Transaction { txid, source })?;
-        full_transactions.push((txid, height, parsed));
+        scan(&mut transactions, &full_transactions, keys, params)?;
+
+        let block = segment.last().expect("process_batch is called with blocks");
+        let height = BlockHeight::try_from(block.height)
+            .map_err(|_| ScanError::InvalidCompactBlock(BlockHeight::from(0)))?;
+        let hash: [u8; 32] = block
+            .hash
+            .as_slice()
+            .try_into()
+            .map_err(|_| ScanError::InvalidCompactBlock(height))?;
+        let cursor = Cursor {
+            height,
+            hash: BlockHash(hash),
+        };
+        account
+            .apply_transactions(cursor, &transactions)
+            .map_err(|source| SyncError::Account { source })?;
+
+        account
+            .apply_blocks(cursor, segment, &full_transactions)
+            .map_err(|source| SyncError::Account { source })?;
+
+        let Resume {
+            nullifiers: reloaded,
+            ..
+        } = account
+            .resume()
+            .map_err(|source| SyncError::Account { source })?;
+        *nullifiers = reloaded;
+
+        if rest.is_empty() {
+            return Ok(cursor);
+        }
+        blocks = rest;
     }
-
-    scan(&mut transactions, &full_transactions, keys, params)?;
-
-    let block = blocks.last().expect("process_batch is called with blocks");
-    let height = BlockHeight::try_from(block.height)
-        .map_err(|_| ScanError::InvalidCompactBlock(BlockHeight::from(0)))?;
-    let hash: [u8; 32] = block
-        .hash
-        .as_slice()
-        .try_into()
-        .map_err(|_| ScanError::InvalidCompactBlock(height))?;
-    let cursor = Cursor {
-        height,
-        hash: BlockHash(hash),
-    };
-    account
-        .apply_transactions(cursor, &transactions)
-        .map_err(|source| SyncError::Account { source })?;
-
-    account
-        .apply_blocks(cursor, blocks, &full_transactions)
-        .map_err(|source| SyncError::Account { source })?;
-
-    // update_with only has ordinary output nullifiers. Reload the watch list
-    // the account just stored, so the next batch also sees anchors and name
-    // tips written by this one.
-    let Resume {
-        nullifiers: reloaded,
-        ..
-    } = account
-        .resume()
-        .map_err(|source| SyncError::Account { source })?;
-    *nullifiers = reloaded;
-
-    Ok(cursor)
 }
