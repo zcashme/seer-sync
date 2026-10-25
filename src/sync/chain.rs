@@ -112,6 +112,25 @@ impl LwdClient {
         ))
     }
 
+    pub(crate) async fn block_hash(&mut self, height: BlockHeight) -> Result<BlockHash, RpcError> {
+        let block = self
+            .inner
+            .get_block(tonic::Request::new(BlockId {
+                height: u64::from(u32::from(height)),
+                hash: Vec::new(),
+            }))
+            .await?
+            .into_inner();
+
+        Ok(BlockHash(
+            block
+                .hash
+                .as_slice()
+                .try_into()
+                .expect("lightwalletd block hashes are 32 bytes"),
+        ))
+    }
+
     pub(crate) async fn blocks(
         &mut self,
         from: BlockHeight,
@@ -182,20 +201,6 @@ impl LwdClient {
         }
 
         Ok(transactions)
-    }
-
-    /// Returns true if `prev_hash` does not connect to the last trusted block.
-    pub(crate) fn detect_reorg(
-        &self,
-        prior: Option<(BlockHeight, BlockHash)>,
-        prev_hash: BlockHash,
-    ) -> Option<BlockHeight> {
-        if let Some((height, hash)) = prior {
-            if prev_hash != hash {
-                return Some(height);
-            }
-        }
-        None
     }
 
     /// Fetches the full serialized transaction for every provided txid in parallel.

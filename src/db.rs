@@ -221,38 +221,39 @@ impl Account for Db {
         })
     }
 
-    fn rewind(&self, to: BlockHeight) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let to = u32::from(to);
+    fn rewind(&self, to: Cursor) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let height = u32::from(to.height);
         let tx = self.conn.unchecked_transaction()?;
 
-        // 1. Delete notes received on the dead chain (height >= to).
+        // 1. Delete notes received on the dead chain (height > to).
         for table in NOTES_TABLES {
             tx.execute(
-                &format!("DELETE FROM {table} WHERE block_height >= ?"),
-                params![to],
+                &format!("DELETE FROM {table} WHERE block_height > ?"),
+                params![height],
             )?;
         }
 
         // 2. Unspend notes that were spent on the dead chain.
-        //    (spent_height >= to → set spent=0, clear spend columns)
+        //    (spent_height > to → set spent=0, clear spend columns)
         for table in NOTES_TABLES {
             tx.execute(
                 &format!(
                     "UPDATE {table} SET spent = 0, spent_height = NULL, \
                      spent_txid = NULL, spent_index = NULL \
-                     WHERE spent_height IS NOT NULL AND spent_height >= ?"
+                     WHERE spent_height IS NOT NULL AND spent_height > ?"
                 ),
-                params![to],
+                params![height],
             )?;
         }
 
         // 3. Delete txs on the dead chain.
-        tx.execute("DELETE FROM txs WHERE block_height >= ?", params![to])?;
+        tx.execute("DELETE FROM txs WHERE block_height > ?", params![height])?;
 
-        // 4. Update checkpoint (sync_hash will be fixed by the next apply).
+        // 4. `to` becomes the checkpoint, hash included, so the seam check
+        //    after a crash compares against the block we kept.
         tx.execute(
-            "UPDATE account SET sync_height = ? WHERE id = 1",
-            params![to],
+            "UPDATE account SET sync_height = ?, sync_hash = ? WHERE id = 1",
+            params![height, to.hash.0.as_slice()],
         )?;
 
         tx.commit()?;
@@ -521,5 +522,46 @@ fn scope_to_u8(scope: Scope) -> u8 {
     match scope {
         Scope::External => 0,
         Scope::Internal => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn insert_note(db: &Db, txid: u8, height: u32, spent_height: Option<u32>) {
+        db.conn
+            .execute(
+                "INSERT INTO orchard_notes (txid, output_index, block_height, note, recipient,
+                 scope, position, is_sent, is_change, spent, spent_height)
+                 VALUES (?, 0, ?, x'', x'', 0, 0, 0, 0, ?, ?)",
+                params![vec![txid; 32], height, spent_height.is_some(), spent_height],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn rewind_keeps_the_cursor_block_and_makes_it_the_checkpoint() {
+        let db = Db::open_memory().unwrap();
+        db.init_account(BlockHeight::from_u32(1)).unwrap();
+        insert_note(&db, 1, 20, Some(30));
+        insert_note(&db, 2, 30, None);
+
+        let to = Cursor {
+            height: BlockHeight::from_u32(20),
+            hash: BlockHash([7; 32]),
+        };
+        db.rewind(to).unwrap();
+
+        let notes: Vec<(u32, bool)> = db
+            .conn
+            .prepare("SELECT block_height, spent FROM orchard_notes")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(notes, vec![(20, false)], "20 stays, unspent; 30 is gone");
+        assert_eq!(db.resume().unwrap().checkpoint, Some(to));
     }
 }

@@ -16,6 +16,9 @@ use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
 
 const OUTPUTS_PER_BATCH: usize = 100_000;
 const BLOCKS_PER_BATCH: usize = 1_000;
+/// Neither zcashd nor zebrad reorgs more than 99 blocks, so a block this far
+/// below the checkpoint is final.
+const MAX_REORG_DEPTH: u32 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
@@ -32,7 +35,10 @@ pub struct Resume {
 pub trait Account {
     fn resume(&self) -> Result<Resume, Box<dyn Error + Send + Sync>>;
 
-    fn rewind(&self, to: BlockHeight) -> Result<(), Box<dyn Error + Send + Sync>>;
+    /// Drop everything above `to`, which becomes the checkpoint, atomically.
+    ///
+    /// `to` is below the current checkpoint.
+    fn rewind(&self, to: Cursor) -> Result<(), Box<dyn Error + Send + Sync>>;
 
     fn apply_transactions(
         &self,
@@ -84,15 +90,11 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
     params: &P,
     account: &A,
 ) -> Result<(), SyncError> {
-    let mut rewind_by = 1;
-
-    let mut recent_hashes: Vec<(BlockHeight, BlockHash)> = Vec::with_capacity(100);
-
     'outer: loop {
         let (tip, _) = client.latest_block().await?;
         let Resume {
             birthday,
-            checkpoint,
+            mut checkpoint,
             mut nullifiers,
         } = account
             .resume()
@@ -109,17 +111,14 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
         let mut fetch_client = client.clone();
         let mut stream = client.blocks(start, tip).await?;
 
-        let mut prior = checkpoint.map(|cursor| (cursor.height, cursor.hash));
+        // The last block read; `checkpoint` until the first one arrives.
+        let mut prior = checkpoint;
 
         let mut blocks = Vec::with_capacity(BLOCKS_PER_BATCH);
         let mut output_count = 0;
 
         while let Some(block) = stream.next().await {
             let block = block?;
-            let height = BlockHeight::from_u32(
-                u32::try_from(block.height)
-                    .expect("lightwalletd block heights fit Zcash's block-height type"),
-            );
             let prev_hash = BlockHash(
                 block
                     .prev_hash
@@ -128,66 +127,43 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
                     .expect("lightwalletd block hashes are 32 bytes"),
             );
 
-            if let Some(at) = client.detect_reorg(prior, prev_hash) {
-                let rewind_to = at.saturating_sub(rewind_by);
-                account
-                    .rewind(rewind_to)
-                    .map_err(|source| SyncError::Account { source })?;
-                rewind_by = rewind_by.saturating_mul(2);
-                let Resume {
-                    nullifiers: new_nf, ..
-                } = account
-                    .resume()
-                    .map_err(|source| SyncError::Account { source })?;
-                nullifiers = new_nf;
-                recent_hashes.retain(|(h, _)| *h < rewind_to);
-                let (tip, _) = client.latest_block().await?;
-                stream = client.blocks(rewind_to.saturating_sub(1), tip).await?;
-                prior = if recent_hashes.len() >= 2 {
-                    Some(recent_hashes[recent_hashes.len() - 2])
-                } else {
-                    None
-                };
-                blocks.clear();
-                output_count = 0;
-                continue;
+            if prior.is_some_and(|prior| prior.hash != prev_hash) {
+                // Unapplied blocks are only a download cache, so a reorg drops
+                // them and starts over from the checkpoint. If the checkpoint
+                // itself no longer connects, rewind below any possible fork,
+                // where the server's hash is safe to trust.
+                if let Some(seam) = checkpoint.filter(|&seam| prior == Some(seam)) {
+                    let height = seam
+                        .height
+                        .saturating_sub(MAX_REORG_DEPTH)
+                        .max(birthday.saturating_sub(1));
+                    let hash = client.block_hash(height).await?;
+                    account
+                        .rewind(Cursor { height, hash })
+                        .map_err(|source| SyncError::Account { source })?;
+                }
+                continue 'outer;
             }
 
-            let block_hash = BlockHash(
-                block
-                    .hash
-                    .as_slice()
-                    .try_into()
-                    .expect("lightwalletd block hashes are 32 bytes"),
-            );
-            prior = Some((height, block_hash));
+            prior = Some(cursor(&block));
 
-            recent_hashes.push((height, block_hash));
-            if recent_hashes.len() > 100 {
-                recent_hashes.remove(0);
-            }
-
-            let block_output_count = block
-                .vtx
-                .iter()
-                .map(|tx| tx.outputs.len() + tx.actions.len() + tx.ironwood_actions.len())
-                .sum::<usize>();
+            let block_output_count = block_output_count(&block);
 
             if !blocks.is_empty()
                 && (blocks.len() == BLOCKS_PER_BATCH
                     || output_count + block_output_count > OUTPUTS_PER_BATCH)
             {
-                let cursor = process_batch(
-                    &mut fetch_client,
-                    keys,
-                    params,
-                    account,
-                    &mut nullifiers,
-                    &blocks,
-                )
-                .await?;
-                prior = Some((cursor.height, cursor.hash));
-                rewind_by = 1;
+                checkpoint = Some(
+                    process_batch(
+                        &mut fetch_client,
+                        keys,
+                        params,
+                        account,
+                        &mut nullifiers,
+                        &blocks,
+                    )
+                    .await?,
+                );
                 blocks.clear();
                 output_count = 0;
             }
@@ -210,6 +186,30 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
 
         continue 'outer;
     }
+}
+
+fn cursor(block: &crate::proto::CompactBlock) -> Cursor {
+    Cursor {
+        height: BlockHeight::from_u32(
+            u32::try_from(block.height)
+                .expect("lightwalletd block heights fit Zcash's block-height type"),
+        ),
+        hash: BlockHash(
+            block
+                .hash
+                .as_slice()
+                .try_into()
+                .expect("lightwalletd block hashes are 32 bytes"),
+        ),
+    }
+}
+
+fn block_output_count(block: &crate::proto::CompactBlock) -> usize {
+    block
+        .vtx
+        .iter()
+        .map(|tx| tx.outputs.len() + tx.actions.len() + tx.ironwood_actions.len())
+        .sum()
 }
 
 async fn process_batch<P: Parameters + Sync, A: Account>(

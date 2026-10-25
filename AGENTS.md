@@ -120,7 +120,7 @@ trait Account {
     type Error: Error + Send + Sync + 'static;
 
     fn resume(&self) -> Result<Resume, Self::Error>;
-    fn rewind(&self, to: BlockHeight) -> Result<(), Self::Error>;
+    fn rewind(&self, to: Cursor) -> Result<(), Self::Error>;  // keep ≤ to; to is the checkpoint
     fn apply(&self, at: Cursor, batch: &Batch) -> Result<(), Self::Error>;
     fn wants_commitments(&self) -> bool { false }  // opt-in cmx firehose
 }
@@ -164,7 +164,7 @@ resume → discover transparent (whole life, gap-limit)
       → scan_compact → fetch full txs → enrich_memos / scan_sent / scan_transparent
       → optional scan_commitments
       → apply(Cursor, Batch)
-reorg  → rewind → double step → re-resume
+reorg  → drop buffer → rewind 100 below if the checkpoint broke → re-resume
 transport fault → bounded retry from checkpoint
 ```
 
@@ -172,7 +172,10 @@ transport fault → bounded retry from checkpoint
   (whichever first). `channel(1)` keeps download one batch ahead of decrypt.
 - **Crash-safe cursor.** `apply` must persist batch + cursor atomically.
 - **Reorgs.** Single detector in `download` (`prev_hash` chain, seeded by seam).
-  `Reorg` → rewind with growing step until seam reconnects.
+  Unapplied blocks are a cache: a reorg drops them and restarts from the
+  checkpoint. If the checkpoint itself no longer connects, rewind
+  `MAX_REORG_DEPTH` (100) below it — past any possible fork — to the server's
+  block there. No hash window, no search.
 - **Two-phase scan.** Compact trial decrypt, then full-tx for memos / sent / t-addrs.
 - **Transparent** rides the same loop (stateless discovery → whole-life window).
 
