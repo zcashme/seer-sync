@@ -1,6 +1,6 @@
 use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 use zcash_primitives::transaction::{Transaction, TxId};
-use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
+use zcash_protocol::consensus::{BlockHeight, Parameters};
 use zcash_protocol::value::Zatoshis;
 use zcash_protocol::ShieldedPool;
 use zcash_script::script::Code as ScriptCode;
@@ -8,7 +8,7 @@ use zcash_transparent::address::Script;
 use zcash_transparent::bundle::{OutPoint, TxOut};
 use zip32::Scope;
 
-use crate::proto::{CompactBlock, CompactOrchardAction, GetAddressUtxosReply};
+use crate::proto::{ChainMetadata, CompactBlock, CompactOrchardAction, GetAddressUtxosReply};
 #[cfg(not(feature = "zns-decrypt"))]
 use crate::sync::decrypt::{
     decrypt_compact_ironwood, decrypt_full_ironwood, recover_outgoing_ironwood,
@@ -125,23 +125,21 @@ pub fn scan_compact<P: Parameters>(
 
         let tree_sizes_at_block_start = match prev_tree_sizes {
             Some(sizes) => sizes,
-            None => initial_tree_sizes(params, height, block)?,
+            None => initial_tree_sizes(height, block)?,
         };
 
-        scan_block(
+        prev_tree_sizes = Some(scan_block(
             block,
             keys,
             params,
             nullifiers,
             tree_sizes_at_block_start,
             &mut txs,
-        )?;
+        )?);
 
         if !txs.is_empty() {
             return Ok((txs, scanned + 1));
         }
-
-        prev_tree_sizes = Some(final_tree_sizes(block));
     }
 
     Ok((txs, blocks.len()))
@@ -154,7 +152,7 @@ fn scan_block<P: Parameters>(
     nullifiers: &Nullifiers,
     tree_sizes_at_block_start: (u32, u32, u32),
     detected_txs: &mut Vec<WalletTx>,
-) -> Result<(), ScanError> {
+) -> Result<(u32, u32, u32), ScanError> {
     let height = BlockHeight::from(
         u32::try_from(block.height)
             .map_err(|_| ScanError::InvalidCompactBlock(BlockHeight::from(0)))?,
@@ -388,34 +386,33 @@ fn scan_block<P: Parameters>(
         }
     }
 
-    if let Some(meta) = &block.chain_metadata {
-        if meta.sapling_commitment_tree_size != sap_pos {
-            return Err(ScanError::TreeSizeMismatch {
-                pool: ShieldedPool::Sapling,
-                at_height: height,
-                given: meta.sapling_commitment_tree_size,
-                computed: sap_pos,
-            });
-        }
-        if meta.orchard_commitment_tree_size != orch_pos {
-            return Err(ScanError::TreeSizeMismatch {
-                pool: ShieldedPool::Orchard,
-                at_height: height,
-                given: meta.orchard_commitment_tree_size,
-                computed: orch_pos,
-            });
-        }
-        if meta.ironwood_commitment_tree_size != iorn_pos {
-            return Err(ScanError::TreeSizeMismatch {
-                pool: ShieldedPool::Ironwood,
-                at_height: height,
-                given: meta.ironwood_commitment_tree_size,
-                computed: iorn_pos,
-            });
-        }
+    let meta = chain_metadata(block, height)?;
+    if meta.sapling_commitment_tree_size != sap_pos {
+        return Err(ScanError::TreeSizeMismatch {
+            pool: ShieldedPool::Sapling,
+            at_height: height,
+            given: meta.sapling_commitment_tree_size,
+            computed: sap_pos,
+        });
+    }
+    if meta.orchard_commitment_tree_size != orch_pos {
+        return Err(ScanError::TreeSizeMismatch {
+            pool: ShieldedPool::Orchard,
+            at_height: height,
+            given: meta.orchard_commitment_tree_size,
+            computed: orch_pos,
+        });
+    }
+    if meta.ironwood_commitment_tree_size != iorn_pos {
+        return Err(ScanError::TreeSizeMismatch {
+            pool: ShieldedPool::Ironwood,
+            at_height: height,
+            given: meta.ironwood_commitment_tree_size,
+            computed: iorn_pos,
+        });
     }
 
-    Ok(())
+    Ok((sap_pos, orch_pos, iorn_pos))
 }
 
 fn action_nullifier(action: &CompactOrchardAction) -> Option<orchard::note::Nullifier> {
@@ -648,90 +645,49 @@ pub fn scan<P: Parameters>(
 
     Ok(())
 }
-fn initial_tree_sizes<P: Parameters>(
-    params: &P,
+
+/// Every bundled lightwalletd sends tree sizes, and positions can't be known
+/// without them.
+fn chain_metadata(block: &CompactBlock, height: BlockHeight) -> Result<&ChainMetadata, ScanError> {
+    block
+        .chain_metadata
+        .as_ref()
+        .ok_or(ScanError::InvalidCompactBlock(height))
+}
+
+/// A reported size of 0 is an empty tree: protobuf leaves zero fields off the
+/// wire, so it can't be told apart from a pool the server left out. A server
+/// that leaves one out fails scan_block's end-of-block check instead.
+fn initial_tree_sizes(
     height: BlockHeight,
     block: &CompactBlock,
 ) -> Result<(u32, u32, u32), ScanError> {
-    fn one<P: Parameters>(
-        params: &P,
-        height: BlockHeight,
-        pool: ShieldedPool,
-        final_size: u32,
-        output_count: usize,
-        activation: NetworkUpgrade,
-    ) -> Result<u32, ScanError> {
-        if final_size > 0 {
-            return final_size
-                .checked_sub(u32::try_from(output_count).unwrap_or(0))
-                .ok_or(ScanError::TreeSizeUnknown(pool, height));
-        }
-        match params.activation_height(activation) {
-            Some(act) if height < act => Ok(0),
-            Some(_) => Err(ScanError::TreeSizeUnknown(pool, height)),
-            None => Ok(0),
-        }
-    }
-
-    let meta = block.chain_metadata.as_ref();
-    let (s, o, i) = match meta {
-        Some(m) => (
-            m.sapling_commitment_tree_size,
-            m.orchard_commitment_tree_size,
-            m.ironwood_commitment_tree_size,
-        ),
-        None => (0, 0, 0),
+    let meta = chain_metadata(block, height)?;
+    let start = |pool, end: u32, outputs: usize| {
+        u32::try_from(outputs)
+            .ok()
+            .and_then(|outputs| end.checked_sub(outputs))
+            .ok_or(ScanError::TreeSizeUnknown(pool, height))
     };
-    let sap_count: usize = block.vtx.iter().map(|tx| tx.outputs.len()).sum();
-    let orch_count: usize = block.vtx.iter().map(|tx| tx.actions.len()).sum();
-    let iorn_count: usize = block.vtx.iter().map(|tx| tx.ironwood_actions.len()).sum();
+    let outputs = |count: fn(&crate::proto::CompactTx) -> usize| block.vtx.iter().map(count).sum();
 
     Ok((
-        one(
-            params,
-            height,
+        start(
             ShieldedPool::Sapling,
-            s,
-            sap_count,
-            NetworkUpgrade::Sapling,
+            meta.sapling_commitment_tree_size,
+            outputs(|tx| tx.outputs.len()),
         )?,
-        one(
-            params,
-            height,
+        start(
             ShieldedPool::Orchard,
-            o,
-            orch_count,
-            NetworkUpgrade::Nu5,
+            meta.orchard_commitment_tree_size,
+            outputs(|tx| tx.actions.len()),
         )?,
-        one(
-            params,
-            height,
+        start(
             ShieldedPool::Ironwood,
-            i,
-            iorn_count,
-            NetworkUpgrade::Nu6_3,
+            meta.ironwood_commitment_tree_size,
+            outputs(|tx| tx.ironwood_actions.len()),
         )?,
     ))
-}
-
-fn final_tree_sizes(block: &CompactBlock) -> (u32, u32, u32) {
-    if let Some(meta) = &block.chain_metadata {
-        (
-            meta.sapling_commitment_tree_size,
-            meta.orchard_commitment_tree_size,
-            meta.ironwood_commitment_tree_size,
-        )
-    } else {
-        let mut s = 0u32;
-        let mut o = 0u32;
-        let mut i = 0u32;
-        for tx in &block.vtx {
-            s += u32::try_from(tx.outputs.len()).unwrap();
-            o += u32::try_from(tx.actions.len()).unwrap();
-            i += u32::try_from(tx.ironwood_actions.len()).unwrap();
-        }
-        (s, o, i)
-    }
 }
 
 pub fn scan_transparent(utxos: &[GetAddressUtxosReply]) -> Vec<TransparentOutput> {
@@ -792,6 +748,11 @@ mod tests {
         ironwood: Vec<CompactOrchardAction>,
         spends: Vec<CompactSaplingSpend>,
     ) -> CompactBlock {
+        let chain_metadata = Some(ChainMetadata {
+            sapling_commitment_tree_size: 0,
+            orchard_commitment_tree_size: 0,
+            ironwood_commitment_tree_size: ironwood.len() as u32,
+        });
         CompactBlock {
             height: 1,
             hash: vec![0; 32],
@@ -809,7 +770,7 @@ mod tests {
                 vin: Vec::new(),
                 vout: Vec::new(),
             }],
-            chain_metadata: None,
+            chain_metadata,
         }
     }
 
@@ -895,15 +856,56 @@ mod tests {
             orchard: Vec::new(),
             ironwood: vec![orchard_nf(1), orchard_nf(2)],
         };
-        let blocks = [
+        let mut blocks = [
             block(vec![ironwood_action(3)], Vec::new()),
             block(vec![ironwood_action(1)], Vec::new()),
             block(vec![ironwood_action(2)], Vec::new()),
         ];
+        // Each block adds one leaf to the Ironwood tree.
+        for (size, block) in (1..).zip(&mut blocks) {
+            block
+                .chain_metadata
+                .as_mut()
+                .unwrap()
+                .ironwood_commitment_tree_size = size;
+        }
         let (txs, scanned) =
             scan_compact(&blocks, &keys(), &Network::MainNetwork, &nullifiers).expect("scan");
         assert_eq!(scanned, 2);
         assert_eq!(txs.len(), 1);
         assert_eq!(spend_tags(&txs[0]), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn empty_ironwood_tree_after_activation_starts_at_zero() {
+        // Mainnet's Ironwood activation block, as lightwalletd serves it: the
+        // tree is still empty, so its size is 0 and left off the wire.
+        let mut block = block(Vec::new(), Vec::new());
+        block.height = 3_428_143;
+        block.chain_metadata = Some(ChainMetadata {
+            sapling_commitment_tree_size: 73_938_243,
+            orchard_commitment_tree_size: 50_227_880,
+            ironwood_commitment_tree_size: 0,
+        });
+        let sizes = initial_tree_sizes(BlockHeight::from_u32(3_428_143), &block)
+            .expect("an empty tree has a known size");
+        assert_eq!(sizes, (73_938_243, 50_227_880, 0));
+    }
+
+    #[test]
+    fn block_without_chain_metadata_is_rejected() {
+        let mut block = block(Vec::new(), Vec::new());
+        block.chain_metadata = None;
+        let scanned = scan_compact(
+            &[block],
+            &keys(),
+            &Network::MainNetwork,
+            &Nullifiers {
+                sapling: Vec::new(),
+                orchard: Vec::new(),
+                ironwood: Vec::new(),
+            },
+        );
+        assert!(matches!(scanned, Err(ScanError::InvalidCompactBlock(_))));
     }
 }
