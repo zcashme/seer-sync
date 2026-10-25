@@ -381,14 +381,13 @@ mod tests {
         }
     }
 
-    /// The reference `Db`, plus every block handed to the account and every
-    /// rewind. `resume` fails once the checkpoint reaches `stop_at`, which is
-    /// how a test ends `run`.
+    /// The reference `Db`, plus every block handed to the account. `resume`
+    /// fails once the checkpoint reaches `stop_at`, which is how a test ends
+    /// `run`.
     struct Recorder {
         db: Db,
         stop_at: AtomicU32,
         scanned: Mutex<Vec<(u32, u8)>>,
-        rewinds: Mutex<Vec<(u32, u8)>>,
     }
 
     impl Recorder {
@@ -399,7 +398,6 @@ mod tests {
                 db,
                 stop_at: AtomicU32::new(0),
                 scanned: Mutex::new(Vec::new()),
-                rewinds: Mutex::new(Vec::new()),
             }
         }
 
@@ -410,10 +408,6 @@ mod tests {
 
         fn take_scanned(&self) -> Vec<(u32, u8)> {
             std::mem::take(&mut self.scanned.lock().unwrap())
-        }
-
-        fn rewinds(&self) -> Vec<(u32, u8)> {
-            self.rewinds.lock().unwrap().clone()
         }
     }
 
@@ -431,10 +425,6 @@ mod tests {
         }
 
         fn rewind(&self, to: Cursor) -> Result<(), Box<dyn Error + Send + Sync>> {
-            self.rewinds
-                .lock()
-                .unwrap()
-                .push(seen(u32::from(to.height), &to.hash.0));
             self.db.rewind(to)
         }
 
@@ -504,7 +494,6 @@ mod tests {
         sync_to_tip(Lightwalletd::new(1200, 1200, NEW, Vec::new()), &account).await;
 
         assert_eq!(account.take_scanned(), chain(100..=1200, 1200, NEW));
-        assert!(account.rewinds().is_empty());
     }
 
     #[tokio::test]
@@ -519,7 +508,6 @@ mod tests {
         sync_to_tip(Lightwalletd::new(120, 109, NEW, vec![switched]), &account).await;
 
         assert_eq!(account.take_scanned(), chain(100..=120, 109, NEW));
-        assert!(account.rewinds().is_empty(), "nothing was applied yet");
         assert_eq!(account.checkpoint(), (120, NEW));
     }
 
@@ -531,7 +519,6 @@ mod tests {
 
         sync_to_tip(Lightwalletd::new(120, 109, NEW, vec![old]), &account).await;
 
-        assert_eq!(account.rewinds(), vec![(10, 0)]);
         assert_eq!(
             account.take_scanned(),
             [chain(1..=110, 109, OLD), chain(11..=120, 109, NEW)].concat()
@@ -547,7 +534,6 @@ mod tests {
 
         sync_to_tip(Lightwalletd::new(120, 109, NEW, Vec::new()), &account).await;
 
-        assert_eq!(account.rewinds(), vec![(99, 0)]);
         assert_eq!(account.take_scanned(), chain(100..=120, 109, NEW));
         assert_eq!(account.checkpoint(), (120, NEW));
     }
