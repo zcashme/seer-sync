@@ -203,20 +203,6 @@ impl LwdClient {
         Ok(transactions)
     }
 
-    /// Returns true if `prev_hash` does not connect to the last trusted block.
-    pub(crate) fn detect_reorg(
-        &self,
-        prior: Option<(BlockHeight, BlockHash)>,
-        prev_hash: BlockHash,
-    ) -> Option<BlockHeight> {
-        if let Some((height, hash)) = prior {
-            if prev_hash != hash {
-                return Some(height);
-            }
-        }
-        None
-    }
-
     /// Fetches the full serialized transaction for every provided txid in parallel.
     pub(crate) async fn fetch_raw_transactions(
         &mut self,

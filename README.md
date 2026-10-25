@@ -71,16 +71,11 @@ cargo run --release --example balance -- [db-path]
 
 When a block's `prev_hash` doesn't match the block before it, the chain forked.
 Blocks not yet applied are only a download cache, so they are dropped and sync
-restarts from the account's checkpoint. If the fork reaches the checkpoint, the
-account is rewound to an earlier block it applied, found in an in-memory window
-of the last 100 applied block hashes. The next stream's first `prev_hash` is
-checked against that **local** hash — a mismatch means the fork is deeper, so
-we double `rewind_by` and repeat. Exponential backoff finds the fork point in
-O(log n) iterations.
-
-With no local hash to land on (e.g. just after a restart), the rewind goes 100
-blocks below the checkpoint — past the deepest reorg zcashd or zebrad will make
-— and trusts the server's hash there.
+restarts from the account's checkpoint. If the checkpoint itself no longer
+connects, the account is rewound 100 blocks — past the deepest reorg zcashd or
+zebrad will make, so below any possible fork — to the server's block there,
+and those blocks are rescanned. Reorgs are rare; one rewind of 100 blocks is
+cheaper than tracking hashes to find the exact fork point.
 
 ## Schema
 

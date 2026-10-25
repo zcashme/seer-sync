@@ -164,7 +164,7 @@ resume → discover transparent (whole life, gap-limit)
       → scan_compact → fetch full txs → enrich_memos / scan_sent / scan_transparent
       → optional scan_commitments
       → apply(Cursor, Batch)
-reorg  → drop buffer → rewind(Cursor) only if fork ≤ checkpoint → re-resume
+reorg  → drop buffer → rewind 100 below if the checkpoint broke → re-resume
 transport fault → bounded retry from checkpoint
 ```
 
@@ -173,9 +173,9 @@ transport fault → bounded retry from checkpoint
 - **Crash-safe cursor.** `apply` must persist batch + cursor atomically.
 - **Reorgs.** Single detector in `download` (`prev_hash` chain, seeded by seam).
   Unapplied blocks are a cache: a reorg drops them and restarts from the
-  checkpoint. Applied blocks are rewound to a known-applied `Cursor` with a
-  growing step until the seam reconnects; with no applied hash in the window,
-  rewind `MAX_REORG_DEPTH` (100) below and trust the server's hash.
+  checkpoint. If the checkpoint itself no longer connects, rewind
+  `MAX_REORG_DEPTH` (100) below it — past any possible fork — to the server's
+  block there. No hash window, no search.
 - **Two-phase scan.** Compact trial decrypt, then full-tx for memos / sent / t-addrs.
 - **Transparent** rides the same loop (stateless discovery → whole-life window).
 

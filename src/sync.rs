@@ -17,7 +17,7 @@ use zcash_protocol::consensus::{BlockHeight, BranchId, Parameters};
 const OUTPUTS_PER_BATCH: usize = 100_000;
 const BLOCKS_PER_BATCH: usize = 1_000;
 /// Neither zcashd nor zebrad reorgs more than 99 blocks, so a block this far
-/// below an applied one is final.
+/// below the checkpoint is final.
 const MAX_REORG_DEPTH: u32 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,8 +37,7 @@ pub trait Account {
 
     /// Drop everything above `to`, which becomes the checkpoint, atomically.
     ///
-    /// `to` is a block the account applied (or one below its birthday), at or
-    /// below the current checkpoint.
+    /// `to` is below the current checkpoint.
     fn rewind(&self, to: Cursor) -> Result<(), Box<dyn Error + Send + Sync>>;
 
     fn apply_transactions(
@@ -91,17 +90,11 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
     params: &P,
     account: &A,
 ) -> Result<(), SyncError> {
-    let mut rewind_by = 1;
-
-    // Hashes of the last applied blocks, oldest first: the chain a rewind lands on.
-    let mut recent_hashes: Vec<(BlockHeight, BlockHash)> =
-        Vec::with_capacity(MAX_REORG_DEPTH as usize);
-
     'outer: loop {
         let (tip, _) = client.latest_block().await?;
         let Resume {
             birthday,
-            checkpoint,
+            mut checkpoint,
             mut nullifiers,
         } = account
             .resume()
@@ -118,7 +111,8 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
         let mut fetch_client = client.clone();
         let mut stream = client.blocks(start, tip).await?;
 
-        let mut prior = checkpoint.map(|cursor| (cursor.height, cursor.hash));
+        // The last block read; `checkpoint` until the first one arrives.
+        let mut prior = checkpoint;
 
         let mut blocks = Vec::with_capacity(BLOCKS_PER_BATCH);
         let mut output_count = 0;
@@ -133,28 +127,25 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
                     .expect("lightwalletd block hashes are 32 bytes"),
             );
 
-            if let Some(at) = client.detect_reorg(prior, prev_hash) {
-                // Unapplied blocks are only a download cache; the account's
-                // checkpoint is the one record of what is scanned. Undo applied
-                // blocks only when the fork reaches them, then start over from
-                // the checkpoint.
-                let checkpoint = account
-                    .resume()
-                    .map_err(|source| SyncError::Account { source })?
-                    .checkpoint;
-                if checkpoint.is_some_and(|cursor| at <= cursor.height) {
-                    let to =
-                        rewind_target(&mut client, &recent_hashes, at, rewind_by, birthday).await?;
+            if prior.is_some_and(|prior| prior.hash != prev_hash) {
+                // Unapplied blocks are only a download cache, so a reorg drops
+                // them and starts over from the checkpoint. If the checkpoint
+                // itself no longer connects, rewind below any possible fork,
+                // where the server's hash is safe to trust.
+                if let Some(seam) = checkpoint.filter(|&seam| prior == Some(seam)) {
+                    let height = seam
+                        .height
+                        .saturating_sub(MAX_REORG_DEPTH)
+                        .max(birthday.saturating_sub(1));
+                    let hash = client.block_hash(height).await?;
                     account
-                        .rewind(to)
+                        .rewind(Cursor { height, hash })
                         .map_err(|source| SyncError::Account { source })?;
-                    recent_hashes.retain(|(height, _)| *height <= to.height);
-                    rewind_by = rewind_by.saturating_mul(2);
                 }
                 continue 'outer;
             }
 
-            prior = Some((block_height(&block), block_hash(&block)));
+            prior = Some(cursor(&block));
 
             let block_output_count = block_output_count(&block);
 
@@ -162,17 +153,17 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
                 && (blocks.len() == BLOCKS_PER_BATCH
                     || output_count + block_output_count > OUTPUTS_PER_BATCH)
             {
-                process_batch(
-                    &mut fetch_client,
-                    keys,
-                    params,
-                    account,
-                    &mut nullifiers,
-                    &blocks,
-                )
-                .await?;
-                remember(&mut recent_hashes, &blocks);
-                rewind_by = 1;
+                checkpoint = Some(
+                    process_batch(
+                        &mut fetch_client,
+                        keys,
+                        params,
+                        account,
+                        &mut nullifiers,
+                        &blocks,
+                    )
+                    .await?,
+                );
                 blocks.clear();
                 output_count = 0;
             }
@@ -191,65 +182,26 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
                 &blocks,
             )
             .await?;
-            remember(&mut recent_hashes, &blocks);
-            rewind_by = 1;
         }
 
         continue 'outer;
     }
 }
 
-/// The block to rewind to: `rewind_by` below `at`, on the chain the account
-/// applied.
-async fn rewind_target(
-    client: &mut LwdClient,
-    recent_hashes: &[(BlockHeight, BlockHash)],
-    at: BlockHeight,
-    rewind_by: u32,
-    birthday: BlockHeight,
-) -> Result<Cursor, RpcError> {
-    let height = at.saturating_sub(rewind_by);
-    if let Some(&(height, hash)) = recent_hashes.iter().find(|(h, _)| *h == height) {
-        return Ok(Cursor { height, hash });
+fn cursor(block: &crate::proto::CompactBlock) -> Cursor {
+    Cursor {
+        height: BlockHeight::from_u32(
+            u32::try_from(block.height)
+                .expect("lightwalletd block heights fit Zcash's block-height type"),
+        ),
+        hash: BlockHash(
+            block
+                .hash
+                .as_slice()
+                .try_into()
+                .expect("lightwalletd block hashes are 32 bytes"),
+        ),
     }
-    // The applied hash is unknown (e.g. just after a restart), so the server's
-    // hash must stand in. That is only safe below any possible fork: past the
-    // deepest reorg, or below the birthday where nothing was applied.
-    let height = at
-        .saturating_sub(MAX_REORG_DEPTH)
-        .max(birthday.saturating_sub(1));
-    let hash = client.block_hash(height).await?;
-    Ok(Cursor { height, hash })
-}
-
-fn remember(
-    recent_hashes: &mut Vec<(BlockHeight, BlockHash)>,
-    blocks: &[crate::proto::CompactBlock],
-) {
-    recent_hashes.extend(
-        blocks
-            .iter()
-            .map(|block| (block_height(block), block_hash(block))),
-    );
-    let excess = recent_hashes.len().saturating_sub(MAX_REORG_DEPTH as usize);
-    recent_hashes.drain(..excess);
-}
-
-fn block_height(block: &crate::proto::CompactBlock) -> BlockHeight {
-    BlockHeight::from_u32(
-        u32::try_from(block.height)
-            .expect("lightwalletd block heights fit Zcash's block-height type"),
-    )
-}
-
-fn block_hash(block: &crate::proto::CompactBlock) -> BlockHash {
-    BlockHash(
-        block
-            .hash
-            .as_slice()
-            .try_into()
-            .expect("lightwalletd block hashes are 32 bytes"),
-    )
 }
 
 fn block_output_count(block: &crate::proto::CompactBlock) -> usize {
@@ -572,34 +524,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reorg_at_the_checkpoint_walks_back_to_the_fork() {
+    async fn reorg_at_the_checkpoint_rewinds_past_the_reorg_limit() {
         // The first stream ends at OLD 110 and is applied; the next one is NEW.
-        let old = (100..=110).map(|height| block(height, 109, OLD)).collect();
-        let account = Recorder::new(100);
+        let old = (1..=110).map(|height| block(height, 109, OLD)).collect();
+        let account = Recorder::new(1);
 
         sync_to_tip(Lightwalletd::new(120, 109, NEW, vec![old]), &account).await;
 
-        // 109 is still on OLD, so the seam fails again; 107 is shared.
-        assert_eq!(account.rewinds(), vec![(109, OLD), (107, 0)]);
+        assert_eq!(account.rewinds(), vec![(10, 0)]);
         assert_eq!(
             account.take_scanned(),
-            [chain(100..=110, 109, OLD), chain(108..=120, 109, NEW)].concat()
+            [chain(1..=110, 109, OLD), chain(11..=120, 109, NEW)].concat()
         );
         assert_eq!(account.checkpoint(), (120, NEW));
     }
 
     #[tokio::test]
-    async fn reorg_after_a_restart_drops_below_the_reorg_limit() {
-        let account = Recorder::new(1);
+    async fn rewind_stops_below_the_birthday() {
+        let account = Recorder::new(100);
         sync_to_tip(Lightwalletd::new(110, 109, OLD, Vec::new()), &account).await;
-        assert_eq!(account.take_scanned(), chain(1..=110, 109, OLD));
+        assert_eq!(account.take_scanned(), chain(100..=110, 109, OLD));
 
-        // A new `run` has no applied hashes, so it trusts the server's hash
-        // only MAX_REORG_DEPTH below the checkpoint.
         sync_to_tip(Lightwalletd::new(120, 109, NEW, Vec::new()), &account).await;
 
-        assert_eq!(account.rewinds(), vec![(10, 0)]);
-        assert_eq!(account.take_scanned(), chain(11..=120, 109, NEW));
+        assert_eq!(account.rewinds(), vec![(99, 0)]);
+        assert_eq!(account.take_scanned(), chain(100..=120, 109, NEW));
         assert_eq!(account.checkpoint(), (120, NEW));
     }
 }
