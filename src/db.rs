@@ -162,24 +162,18 @@ impl Db {
     }
 
     /// Total unspent balance across all shielded pools, in zatoshis.
-    /// Note values are stored in the note blob; this extracts the 8-byte
-    /// little-endian value at offset 43 (after the 43-byte recipient).
+    ///
+    /// Only notes we own count. A sent note is someone else's: recovered with
+    /// the outgoing key, it has no nullifier of ours and is never marked spent.
     pub fn balance(&self) -> Result<u64, DbError> {
         let mut total: u64 = 0;
         for table in NOTES_TABLES {
-            let rows: Vec<Vec<u8>> = self
-                .conn
-                .prepare(&format!("SELECT note FROM {table} WHERE spent = 0"))?
-                .query_map([], |row| row.get::<_, Vec<u8>>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            for blob in rows {
-                // Value is at bytes 43..51 (after 43-byte recipient).
-                if blob.len() >= 51 {
-                    let mut arr = [0u8; 8];
-                    arr.copy_from_slice(&blob[43..51]);
-                    total = total.saturating_add(u64::from_le_bytes(arr));
-                }
-            }
+            let values = note_values(
+                &self.conn,
+                &format!("SELECT note FROM {table} WHERE spent = 0 AND is_sent = 0"),
+                [],
+            )?;
+            total = values.into_iter().fold(total, u64::saturating_add);
         }
         Ok(total)
     }
@@ -268,38 +262,6 @@ impl Account for Db {
         let tx = self.conn.unchecked_transaction()?;
 
         for wtx in transactions {
-            // Determine if this tx is outgoing (any is_sent output).
-            let is_outgoing = wtx.sapling_outputs.iter().any(|o| o.is_sent)
-                || wtx.orchard_outputs.iter().any(|o| o.is_sent)
-                || wtx.ironwood_outputs.iter().any(|o| o.is_sent);
-
-            // Total value of all our notes in this tx.
-            let amount: u64 = wtx
-                .sapling_outputs
-                .iter()
-                .map(|o| o.note.value().inner())
-                .chain(wtx.orchard_outputs.iter().map(|o| o.note.value().inner()))
-                .chain(wtx.ironwood_outputs.iter().map(|o| o.note.value().inner()))
-                .sum();
-
-            // Upsert tx row (ON CONFLICT in case we re-scan the same block).
-            tx.execute(
-                "INSERT INTO txs (txid, block_height, tx_index, amount, is_outgoing)
-                 VALUES (?, ?, ?, ?, ?)
-                 ON CONFLICT(txid) DO UPDATE SET
-                    block_height = excluded.block_height,
-                    tx_index = excluded.tx_index,
-                    amount = excluded.amount,
-                    is_outgoing = excluded.is_outgoing",
-                params![
-                    wtx.txid.as_ref(),
-                    u32::from(wtx.height),
-                    wtx.tx_index,
-                    amount as i64,
-                    is_outgoing as i64,
-                ],
-            )?;
-
             // Insert notes.
             for o in &wtx.sapling_outputs {
                 insert_note_sapling(&tx, &wtx.txid, wtx.height, o)?;
@@ -333,6 +295,57 @@ impl Account for Db {
                     params![u32::from(wtx.height), wtx.txid.as_ref(), s.index, s.nf.to_bytes().to_vec()],
                 )?;
             }
+
+            // The notes this transaction took from us. Read back after the
+            // updates: a watched spend list names every nullifier in a kept
+            // transaction, so only a match on our own notes counts.
+            let mut spent = Vec::new();
+            for table in NOTES_TABLES {
+                spent.extend(note_values(
+                    &tx,
+                    &format!("SELECT note FROM {table} WHERE spent_txid = ?"),
+                    [wtx.txid.as_ref()],
+                )?);
+            }
+            let sapling = wtx
+                .sapling_outputs
+                .iter()
+                .map(|o| (o.is_sent, o.note.value().inner()));
+            let orchard = wtx
+                .orchard_outputs
+                .iter()
+                .map(|o| (o.is_sent, o.note.value().inner()));
+            let ironwood = wtx
+                .ironwood_outputs
+                .iter()
+                .map(|o| (o.is_sent, o.note.value().inner()));
+            let outputs: Vec<(bool, u64)> = sapling.chain(orchard).chain(ironwood).collect();
+            let sent = outputs.iter().any(|&(is_sent, _)| is_sent);
+            let received: u64 = outputs.iter().filter(|o| !o.0).map(|o| o.1).sum();
+
+            // Outgoing means our money left: one of our notes was spent, or an
+            // output was recovered with our outgoing key. The amount is the net
+            // change to what we own, so a payment out is negative.
+            let is_outgoing = !spent.is_empty() || sent;
+            let amount = received as i64 - spent.into_iter().sum::<u64>() as i64;
+
+            // Upsert tx row (ON CONFLICT in case we re-scan the same block).
+            tx.execute(
+                "INSERT INTO txs (txid, block_height, tx_index, amount, is_outgoing)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT(txid) DO UPDATE SET
+                    block_height = excluded.block_height,
+                    tx_index = excluded.tx_index,
+                    amount = excluded.amount,
+                    is_outgoing = excluded.is_outgoing",
+                params![
+                    wtx.txid.as_ref(),
+                    u32::from(wtx.height),
+                    wtx.tx_index,
+                    amount,
+                    is_outgoing as i64,
+                ],
+            )?;
         }
 
         // Update checkpoint.
@@ -349,6 +362,23 @@ impl Account for Db {
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 const NOTES_TABLES: &[&str] = &["sapling_notes", "orchard_notes", "ironwood_notes"];
+
+/// The values of the notes `sql` selects. Every pool's note blob carries the
+/// 8-byte little-endian value right after the 43-byte recipient.
+fn note_values(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<u64>, rusqlite::Error> {
+    conn.prepare(sql)?
+        .query_map(params, |row| {
+            let blob: Vec<u8> = row.get(0)?;
+            Ok(blob.get(43..51).map_or(0, |value| {
+                u64::from_le_bytes(value.try_into().expect("8 bytes"))
+            }))
+        })?
+        .collect()
+}
 
 impl Db {
     fn load_nullifiers(&self) -> Result<Nullifiers, DbError> {
@@ -529,15 +559,146 @@ fn scope_to_u8(scope: Scope) -> u8 {
 mod tests {
     use super::*;
 
+    use crate::sync::decrypt::fixtures;
+    use crate::sync::scan::OrchardSpend;
+
     fn insert_note(db: &Db, txid: u8, height: u32, spent_height: Option<u32>) {
         db.conn
             .execute(
                 "INSERT INTO orchard_notes (txid, output_index, block_height, note, recipient,
-                 scope, position, is_sent, is_change, spent, spent_height)
-                 VALUES (?, 0, ?, x'', x'', 0, 0, 0, 0, ?, ?)",
-                params![vec![txid; 32], height, spent_height.is_some(), spent_height],
+                 scope, position, is_sent, is_change, spent, spent_height, spent_txid)
+                 VALUES (?, 0, ?, x'', x'', 0, 0, 0, 0, ?, ?, ?)",
+                params![
+                    vec![txid; 32],
+                    height,
+                    spent_height.is_some(),
+                    spent_height,
+                    spent_height.map(|_| vec![0xffu8; 32]),
+                ],
             )
             .unwrap();
+    }
+
+    /// An output as the scan reports it: a note we own carries its nullifier;
+    /// a note we sent (recovered with the outgoing key) has none.
+    fn output(index: u32, note: orchard::Note, scope: Scope, is_sent: bool) -> OrchardOutput {
+        OrchardOutput {
+            index,
+            recipient: note.recipient(),
+            note,
+            nf: (!is_sent).then(|| fixtures::nullifier(&note)),
+            position: 0,
+            scope,
+            memo: None,
+            is_sent,
+            is_change: scope == Scope::Internal,
+        }
+    }
+
+    fn wallet_tx(
+        tag: u8,
+        height: u32,
+        orchard_outputs: Vec<OrchardOutput>,
+        orchard_spends: Vec<OrchardSpend>,
+    ) -> WalletTx {
+        WalletTx {
+            txid: TxId::from_bytes([tag; 32]),
+            height: BlockHeight::from_u32(height),
+            tx_index: 0,
+            sapling_outputs: vec![],
+            sapling_spends: vec![],
+            orchard_outputs,
+            orchard_spends,
+            ironwood_outputs: vec![],
+            ironwood_spends: vec![],
+            #[cfg(feature = "zns-decrypt")]
+            relaxed_ironwood_outputs: vec![],
+            transparent_outputs: vec![],
+            transparent_spends: vec![],
+        }
+    }
+
+    fn cursor(height: u32) -> Cursor {
+        Cursor {
+            height: BlockHeight::from_u32(height),
+            hash: BlockHash([height as u8; 32]),
+        }
+    }
+
+    fn txs(db: &Db) -> Vec<(u32, i64, bool)> {
+        db.conn
+            .prepare("SELECT block_height, amount, is_outgoing FROM txs ORDER BY block_height")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_payment_nets_out_and_the_note_it_sent_is_not_balance() {
+        let db = Db::open_memory().unwrap();
+        db.init_account(BlockHeight::from_u32(1)).unwrap();
+
+        let funds = fixtures::note(1, Scope::External, 100_000);
+        let received = wallet_tx(1, 1, vec![output(0, funds, Scope::External, false)], vec![]);
+        db.apply_transactions(cursor(1), &[received]).unwrap();
+        assert_eq!(db.balance().unwrap(), 100_000);
+
+        // Spend the 100_000 note: 69_999 change to us, 30_000 to someone
+        // else (recovered with our outgoing key), 1 fee.
+        let payment = wallet_tx(
+            2,
+            2,
+            vec![
+                output(
+                    0,
+                    fixtures::note(2, Scope::Internal, 69_999),
+                    Scope::Internal,
+                    false,
+                ),
+                output(
+                    1,
+                    fixtures::note(3, Scope::External, 30_000),
+                    Scope::External,
+                    true,
+                ),
+            ],
+            vec![OrchardSpend {
+                index: 0,
+                nf: fixtures::nullifier(&funds),
+            }],
+        );
+        db.apply_transactions(cursor(2), &[payment]).unwrap();
+
+        assert_eq!(db.balance().unwrap(), 69_999, "the sent note is not ours");
+        assert_eq!(txs(&db), vec![(1, 100_000, false), (2, -30_001, true)]);
+    }
+
+    #[test]
+    fn spending_our_note_is_outgoing_even_with_nothing_recovered() {
+        let db = Db::open_memory().unwrap();
+        db.init_account(BlockHeight::from_u32(1)).unwrap();
+
+        let funds = fixtures::note(1, Scope::External, 100_000);
+        let received = wallet_tx(1, 1, vec![output(0, funds, Scope::External, false)], vec![]);
+        db.apply_transactions(cursor(1), &[received]).unwrap();
+
+        // Paid to a transparent address: no shielded output of ours, no
+        // output our outgoing key can recover, just the spend.
+        let payment = wallet_tx(
+            2,
+            2,
+            vec![],
+            vec![OrchardSpend {
+                index: 0,
+                nf: fixtures::nullifier(&funds),
+            }],
+        );
+        db.apply_transactions(cursor(2), &[payment]).unwrap();
+
+        assert_eq!(db.balance().unwrap(), 0);
+        assert_eq!(txs(&db), vec![(1, 100_000, false), (2, -100_000, true)]);
     }
 
     #[test]

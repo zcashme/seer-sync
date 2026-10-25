@@ -208,7 +208,7 @@ fn scan_block<P: Parameters>(
                     scope: key.scope,
                     memo: None,
                     is_sent: false,
-                    is_change: false,
+                    is_change: key.scope == Scope::Internal,
                 });
             }
         }
@@ -249,7 +249,7 @@ fn scan_block<P: Parameters>(
                     scope: key.scope,
                     memo: None,
                     is_sent: false,
-                    is_change: false,
+                    is_change: key.scope == Scope::Internal,
                 });
             }
         }
@@ -298,7 +298,7 @@ fn scan_block<P: Parameters>(
                         scope: key.scope,
                         memo: None,
                         is_sent: false,
-                        is_change: false,
+                        is_change: key.scope == Scope::Internal,
                     });
                 }
             }
@@ -330,7 +330,7 @@ fn scan_block<P: Parameters>(
                         scope: key.scope,
                         memo: None,
                         is_sent: false,
-                        is_change: false,
+                        is_change: key.scope == Scope::Internal,
                     });
                 }
             }
@@ -470,11 +470,7 @@ pub fn scan<P: Parameters>(
                             recipient,
                             nf: None,
                             position: 0u64,
-                            scope: if key_index == 0 {
-                                Scope::External
-                            } else {
-                                Scope::Internal
-                            },
+                            scope: keys.sapling[key_index].scope,
                             memo: Some(memo),
                             is_sent: true,
                             is_change: false,
@@ -517,11 +513,7 @@ pub fn scan<P: Parameters>(
                             recipient,
                             nf: None,
                             position: 0u64,
-                            scope: if key_index == 0 {
-                                Scope::External
-                            } else {
-                                Scope::Internal
-                            },
+                            scope: keys.orchard[key_index].scope,
                             memo: Some(memo),
                             is_sent: true,
                             is_change: false,
@@ -567,11 +559,7 @@ pub fn scan<P: Parameters>(
                                 recipient,
                                 nf: None,
                                 position: 0u64,
-                                scope: if key_index == 0 {
-                                    Scope::External
-                                } else {
-                                    Scope::Internal
-                                },
+                                scope: keys.orchard[key_index].scope,
                                 memo: Some(memo),
                                 is_sent: true,
                                 is_change: false,
@@ -615,11 +603,7 @@ pub fn scan<P: Parameters>(
                                 recipient,
                                 nf: None,
                                 position: 0u64,
-                                scope: if key_index == 0 {
-                                    Scope::External
-                                } else {
-                                    Scope::Internal
-                                },
+                                scope: keys.orchard[key_index].scope,
                                 memo: Some(memo),
                                 is_sent: true,
                                 is_change: false,
@@ -801,6 +785,40 @@ mod tests {
             .iter()
             .map(|spend| (spend.index, spend.nf.to_bytes()[0]))
             .collect()
+    }
+
+    #[test]
+    fn a_note_to_the_internal_address_is_change() {
+        use crate::sync::decrypt::fixtures;
+
+        let keys = ScanningKeys::from_ufvk(&fixtures::ufvk());
+        let mut block = block(Vec::new(), Vec::new());
+        block.vtx[0].actions = vec![
+            fixtures::compact_action(fixtures::note(1, Scope::External, 5)),
+            fixtures::compact_action(fixtures::note(2, Scope::Internal, 7)),
+        ];
+        block
+            .chain_metadata
+            .as_mut()
+            .unwrap()
+            .orchard_commitment_tree_size = 2;
+        let empty = Nullifiers {
+            sapling: Vec::new(),
+            orchard: Vec::new(),
+            ironwood: Vec::new(),
+        };
+
+        let (txs, _) = scan_compact(&[block], &keys, &Network::MainNetwork, &empty).expect("scan");
+
+        let outputs: Vec<(u64, Scope, bool)> = txs[0]
+            .orchard_outputs
+            .iter()
+            .map(|o| (o.note.value().inner(), o.scope, o.is_change))
+            .collect();
+        assert_eq!(
+            outputs,
+            vec![(5, Scope::External, false), (7, Scope::Internal, true)]
+        );
     }
 
     #[test]

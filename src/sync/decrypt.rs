@@ -297,13 +297,21 @@ pub(crate) fn decrypt_full_ironwood<T>(
         .collect()
 }
 
+/// Each outgoing key with its index into the pool's key list, so a recovered
+/// output's `key_index` names the key (and scope) that recovered it.
+fn outgoing_keys<Ivk, Nk, Ovk>(keys: &[ScanningKey<Ivk, Nk, Ovk>]) -> Vec<(usize, &Ovk)> {
+    keys.iter()
+        .enumerate()
+        .filter_map(|(i, k)| k.ovk.as_ref().map(|ovk| (i, ovk)))
+        .collect()
+}
+
 pub(crate) fn recover_outgoing_sapling(
     outputs: &[sapling::bundle::OutputDescription<sapling::bundle::GrothProofBytes>],
     keys: &ScanningKeys,
     zip212: Zip212Enforcement,
 ) -> Vec<Option<DecryptResult<sapling::Note, sapling::PaymentAddress>>> {
-    let ovks: Vec<&sapling::keys::OutgoingViewingKey> =
-        keys.sapling.iter().filter_map(|k| k.ovk.as_ref()).collect();
+    let ovks = outgoing_keys(&keys.sapling);
 
     if ovks.is_empty() {
         return (0..outputs.len()).map(|_| None).collect();
@@ -314,7 +322,7 @@ pub(crate) fn recover_outgoing_sapling(
     outputs
         .iter()
         .map(|output| {
-            for (i, ovk) in ovks.iter().enumerate() {
+            for &(i, ovk) in &ovks {
                 if let Some((note, recipient, memo)) = try_output_recovery_with_ovk(
                     &domain,
                     ovk,
@@ -339,8 +347,7 @@ pub(crate) fn recover_outgoing_orchard<T>(
     actions: &[orchard::Action<T>],
     keys: &ScanningKeys,
 ) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
-    let ovks: Vec<&orchard::keys::OutgoingViewingKey> =
-        keys.orchard.iter().filter_map(|k| k.ovk.as_ref()).collect();
+    let ovks = outgoing_keys(&keys.orchard);
 
     if ovks.is_empty() {
         return (0..actions.len()).map(|_| None).collect();
@@ -350,7 +357,7 @@ pub(crate) fn recover_outgoing_orchard<T>(
         .iter()
         .map(|action| {
             let domain = OrchardDomain::for_action(action);
-            for (i, ovk) in ovks.iter().enumerate() {
+            for &(i, ovk) in &ovks {
                 if let Some((note, recipient, memo)) = try_output_recovery_with_ovk(
                     &domain,
                     ovk,
@@ -376,8 +383,7 @@ pub(crate) fn recover_outgoing_ironwood<T>(
     actions: &[orchard::Action<T>],
     keys: &ScanningKeys,
 ) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
-    let ovks: Vec<&orchard::keys::OutgoingViewingKey> =
-        keys.orchard.iter().filter_map(|k| k.ovk.as_ref()).collect();
+    let ovks = outgoing_keys(&keys.orchard);
 
     if ovks.is_empty() {
         return (0..actions.len()).map(|_| None).collect();
@@ -387,7 +393,7 @@ pub(crate) fn recover_outgoing_ironwood<T>(
         .iter()
         .map(|action| {
             let domain = IronwoodDomain::for_action(action);
-            for (i, ovk) in ovks.iter().enumerate() {
+            for &(i, ovk) in &ovks {
                 if let Some((note, recipient, memo)) = try_output_recovery_with_ovk(
                     &domain,
                     ovk,
@@ -531,8 +537,7 @@ pub(crate) fn recover_outgoing_ironwood_relaxed<T>(
     Vec<Option<DecryptResult<orchard::Note, orchard::Address>>>,
     Vec<RelaxedIronwoodOutput>,
 ) {
-    let ovks: Vec<&orchard::keys::OutgoingViewingKey> =
-        keys.orchard.iter().filter_map(|k| k.ovk.as_ref()).collect();
+    let ovks = outgoing_keys(&keys.orchard);
     if ovks.is_empty() {
         return ((0..actions.len()).map(|_| None).collect(), Vec::new());
     }
@@ -543,7 +548,7 @@ pub(crate) fn recover_outgoing_ironwood_relaxed<T>(
     for (idx, action) in actions.iter().enumerate() {
         let domain = ZnsIronwoodDomain::for_action(action);
         let nf = *action.nullifier();
-        for (i, ovk) in ovks.iter().enumerate() {
+        for &(i, ovk) in &ovks {
             if let Some((candidate, recipient, memo)) = domain.try_decrypt_sent(action, ovk) {
                 if rseed_guard(&candidate) {
                     ordinary[idx] = Some(DecryptResult {
@@ -593,4 +598,127 @@ fn parse_compact_orchard(a: &CompactOrchardAction) -> Option<CompactAction> {
         ephemeral_key,
         enc_ciphertext,
     ))
+}
+
+/// A wallet's keys and Orchard outputs built with upstream's own constructors
+/// and encryption, so a scan sees exactly what a sender would produce.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use orchard::keys::FullViewingKey;
+    use orchard::note::{
+        ExtractedNoteCommitment, Nullifier, RandomSeed, Rho, TransmittedNoteCiphertext,
+    };
+    use orchard::note_encryption::{OrchardDomain, OrchardNoteEncryption};
+    use orchard::primitives::redpallas::{SigningKey, SpendAuth, VerificationKey};
+    use orchard::value::{NoteValue, ValueCommitTrapdoor, ValueCommitment};
+    use orchard::{Action, Note, NoteVersion};
+    use rand::{rngs::StdRng, SeedableRng};
+    use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedSpendingKey};
+    use zcash_note_encryption::Domain;
+    use zcash_protocol::consensus::MainNetwork;
+    use zip32::{AccountId, Scope};
+
+    use crate::proto::CompactOrchardAction;
+
+    pub(crate) fn ufvk() -> UnifiedFullViewingKey {
+        UnifiedSpendingKey::from_seed(&MainNetwork, &[0u8; 32], AccountId::ZERO)
+            .expect("seed")
+            .to_unified_full_viewing_key()
+    }
+
+    fn fvk() -> FullViewingKey {
+        ufvk().orchard().expect("orchard").clone()
+    }
+
+    /// A note of `value` to the wallet's `scope` address. `tag` makes it
+    /// distinct from the other notes in a test.
+    pub(crate) fn note(tag: u8, scope: Scope, value: u64) -> Note {
+        let mut bytes = [0u8; 32];
+        bytes[0] = tag;
+        let rho = Rho::from_bytes(&bytes).into_option().expect("rho");
+        let rseed = RandomSeed::from_bytes(bytes, &rho)
+            .into_option()
+            .expect("rseed");
+        Note::from_parts(
+            fvk().address_at(0u32, scope),
+            NoteValue::from_raw(value),
+            rho,
+            rseed,
+            NoteVersion::V2,
+        )
+        .into_option()
+        .expect("note")
+    }
+
+    pub(crate) fn nullifier(note: &Note) -> Nullifier {
+        note.nullifier(&fvk())
+    }
+
+    /// The nullifier of the action that created `note`: its rho.
+    fn spent_nullifier(note: &Note) -> Nullifier {
+        Nullifier::from_bytes(&note.rho().to_bytes())
+            .into_option()
+            .expect("nullifier")
+    }
+
+    /// `note` in a compact action, as lightwalletd serves it.
+    pub(crate) fn compact_action(note: Note) -> CompactOrchardAction {
+        let enc = OrchardNoteEncryption::new(None, note, [0u8; 512]);
+        CompactOrchardAction {
+            nullifier: spent_nullifier(&note).to_bytes().to_vec(),
+            cmx: ExtractedNoteCommitment::from(note.commitment())
+                .to_bytes()
+                .to_vec(),
+            ephemeral_key: OrchardDomain::epk_bytes(enc.epk()).0.to_vec(),
+            ciphertext: enc.encrypt_note_plaintext().as_ref()[..52].to_vec(),
+        }
+    }
+
+    /// `note` in a full action, encrypted to the wallet's `ovk_scope` outgoing
+    /// key as the wallet's own sends are.
+    pub(crate) fn action(note: Note, ovk_scope: Scope) -> Action<()> {
+        let mut rng = StdRng::seed_from_u64(0);
+        let cmx = ExtractedNoteCommitment::from(note.commitment());
+        let cv_net = ValueCommitment::derive(
+            note.value() - NoteValue::from_raw(0),
+            ValueCommitTrapdoor::from_bytes([1; 32])
+                .into_option()
+                .expect("trapdoor"),
+        );
+        let enc = OrchardNoteEncryption::new(Some(fvk().to_ovk(ovk_scope)), note, [0u8; 512]);
+        let encrypted_note = TransmittedNoteCiphertext {
+            epk_bytes: OrchardDomain::epk_bytes(enc.epk()).0,
+            enc_ciphertext: enc.encrypt_note_plaintext(),
+            out_ciphertext: enc.encrypt_outgoing_plaintext(&cv_net, &cmx, &mut rng),
+        };
+        let rk = VerificationKey::from(
+            &SigningKey::<SpendAuth>::try_from([1u8; 32]).expect("signing key"),
+        );
+        Action::from_parts(spent_nullifier(&note), rk, cmx, encrypted_note, cv_net, ())
+            .expect("action")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use zip32::Scope;
+
+    use super::fixtures;
+    use super::*;
+
+    #[test]
+    fn a_recovered_output_names_the_key_that_recovered_it() {
+        let keys = ScanningKeys::from_ufvk(&fixtures::ufvk());
+        let actions = [fixtures::action(
+            fixtures::note(1, Scope::External, 5),
+            Scope::Internal,
+        )];
+
+        let recovered = recover_outgoing_orchard(&actions, &keys);
+        let [Some(output)] = recovered.as_slice() else {
+            panic!("the internal outgoing key recovers the output");
+        };
+
+        assert_eq!(keys.orchard[output.key_index].scope, Scope::Internal);
+    }
 }
