@@ -307,6 +307,8 @@ impl Account for Db {
                     [wtx.txid.as_ref()],
                 )?);
             }
+
+            // The value of this transaction's outputs: sent to others, or ours.
             let sapling = wtx
                 .sapling_outputs
                 .iter()
@@ -319,15 +321,17 @@ impl Account for Db {
                 .ironwood_outputs
                 .iter()
                 .map(|o| (o.is_sent, o.note.value().inner()));
-            let outputs: Vec<(bool, u64)> = sapling.chain(orchard).chain(ironwood).collect();
-            let sent = outputs.iter().any(|&(is_sent, _)| is_sent);
-            let received: u64 = outputs.iter().filter(|o| !o.0).map(|o| o.1).sum();
+            let (sent, received): (Vec<_>, Vec<_>) = sapling
+                .chain(orchard)
+                .chain(ironwood)
+                .partition(|&(is_sent, _)| is_sent);
 
             // Outgoing means our money left: one of our notes was spent, or an
             // output was recovered with our outgoing key. The amount is the net
             // change to what we own, so a payment out is negative.
-            let is_outgoing = !spent.is_empty() || sent;
-            let amount = received as i64 - spent.into_iter().sum::<u64>() as i64;
+            let is_outgoing = !spent.is_empty() || !sent.is_empty();
+            let amount = received.iter().map(|(_, value)| value).sum::<u64>() as i64
+                - spent.into_iter().sum::<u64>() as i64;
 
             // Upsert tx row (ON CONFLICT in case we re-scan the same block).
             tx.execute(
