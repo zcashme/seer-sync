@@ -221,38 +221,39 @@ impl Account for Db {
         })
     }
 
-    fn rewind(&self, to: BlockHeight) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let to = u32::from(to);
+    fn rewind(&self, to: Cursor) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let height = u32::from(to.height);
         let tx = self.conn.unchecked_transaction()?;
 
-        // 1. Delete notes received on the dead chain (height >= to).
+        // 1. Delete notes received on the dead chain (height > to).
         for table in NOTES_TABLES {
             tx.execute(
-                &format!("DELETE FROM {table} WHERE block_height >= ?"),
-                params![to],
+                &format!("DELETE FROM {table} WHERE block_height > ?"),
+                params![height],
             )?;
         }
 
         // 2. Unspend notes that were spent on the dead chain.
-        //    (spent_height >= to → set spent=0, clear spend columns)
+        //    (spent_height > to → set spent=0, clear spend columns)
         for table in NOTES_TABLES {
             tx.execute(
                 &format!(
                     "UPDATE {table} SET spent = 0, spent_height = NULL, \
                      spent_txid = NULL, spent_index = NULL \
-                     WHERE spent_height IS NOT NULL AND spent_height >= ?"
+                     WHERE spent_height IS NOT NULL AND spent_height > ?"
                 ),
-                params![to],
+                params![height],
             )?;
         }
 
         // 3. Delete txs on the dead chain.
-        tx.execute("DELETE FROM txs WHERE block_height >= ?", params![to])?;
+        tx.execute("DELETE FROM txs WHERE block_height > ?", params![height])?;
 
-        // 4. Update checkpoint (sync_hash will be fixed by the next apply).
+        // 4. `to` becomes the checkpoint, hash included, so the seam check
+        //    after a crash compares against the block we kept.
         tx.execute(
-            "UPDATE account SET sync_height = ? WHERE id = 1",
-            params![to],
+            "UPDATE account SET sync_height = ?, sync_hash = ? WHERE id = 1",
+            params![height, to.hash.0.as_slice()],
         )?;
 
         tx.commit()?;

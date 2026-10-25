@@ -112,6 +112,25 @@ impl LwdClient {
         ))
     }
 
+    pub(crate) async fn block_hash(&mut self, height: BlockHeight) -> Result<BlockHash, RpcError> {
+        let block = self
+            .inner
+            .get_block(tonic::Request::new(BlockId {
+                height: u64::from(u32::from(height)),
+                hash: Vec::new(),
+            }))
+            .await?
+            .into_inner();
+
+        Ok(BlockHash(
+            block
+                .hash
+                .as_slice()
+                .try_into()
+                .expect("lightwalletd block hashes are 32 bytes"),
+        ))
+    }
+
     pub(crate) async fn blocks(
         &mut self,
         from: BlockHeight,
