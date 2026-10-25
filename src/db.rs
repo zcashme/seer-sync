@@ -524,3 +524,44 @@ fn scope_to_u8(scope: Scope) -> u8 {
         Scope::Internal => 1,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn insert_note(db: &Db, txid: u8, height: u32, spent_height: Option<u32>) {
+        db.conn
+            .execute(
+                "INSERT INTO orchard_notes (txid, output_index, block_height, note, recipient,
+                 scope, position, is_sent, is_change, spent, spent_height)
+                 VALUES (?, 0, ?, x'', x'', 0, 0, 0, 0, ?, ?)",
+                params![vec![txid; 32], height, spent_height.is_some(), spent_height],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn rewind_keeps_the_cursor_block_and_makes_it_the_checkpoint() {
+        let db = Db::open_memory().unwrap();
+        db.init_account(BlockHeight::from_u32(1)).unwrap();
+        insert_note(&db, 1, 20, Some(30));
+        insert_note(&db, 2, 30, None);
+
+        let to = Cursor {
+            height: BlockHeight::from_u32(20),
+            hash: BlockHash([7; 32]),
+        };
+        db.rewind(to).unwrap();
+
+        let notes: Vec<(u32, bool)> = db
+            .conn
+            .prepare("SELECT block_height, spent FROM orchard_notes")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(notes, vec![(20, false)], "20 stays, unspent; 30 is gone");
+        assert_eq!(db.resume().unwrap().checkpoint, Some(to));
+    }
+}

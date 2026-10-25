@@ -76,7 +76,7 @@ impl LwdClient {
         Err(NoServer)
     }
 
-    pub(crate) async fn connect(url: &'static str) -> Result<Self, tonic::transport::Error> {
+    async fn connect(url: &'static str) -> Result<Self, tonic::transport::Error> {
         let uri = url
             .parse::<http::Uri>()
             .expect("bundled lightwalletd URLs are valid HTTP URIs");
