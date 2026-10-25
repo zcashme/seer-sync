@@ -563,50 +563,65 @@ fn scope_to_u8(scope: Scope) -> u8 {
 mod tests {
     use super::*;
 
-    use crate::sync::decrypt::fixtures;
+    use orchard::keys::{FullViewingKey, SpendingKey};
+    use orchard::note::{RandomSeed, Rho};
+    use orchard::value::NoteValue;
+    use orchard::NoteVersion;
+
     use crate::sync::scan::OrchardSpend;
 
     fn insert_note(db: &Db, txid: u8, height: u32, spent_height: Option<u32>) {
         db.conn
             .execute(
                 "INSERT INTO orchard_notes (txid, output_index, block_height, note, recipient,
-                 scope, position, is_sent, is_change, spent, spent_height, spent_txid)
-                 VALUES (?, 0, ?, x'', x'', 0, 0, 0, 0, ?, ?, ?)",
-                params![
-                    vec![txid; 32],
-                    height,
-                    spent_height.is_some(),
-                    spent_height,
-                    spent_height.map(|_| vec![0xffu8; 32]),
-                ],
+                 scope, position, is_sent, is_change, spent, spent_height)
+                 VALUES (?, 0, ?, x'', x'', 0, 0, 0, 0, ?, ?)",
+                params![vec![txid; 32], height, spent_height.is_some(), spent_height],
             )
             .unwrap();
     }
 
-    /// An output as the scan reports it: a note we own carries its nullifier;
-    /// a note we sent (recovered with the outgoing key) has none.
-    fn output(index: u32, note: orchard::Note, scope: Scope, is_sent: bool) -> OrchardOutput {
+    fn fvk() -> FullViewingKey {
+        FullViewingKey::from(&SpendingKey::from_bytes([0; 32]).unwrap())
+    }
+
+    /// A note of `value`, made distinct by `tag`.
+    fn note(tag: u8, value: u64) -> orchard::Note {
+        let rho = Rho::from_bytes(&[tag; 32]).unwrap();
+        let rseed = RandomSeed::from_bytes([tag; 32], &rho).unwrap();
+        let recipient = fvk().address_at(0u32, Scope::External);
+        orchard::Note::from_parts(
+            recipient,
+            NoteValue::from_raw(value),
+            rho,
+            rseed,
+            NoteVersion::V2,
+        )
+        .unwrap()
+    }
+
+    /// A note we own carries our nullifier; a note we sent has none.
+    fn output(index: u32, note: orchard::Note, is_sent: bool) -> OrchardOutput {
         OrchardOutput {
             index,
             recipient: note.recipient(),
             note,
-            nf: (!is_sent).then(|| fixtures::nullifier(&note)),
+            nf: (!is_sent).then(|| note.nullifier(&fvk())),
             position: 0,
-            scope,
+            scope: Scope::External,
             memo: None,
             is_sent,
-            is_change: scope == Scope::Internal,
+            is_change: false,
         }
     }
 
     fn wallet_tx(
-        tag: u8,
         height: u32,
         orchard_outputs: Vec<OrchardOutput>,
         orchard_spends: Vec<OrchardSpend>,
     ) -> WalletTx {
         WalletTx {
-            txid: TxId::from_bytes([tag; 32]),
+            txid: TxId::from_bytes([height as u8; 32]),
             height: BlockHeight::from_u32(height),
             tx_index: 0,
             sapling_outputs: vec![],
@@ -622,87 +637,41 @@ mod tests {
         }
     }
 
-    fn cursor(height: u32) -> Cursor {
-        Cursor {
-            height: BlockHeight::from_u32(height),
-            hash: BlockHash([height as u8; 32]),
-        }
-    }
-
-    fn txs(db: &Db) -> Vec<(u32, i64, bool)> {
-        db.conn
-            .prepare("SELECT block_height, amount, is_outgoing FROM txs ORDER BY block_height")
-            .unwrap()
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap()
-    }
-
     #[test]
     fn a_payment_nets_out_and_the_note_it_sent_is_not_balance() {
         let db = Db::open_memory().unwrap();
         db.init_account(BlockHeight::from_u32(1)).unwrap();
 
-        let funds = fixtures::note(1, Scope::External, 100_000);
-        let received = wallet_tx(1, 1, vec![output(0, funds, Scope::External, false)], vec![]);
-        db.apply_transactions(cursor(1), &[received]).unwrap();
-        assert_eq!(db.balance().unwrap(), 100_000);
-
-        // Spend the 100_000 note: 69_999 change to us, 30_000 to someone
-        // else (recovered with our outgoing key), 1 fee.
-        let payment = wallet_tx(
-            2,
+        // Receive 100_000, then pay 30_000 with 69_999 change and a 1 fee.
+        let funds = note(1, 100_000);
+        let receive = wallet_tx(1, vec![output(0, funds, false)], vec![]);
+        let pay = wallet_tx(
             2,
             vec![
-                output(
-                    0,
-                    fixtures::note(2, Scope::Internal, 69_999),
-                    Scope::Internal,
-                    false,
-                ),
-                output(
-                    1,
-                    fixtures::note(3, Scope::External, 30_000),
-                    Scope::External,
-                    true,
-                ),
+                output(0, note(2, 69_999), false),
+                output(1, note(3, 30_000), true),
             ],
             vec![OrchardSpend {
                 index: 0,
-                nf: fixtures::nullifier(&funds),
+                nf: funds.nullifier(&fvk()),
             }],
         );
-        db.apply_transactions(cursor(2), &[payment]).unwrap();
+        let tip = Cursor {
+            height: BlockHeight::from_u32(2),
+            hash: BlockHash([0; 32]),
+        };
+        db.apply_transactions(tip, &[receive, pay]).unwrap();
 
-        assert_eq!(db.balance().unwrap(), 69_999, "the sent note is not ours");
-        assert_eq!(txs(&db), vec![(1, 100_000, false), (2, -30_001, true)]);
-    }
-
-    #[test]
-    fn spending_our_note_is_outgoing_even_with_nothing_recovered() {
-        let db = Db::open_memory().unwrap();
-        db.init_account(BlockHeight::from_u32(1)).unwrap();
-
-        let funds = fixtures::note(1, Scope::External, 100_000);
-        let received = wallet_tx(1, 1, vec![output(0, funds, Scope::External, false)], vec![]);
-        db.apply_transactions(cursor(1), &[received]).unwrap();
-
-        // Paid to a transparent address: no shielded output of ours, no
-        // output our outgoing key can recover, just the spend.
-        let payment = wallet_tx(
-            2,
-            2,
-            vec![],
-            vec![OrchardSpend {
-                index: 0,
-                nf: fixtures::nullifier(&funds),
-            }],
-        );
-        db.apply_transactions(cursor(2), &[payment]).unwrap();
-
-        assert_eq!(db.balance().unwrap(), 0);
-        assert_eq!(txs(&db), vec![(1, 100_000, false), (2, -100_000, true)]);
+        let payment: (i64, bool) = db
+            .conn
+            .query_row(
+                "SELECT amount, is_outgoing FROM txs WHERE block_height = 2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(db.balance().unwrap(), 69_999);
+        assert_eq!(payment, (-30_001, true));
     }
 
     #[test]

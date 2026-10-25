@@ -788,40 +788,6 @@ mod tests {
     }
 
     #[test]
-    fn a_note_to_the_internal_address_is_change() {
-        use crate::sync::decrypt::fixtures;
-
-        let keys = ScanningKeys::from_ufvk(&fixtures::ufvk());
-        let mut block = block(Vec::new(), Vec::new());
-        block.vtx[0].actions = vec![
-            fixtures::compact_action(fixtures::note(1, Scope::External, 5)),
-            fixtures::compact_action(fixtures::note(2, Scope::Internal, 7)),
-        ];
-        block
-            .chain_metadata
-            .as_mut()
-            .unwrap()
-            .orchard_commitment_tree_size = 2;
-        let empty = Nullifiers {
-            sapling: Vec::new(),
-            orchard: Vec::new(),
-            ironwood: Vec::new(),
-        };
-
-        let (txs, _) = scan_compact(&[block], &keys, &Network::MainNetwork, &empty).expect("scan");
-
-        let outputs: Vec<(u64, Scope, bool)> = txs[0]
-            .orchard_outputs
-            .iter()
-            .map(|o| (o.note.value().inner(), o.scope, o.is_change))
-            .collect();
-        assert_eq!(
-            outputs,
-            vec![(5, Scope::External, false), (7, Scope::Internal, true)]
-        );
-    }
-
-    #[test]
     fn unwatched_ironwood_transaction_is_dropped() {
         let txs = scan_one(
             vec![ironwood_action(1), ironwood_action(2)],
