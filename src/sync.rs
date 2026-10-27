@@ -26,14 +26,10 @@ pub struct Cursor {
     pub hash: BlockHash,
 }
 
-pub struct Resume {
-    pub birthday: BlockHeight,
-    pub checkpoint: Option<Cursor>,
-    pub nullifiers: Nullifiers,
-}
-
 pub trait Account {
-    fn resume(&self) -> Result<Resume, Box<dyn Error + Send + Sync>>;
+    fn checkpoint(&self) -> Result<Option<Cursor>, Box<dyn Error + Send + Sync>>;
+    fn birthday(&self) -> Result<BlockHeight, Box<dyn Error + Send + Sync>>;
+    fn nullifiers(&self) -> Result<Nullifiers, Box<dyn Error + Send + Sync>>;
 
     /// Drop everything above `to`, which becomes the checkpoint, atomically.
     ///
@@ -92,12 +88,11 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
 ) -> Result<(), SyncError> {
     'outer: loop {
         let (tip, _) = client.latest_block().await?;
-        let Resume {
-            birthday,
-            mut checkpoint,
-            mut nullifiers,
-        } = account
-            .resume()
+        let mut checkpoint = account
+            .checkpoint()
+            .map_err(|source| SyncError::Account { source })?;
+        let birthday = account
+            .birthday()
             .map_err(|source| SyncError::Account { source })?;
 
         let start = checkpoint
@@ -107,6 +102,10 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
             sleep(Duration::from_secs(30)).await;
             continue 'outer;
         }
+
+        let mut nullifiers = account
+            .nullifiers()
+            .map_err(|source| SyncError::Account { source })?;
 
         let mut fetch_client = client.clone();
         let mut stream = client.blocks(start, tip).await?;
@@ -237,13 +236,9 @@ async fn process_batch<P: Parameters + Sync, A: Account>(
             .apply_blocks(cursor, segment, &full_transactions)
             .map_err(|source| SyncError::Account { source })?;
 
-        let Resume {
-            nullifiers: reloaded,
-            ..
-        } = account
-            .resume()
+        *nullifiers = account
+            .nullifiers()
             .map_err(|source| SyncError::Account { source })?;
-        *nullifiers = reloaded;
 
         if rest.is_empty() {
             return Ok(cursor);
