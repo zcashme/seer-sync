@@ -60,7 +60,7 @@ impl From<tonic::Status> for RpcError {
 
 /// Connect to the first bundled server for `params.network_type()` that
 /// serves its tip within `SERVER_ATTEMPT`; a stall tries the next server.
-pub async fn connect_bundled<P: Parameters>(params: &P) -> Result<LwdClient, NoServer> {
+pub async fn connect_auto<P: Parameters>(params: &P) -> Result<LwdClient, NoServer> {
     for &url in servers(params.network_type()) {
         let probe = async {
             let mut client = LwdClient::connect(url).await.ok()?;
@@ -260,8 +260,8 @@ mod tests {
     /// Run with `cargo test -- --ignored`.
     #[tokio::test]
     #[ignore = "live mainnet"]
-    async fn connect_bundled_reaches_a_mainnet_tip() {
-        let mut client = connect_bundled(&MainNetwork).await.unwrap();
+    async fn connect_auto_reaches_a_mainnet_tip() {
+        let mut client = connect_auto(&MainNetwork).await.unwrap();
         let (tip, _) = client.latest_block().await.unwrap();
         let nu5 = MainNetwork.activation_height(NetworkUpgrade::Nu5).unwrap();
         assert!(tip > nu5, "mainnet tip {tip} is past NU5");

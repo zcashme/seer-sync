@@ -53,7 +53,7 @@ pub async fn run<P: Parameters + Sync, A: Account>(
     };
 
     // Connect to a lightwalletd server.
-    let client = chain::connect_bundled(params).await?;
+    let client = chain::connect_auto(params).await?;
 
     // Run the sync engine.
     sync::run(client, &keys, params, account).await
