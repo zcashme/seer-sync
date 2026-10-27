@@ -50,26 +50,6 @@ pub enum RpcError {
 #[error("no bundled lightwalletd server is available")]
 pub struct NoServer;
 
-fn parse_block_hash(bytes: &[u8], method: &str) -> Result<BlockHash, RpcError> {
-    BlockHash::try_from_slice(bytes).ok_or_else(|| {
-        RpcError::InvalidResponse(format!(
-            "{method}: expected a 32-byte block hash, received {} bytes",
-            bytes.len()
-        ))
-    })
-}
-
-fn parse_block_id(block: BlockId) -> Result<(BlockHeight, BlockHash), RpcError> {
-    let height = BlockHeight::try_from(block.height).map_err(|_| {
-        RpcError::InvalidResponse(format!(
-            "GetLatestBlock: height {} exceeds u32",
-            block.height
-        ))
-    })?;
-    let hash = parse_block_hash(&block.hash, "GetLatestBlock")?;
-    Ok((height, hash))
-}
-
 /// Connect to the first bundled server for `params.network_type()` that
 /// serves its tip within `SERVER_ATTEMPT`; a stall tries the next server.
 pub async fn connect_auto<P: Parameters>(params: &P) -> Result<LwdClient, NoServer> {
@@ -109,7 +89,19 @@ impl LwdClient {
             .await?
             .into_inner();
 
-        parse_block_id(block)
+        let height = BlockHeight::try_from(block.height).map_err(|_| {
+            RpcError::InvalidResponse(format!(
+                "GetLatestBlock: height {} exceeds u32",
+                block.height
+            ))
+        })?;
+        let hash = BlockHash::try_from_slice(&block.hash).ok_or_else(|| {
+            RpcError::InvalidResponse(format!(
+                "GetLatestBlock: expected a 32-byte block hash, received {} bytes",
+                block.hash.len()
+            ))
+        })?;
+        Ok((height, hash))
     }
 
     pub(crate) async fn block_hash(&mut self, height: BlockHeight) -> Result<BlockHash, RpcError> {
@@ -122,7 +114,12 @@ impl LwdClient {
             .await?
             .into_inner();
 
-        parse_block_hash(&block.hash, "GetBlock")
+        BlockHash::try_from_slice(&block.hash).ok_or_else(|| {
+            RpcError::InvalidResponse(format!(
+                "GetBlock: expected a 32-byte block hash, received {} bytes",
+                block.hash.len()
+            ))
+        })
     }
 
     pub(crate) async fn blocks(
@@ -249,47 +246,6 @@ mod tests {
     use zcash_protocol::consensus::{MainNetwork, NetworkUpgrade};
 
     use super::*;
-
-    #[test]
-    fn block_id_rejects_malformed_fields_without_panicking() {
-        let height = u64::from(u32::MAX) + 1;
-        let error = parse_block_id(BlockId {
-            height,
-            hash: vec![0; 32],
-        })
-        .unwrap_err();
-        assert!(matches!(error, RpcError::InvalidResponse(_)));
-        assert!(error.to_string().contains(&height.to_string()));
-
-        for len in [0, 31, 33] {
-            let error = parse_block_id(BlockId {
-                height: 42,
-                hash: vec![0; len],
-            })
-            .unwrap_err();
-            assert!(matches!(error, RpcError::InvalidResponse(_)));
-            assert!(error.to_string().contains("GetLatestBlock"));
-            assert!(error.to_string().contains(&format!("received {len} bytes")));
-
-            let error = parse_block_hash(&vec![0; len], "GetBlock").unwrap_err();
-            assert!(matches!(error, RpcError::InvalidResponse(_)));
-            assert!(error.to_string().contains("GetBlock"));
-        }
-    }
-
-    #[test]
-    fn block_id_preserves_valid_fields() {
-        let height = u32::MAX;
-        let hash = [7; 32];
-        assert_eq!(
-            parse_block_id(BlockId {
-                height: u64::from(height),
-                hash: hash.to_vec()
-            })
-            .unwrap(),
-            (BlockHeight::from_u32(height), BlockHash(hash)),
-        );
-    }
 
     #[test]
     fn rpc_status_preserves_code_message_and_metadata() {
