@@ -119,13 +119,7 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
 
         while let Some(block) = stream.next().await {
             let block = block?;
-            let prev_hash = BlockHash(
-                block
-                    .prev_hash
-                    .as_slice()
-                    .try_into()
-                    .expect("LwdClient validates streamed block hashes"),
-            );
+            let prev_hash = BlockHash::from_slice(&block.prev_hash);
 
             if prior.is_some_and(|prior| prior.hash != prev_hash) {
                 // Unapplied blocks are only a download cache, so a reorg drops
@@ -190,16 +184,9 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
 
 fn cursor(block: &crate::proto::CompactBlock) -> Cursor {
     Cursor {
-        height: BlockHeight::from_u32(
-            u32::try_from(block.height).expect("LwdClient validates streamed block heights"),
-        ),
-        hash: BlockHash(
-            block
-                .hash
-                .as_slice()
-                .try_into()
-                .expect("LwdClient validates streamed block hashes"),
-        ),
+        height: BlockHeight::try_from(block.height)
+            .expect("LwdClient validates streamed block heights"),
+        hash: BlockHash::from_slice(&block.hash),
     }
 }
 
