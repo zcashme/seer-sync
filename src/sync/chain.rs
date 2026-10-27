@@ -124,6 +124,8 @@ impl LwdClient {
         })
     }
 
+    /// Stream compact blocks with heights that fit `BlockHeight` and 32-byte
+    /// `hash` / `prev_hash` fields, rejecting malformed fields before yielding.
     pub(crate) async fn blocks(
         &mut self,
         from: BlockHeight,
@@ -145,7 +147,30 @@ impl LwdClient {
             .await?
             .into_inner();
 
-        Ok(stream.map(|result| result.map_err(RpcError::from)))
+        Ok(stream.map(|result| {
+            let block = result.map_err(RpcError::from)?;
+            BlockHeight::try_from(block.height).map_err(|_| {
+                RpcError::InvalidResponse(format!(
+                    "GetBlockRange: height {} exceeds u32",
+                    block.height
+                ))
+            })?;
+            BlockHash::try_from_slice(&block.hash).ok_or_else(|| {
+                RpcError::InvalidResponse(format!(
+                    "GetBlockRange: block {}: expected a 32-byte hash, received {} bytes",
+                    block.height,
+                    block.hash.len()
+                ))
+            })?;
+            BlockHash::try_from_slice(&block.prev_hash).ok_or_else(|| {
+                RpcError::InvalidResponse(format!(
+                    "GetBlockRange: block {}: expected a 32-byte prev_hash, received {} bytes",
+                    block.height,
+                    block.prev_hash.len()
+                ))
+            })?;
+            Ok(block)
+        }))
     }
 
     pub(crate) async fn raw_transaction(
