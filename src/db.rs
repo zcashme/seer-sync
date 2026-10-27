@@ -166,19 +166,27 @@ impl Db {
     /// little-endian value at offset 43 (after the 43-byte recipient).
     pub fn balance(&self) -> Result<u64, DbError> {
         let mut total: u64 = 0;
-        for table in NOTES_TABLES {
-            let rows: Vec<Vec<u8>> = self
-                .conn
-                .prepare(&format!("SELECT note FROM {table} WHERE spent = 0"))?
-                .query_map([], |row| row.get::<_, Vec<u8>>(0))?
-                .collect::<Result<Vec<_>, _>>()?;
-            for blob in rows {
-                // Value is at bytes 43..51 (after 43-byte recipient).
-                if blob.len() >= 51 {
-                    let mut arr = [0u8; 8];
-                    arr.copy_from_slice(&blob[43..51]);
-                    total = total.saturating_add(u64::from_le_bytes(arr));
-                }
+        let sapling = self
+            .conn
+            .prepare("SELECT note FROM sapling_notes WHERE spent = 0")?
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let orchard = self
+            .conn
+            .prepare("SELECT note FROM orchard_notes WHERE spent = 0")?
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let ironwood = self
+            .conn
+            .prepare("SELECT note FROM ironwood_notes WHERE spent = 0")?
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for blob in sapling.into_iter().chain(orchard).chain(ironwood) {
+            // Value is at bytes 43..51 (after 43-byte recipient).
+            if blob.len() >= 51 {
+                let mut arr = [0u8; 8];
+                arr.copy_from_slice(&blob[43..51]);
+                total = total.saturating_add(u64::from_le_bytes(arr));
             }
         }
         Ok(total)
@@ -226,25 +234,39 @@ impl Account for Db {
         let tx = self.conn.unchecked_transaction()?;
 
         // 1. Delete notes received on the dead chain (height > to).
-        for table in NOTES_TABLES {
-            tx.execute(
-                &format!("DELETE FROM {table} WHERE block_height > ?"),
-                params![height],
-            )?;
-        }
+        tx.execute(
+            "DELETE FROM sapling_notes WHERE block_height > ?",
+            params![height],
+        )?;
+        tx.execute(
+            "DELETE FROM orchard_notes WHERE block_height > ?",
+            params![height],
+        )?;
+        tx.execute(
+            "DELETE FROM ironwood_notes WHERE block_height > ?",
+            params![height],
+        )?;
 
         // 2. Unspend notes that were spent on the dead chain.
         //    (spent_height > to → set spent=0, clear spend columns)
-        for table in NOTES_TABLES {
-            tx.execute(
-                &format!(
-                    "UPDATE {table} SET spent = 0, spent_height = NULL, \
-                     spent_txid = NULL, spent_index = NULL \
-                     WHERE spent_height IS NOT NULL AND spent_height > ?"
-                ),
-                params![height],
-            )?;
-        }
+        tx.execute(
+            "UPDATE sapling_notes SET spent = 0, spent_height = NULL,
+             spent_txid = NULL, spent_index = NULL
+             WHERE spent_height IS NOT NULL AND spent_height > ?",
+            params![height],
+        )?;
+        tx.execute(
+            "UPDATE orchard_notes SET spent = 0, spent_height = NULL,
+             spent_txid = NULL, spent_index = NULL
+             WHERE spent_height IS NOT NULL AND spent_height > ?",
+            params![height],
+        )?;
+        tx.execute(
+            "UPDATE ironwood_notes SET spent = 0, spent_height = NULL,
+             spent_txid = NULL, spent_index = NULL
+             WHERE spent_height IS NOT NULL AND spent_height > ?",
+            params![height],
+        )?;
 
         // 3. Delete txs on the dead chain.
         tx.execute("DELETE FROM txs WHERE block_height > ?", params![height])?;
@@ -347,8 +369,6 @@ impl Account for Db {
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
-
-const NOTES_TABLES: &[&str] = &["sapling_notes", "orchard_notes", "ironwood_notes"];
 
 impl Db {
     fn load_nullifiers(&self) -> Result<Nullifiers, DbError> {
