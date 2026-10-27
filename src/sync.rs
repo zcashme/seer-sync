@@ -103,10 +103,6 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
             continue 'outer;
         }
 
-        let mut nullifiers = account
-            .nullifiers()
-            .map_err(|source| SyncError::Account { source })?;
-
         let mut fetch_client = client.clone();
         let mut stream = client.blocks(start, tip).await?;
 
@@ -146,17 +142,8 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
                 && (blocks.len() == BLOCKS_PER_BATCH
                     || output_count + block_output_count > OUTPUTS_PER_BATCH)
             {
-                checkpoint = Some(
-                    process_batch(
-                        &mut fetch_client,
-                        keys,
-                        params,
-                        account,
-                        &mut nullifiers,
-                        &blocks,
-                    )
-                    .await?,
-                );
+                checkpoint =
+                    Some(process_batch(&mut fetch_client, keys, params, account, &blocks).await?);
                 blocks.clear();
                 output_count = 0;
             }
@@ -166,15 +153,7 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
         }
 
         if !blocks.is_empty() {
-            process_batch(
-                &mut fetch_client,
-                keys,
-                params,
-                account,
-                &mut nullifiers,
-                &blocks,
-            )
-            .await?;
+            process_batch(&mut fetch_client, keys, params, account, &blocks).await?;
         }
 
         continue 'outer;
@@ -202,14 +181,16 @@ async fn process_batch<P: Parameters + Sync, A: Account>(
     keys: &ScanningKeys,
     params: &P,
     account: &A,
-    nullifiers: &mut Nullifiers,
     mut blocks: &[crate::proto::CompactBlock],
 ) -> Result<Cursor, SyncError> {
     // The account owns the watch list, and a note received in one block can be
     // spent in the next. So each segment ends at a block with a kept
     // transaction, and the list is reloaded before the next segment is matched.
     loop {
-        let (mut transactions, scanned) = scan_compact(blocks, keys, params, nullifiers)?;
+        let nullifiers = account
+            .nullifiers()
+            .map_err(|source| SyncError::Account { source })?;
+        let (mut transactions, scanned) = scan_compact(blocks, keys, params, &nullifiers)?;
         let (segment, rest) = blocks.split_at(scanned);
 
         let txids: Vec<(TxId, BlockHeight)> =
@@ -234,10 +215,6 @@ async fn process_batch<P: Parameters + Sync, A: Account>(
 
         account
             .apply_blocks(cursor, segment, &full_transactions)
-            .map_err(|source| SyncError::Account { source })?;
-
-        *nullifiers = account
-            .nullifiers()
             .map_err(|source| SyncError::Account { source })?;
 
         if rest.is_empty() {
