@@ -149,7 +149,26 @@ impl LwdClient {
 
         Ok(stream.map(|result| {
             let block = result.map_err(RpcError::from)?;
-            check_block_fields(&block)?;
+            BlockHeight::try_from(block.height).map_err(|_| {
+                RpcError::InvalidResponse(format!(
+                    "GetBlockRange: height {} exceeds u32",
+                    block.height
+                ))
+            })?;
+            BlockHash::try_from_slice(&block.hash).ok_or_else(|| {
+                RpcError::InvalidResponse(format!(
+                    "GetBlockRange: block {}: expected a 32-byte hash, received {} bytes",
+                    block.height,
+                    block.hash.len()
+                ))
+            })?;
+            BlockHash::try_from_slice(&block.prev_hash).ok_or_else(|| {
+                RpcError::InvalidResponse(format!(
+                    "GetBlockRange: block {}: expected a 32-byte prev_hash, received {} bytes",
+                    block.height,
+                    block.prev_hash.len()
+                ))
+            })?;
             Ok(block)
         }))
     }
@@ -247,25 +266,6 @@ impl LwdClient {
 
         Ok(reply.address_utxos)
     }
-}
-
-fn check_block_fields(block: &CompactBlock) -> Result<(), RpcError> {
-    BlockHeight::try_from(block.height).map_err(|_| {
-        RpcError::InvalidResponse(format!(
-            "GetBlockRange: height {} exceeds u32",
-            block.height
-        ))
-    })?;
-    for (field, hash) in [("hash", &block.hash), ("prev_hash", &block.prev_hash)] {
-        BlockHash::try_from_slice(hash).ok_or_else(|| {
-            RpcError::InvalidResponse(format!(
-                "GetBlockRange: block {}: expected a 32-byte {field}, received {} bytes",
-                block.height,
-                hash.len()
-            ))
-        })?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
