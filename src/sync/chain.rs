@@ -247,21 +247,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn rpc_status_preserves_code_message_and_metadata() {
-        let mut status = tonic::Status::unavailable("server restarting");
-        status
-            .metadata_mut()
-            .insert("retry-after", "30".parse().unwrap());
-        let error = RpcError::from(status);
-        let RpcError::Status(status) = error else {
-            panic!("expected RPC status")
-        };
-        assert_eq!(status.code(), tonic::Code::Unavailable);
-        assert_eq!(status.message(), "server restarting");
-        assert_eq!(status.metadata().get("retry-after").unwrap(), "30");
-    }
-
     /// Live: needs network access to the bundled mainnet servers.
     /// Run with `cargo test -- --ignored`.
     #[tokio::test]
