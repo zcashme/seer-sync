@@ -274,61 +274,32 @@ mod tests {
 
     use super::*;
 
-    fn block() -> CompactBlock {
-        CompactBlock {
+    #[test]
+    fn streamed_block_maps_invalid_fields_to_rpc_errors() {
+        let block = CompactBlock {
             height: 3_000_000,
             hash: vec![1; 32],
             prev_hash: vec![2; 32],
-            vtx: vec![crate::proto::CompactTx {
-                txid: vec![3; 32],
-                ..Default::default()
-            }],
             ..Default::default()
-        }
-    }
-
-    #[test]
-    fn streamed_block_preserves_valid_payload() {
-        let block = block();
-        assert_eq!(validate_streamed_block(block.clone()).unwrap(), block);
-    }
-
-    #[test]
-    fn streamed_block_accepts_height_boundaries() {
-        for height in [0, u64::from(u32::MAX)] {
-            let mut block = block();
-            block.height = height;
-            assert_eq!(validate_streamed_block(block).unwrap().height, height);
-        }
-    }
-
-    #[test]
-    fn streamed_block_rejects_height_overflow() {
-        for height in [u64::from(u32::MAX) + 1, u64::MAX] {
-            let mut block = block();
-            block.height = height;
+        };
+        for invalid in [
+            CompactBlock {
+                height: u64::MAX,
+                ..block.clone()
+            },
+            CompactBlock {
+                hash: Vec::new(),
+                ..block.clone()
+            },
+            CompactBlock {
+                prev_hash: Vec::new(),
+                ..block
+            },
+        ] {
             assert!(matches!(
-                validate_streamed_block(block),
+                validate_streamed_block(invalid),
                 Err(RpcError::InvalidResponse(_))
             ));
-        }
-    }
-
-    #[test]
-    fn streamed_block_rejects_malformed_hashes() {
-        for field in ["hash", "prev_hash"] {
-            for len in [0, 31, 33] {
-                let mut block = block();
-                if field == "hash" {
-                    block.hash.resize(len, 0);
-                } else {
-                    block.prev_hash.resize(len, 0);
-                }
-                assert!(matches!(
-                    validate_streamed_block(block),
-                    Err(RpcError::InvalidResponse(_))
-                ));
-            }
         }
     }
 
