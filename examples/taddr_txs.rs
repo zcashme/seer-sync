@@ -9,7 +9,7 @@
 //! Example:
 //!     cargo run --release --example taddr_txs -- t1YOURADDRESS 3000000 3010000
 
-use seer_sync::sync::chain::LwdClient;
+use seer_sync::sync::chain;
 use seer_sync::{BlockHeight, Network};
 use zcash_primitives::transaction::Transaction;
 use zcash_protocol::consensus::BranchId;
@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let network = Network::MainNetwork;
 
     println!("connecting to a mainnet lightwalletd server...");
-    let mut client = LwdClient::connect_auto(&network).await?;
+    let mut client = chain::connect_auto(&network).await?;
 
     println!(
         "querying {} for transactions in heights {}..{}",

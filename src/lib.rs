@@ -19,20 +19,20 @@
 //! }
 //! ```
 
+use sync::chain;
+use sync::decrypt::ScanningKeys;
+use sync::SyncError as SeerSyncError;
+
 pub mod db;
 pub mod proto;
 pub mod sync;
 
 pub use db::{Db, DbError};
 pub use sync::scan::Nullifiers;
-pub use sync::{Account, Cursor, Resume, SyncError};
+pub use sync::{Account, Cursor, SyncError};
 
 pub use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 pub use zcash_protocol::consensus::{BlockHeight, Network, Parameters};
-
-use sync::chain::LwdClient;
-use sync::decrypt::ScanningKeys;
-use sync::SyncError as SeerSyncError;
 
 /// Sync a view key from a lightwalletd server into the given account store.
 ///
@@ -53,7 +53,7 @@ pub async fn run<P: Parameters + Sync, A: Account>(
     };
 
     // Connect to a lightwalletd server.
-    let client = LwdClient::connect_auto(params).await?;
+    let client = chain::connect_auto(params).await?;
 
     // Run the sync engine.
     sync::run(client, &keys, params, account).await

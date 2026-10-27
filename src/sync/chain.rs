@@ -17,6 +17,8 @@ const MAINNET_SERVERS: &[&str] = &[
     "https://na.zec.rocks:443",
     "https://eu.zec.rocks:443",
     "https://ap.zec.rocks:443",
+    "https://us.zec.stardust.rest:443",
+    "https://eu.zec.stardust.rest:443",
 ];
 const TESTNET_SERVERS: &[&str] = &["https://testnet.zec.rocks:443"];
 
@@ -39,43 +41,35 @@ pub struct LwdClient {
 }
 
 #[derive(thiserror::Error, Debug)]
-#[error("lightwalletd RPC {code}: {message}")]
-pub struct RpcError {
-    pub code: String,
-    pub message: String,
+pub enum RpcError {
+    #[error("lightwalletd RPC failed: {0}")]
+    Status(#[from] tonic::Status),
+    #[error("invalid lightwalletd response: {0}")]
+    InvalidResponse(String),
 }
 
 #[derive(thiserror::Error, Debug)]
-#[error("no bundled lightwalletd server is available")]
+#[error("no lightwalletd server is available")]
 pub struct NoServer;
 
-impl From<tonic::Status> for RpcError {
-    fn from(status: tonic::Status) -> Self {
-        Self {
-            code: format!("{:?}", status.code()),
-            message: status.message().to_owned(),
+/// Connect to the first bundled server for `params.network_type()` that
+/// serves its tip within `SERVER_ATTEMPT`; a stall tries the next server.
+pub async fn connect_auto<P: Parameters>(params: &P) -> Result<LwdClient, NoServer> {
+    for &url in servers(params.network_type()) {
+        let probe = async {
+            let mut client = LwdClient::connect(url).await.ok()?;
+            client.latest_block().await.ok()?;
+            Some(client)
+        };
+        if let Ok(Some(client)) = tokio::time::timeout(SERVER_ATTEMPT, probe).await {
+            return Ok(client);
         }
     }
+
+    Err(NoServer)
 }
 
 impl LwdClient {
-    /// Connect to the first bundled server for `params.network_type()` that
-    /// serves its tip within `SERVER_ATTEMPT`; a stall tries the next server.
-    pub async fn connect_auto<P: Parameters>(params: &P) -> Result<Self, NoServer> {
-        for &url in servers(params.network_type()) {
-            let probe = async {
-                let mut client = Self::connect(url).await.ok()?;
-                client.latest_block().await.ok()?;
-                Some(client)
-            };
-            if let Ok(Some(client)) = tokio::time::timeout(SERVER_ATTEMPT, probe).await {
-                return Ok(client);
-            }
-        }
-
-        Err(NoServer)
-    }
-
     async fn connect(url: &'static str) -> Result<Self, tonic::transport::Error> {
         let uri = url
             .parse::<http::Uri>()
@@ -97,19 +91,19 @@ impl LwdClient {
             .await?
             .into_inner();
 
-        Ok((
-            BlockHeight::from_u32(
-                u32::try_from(block.height)
-                    .expect("lightwalletd block heights fit Zcash's block-height type"),
-            ),
-            BlockHash(
-                block
-                    .hash
-                    .as_slice()
-                    .try_into()
-                    .expect("lightwalletd block hashes are 32 bytes"),
-            ),
-        ))
+        let height = BlockHeight::try_from(block.height).map_err(|_| {
+            RpcError::InvalidResponse(format!(
+                "GetLatestBlock: height {} exceeds u32",
+                block.height
+            ))
+        })?;
+        let hash = BlockHash::try_from_slice(&block.hash).ok_or_else(|| {
+            RpcError::InvalidResponse(format!(
+                "GetLatestBlock: expected a 32-byte block hash, received {} bytes",
+                block.hash.len()
+            ))
+        })?;
+        Ok((height, hash))
     }
 
     pub(crate) async fn block_hash(&mut self, height: BlockHeight) -> Result<BlockHash, RpcError> {
@@ -122,15 +116,16 @@ impl LwdClient {
             .await?
             .into_inner();
 
-        Ok(BlockHash(
-            block
-                .hash
-                .as_slice()
-                .try_into()
-                .expect("lightwalletd block hashes are 32 bytes"),
-        ))
+        BlockHash::try_from_slice(&block.hash).ok_or_else(|| {
+            RpcError::InvalidResponse(format!(
+                "GetBlock: expected a 32-byte block hash, received {} bytes",
+                block.hash.len()
+            ))
+        })
     }
 
+    /// Stream compact blocks with heights that fit `BlockHeight` and 32-byte
+    /// `hash` / `prev_hash` fields, rejecting malformed fields before yielding.
     pub(crate) async fn blocks(
         &mut self,
         from: BlockHeight,
@@ -152,7 +147,30 @@ impl LwdClient {
             .await?
             .into_inner();
 
-        Ok(stream.map(|result| result.map_err(RpcError::from)))
+        Ok(stream.map(|result| {
+            let block = result.map_err(RpcError::from)?;
+            BlockHeight::try_from(block.height).map_err(|_| {
+                RpcError::InvalidResponse(format!(
+                    "GetBlockRange: height {} exceeds u32",
+                    block.height
+                ))
+            })?;
+            BlockHash::try_from_slice(&block.hash).ok_or_else(|| {
+                RpcError::InvalidResponse(format!(
+                    "GetBlockRange: block {}: expected a 32-byte hash, received {} bytes",
+                    block.height,
+                    block.hash.len()
+                ))
+            })?;
+            BlockHash::try_from_slice(&block.prev_hash).ok_or_else(|| {
+                RpcError::InvalidResponse(format!(
+                    "GetBlockRange: block {}: expected a 32-byte prev_hash, received {} bytes",
+                    block.height,
+                    block.prev_hash.len()
+                ))
+            })?;
+            Ok(block)
+        }))
     }
 
     pub(crate) async fn raw_transaction(
@@ -261,7 +279,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "live mainnet"]
     async fn connect_auto_reaches_a_mainnet_tip() {
-        let mut client = LwdClient::connect_auto(&MainNetwork).await.unwrap();
+        let mut client = connect_auto(&MainNetwork).await.unwrap();
         let (tip, _) = client.latest_block().await.unwrap();
         let nu5 = MainNetwork.activation_height(NetworkUpgrade::Nu5).unwrap();
         assert!(tip > nu5, "mainnet tip {tip} is past NU5");
