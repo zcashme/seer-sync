@@ -124,6 +124,8 @@ impl LwdClient {
         })
     }
 
+    /// Stream compact blocks with heights that fit `BlockHeight` and 32-byte
+    /// `hash` / `prev_hash` fields, rejecting malformed fields before yielding.
     pub(crate) async fn blocks(
         &mut self,
         from: BlockHeight,
@@ -145,7 +147,11 @@ impl LwdClient {
             .await?
             .into_inner();
 
-        Ok(stream.map(|result| result.map_err(RpcError::from)))
+        Ok(stream.map(|result| {
+            result
+                .map_err(RpcError::from)
+                .and_then(validate_streamed_block)
+        }))
     }
 
     pub(crate) async fn raw_transaction(
@@ -243,11 +249,92 @@ impl LwdClient {
     }
 }
 
+fn validate_streamed_block(block: CompactBlock) -> Result<CompactBlock, RpcError> {
+    BlockHeight::try_from(block.height).map_err(|_| {
+        RpcError::InvalidResponse(format!(
+            "GetBlockRange: height {} exceeds u32",
+            block.height
+        ))
+    })?;
+    for (field, hash) in [("hash", &block.hash), ("prev_hash", &block.prev_hash)] {
+        if hash.len() != 32 {
+            return Err(RpcError::InvalidResponse(format!(
+                "GetBlockRange: block {}: expected a 32-byte {field}, received {} bytes",
+                block.height,
+                hash.len()
+            )));
+        }
+    }
+    Ok(block)
+}
+
 #[cfg(test)]
 mod tests {
     use zcash_protocol::consensus::{MainNetwork, NetworkUpgrade};
 
     use super::*;
+
+    fn block() -> CompactBlock {
+        CompactBlock {
+            height: 3_000_000,
+            hash: vec![1; 32],
+            prev_hash: vec![2; 32],
+            vtx: vec![crate::proto::CompactTx {
+                txid: vec![3; 32],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn streamed_block_preserves_valid_payload() {
+        let block = block();
+        assert_eq!(validate_streamed_block(block.clone()).unwrap(), block);
+    }
+
+    #[test]
+    fn streamed_block_accepts_height_boundaries() {
+        for height in [0, u64::from(u32::MAX)] {
+            let mut block = block();
+            block.height = height;
+            assert_eq!(validate_streamed_block(block).unwrap().height, height);
+        }
+    }
+
+    #[test]
+    fn streamed_block_rejects_height_overflow() {
+        for height in [u64::from(u32::MAX) + 1, u64::MAX] {
+            let mut block = block();
+            block.height = height;
+            assert!(matches!(
+                validate_streamed_block(block),
+                Err(RpcError::InvalidResponse(message))
+                    if message == format!("GetBlockRange: height {height} exceeds u32")
+            ));
+        }
+    }
+
+    #[test]
+    fn streamed_block_rejects_malformed_hashes() {
+        for field in ["hash", "prev_hash"] {
+            for len in [0, 31, 33] {
+                let mut block = block();
+                if field == "hash" {
+                    block.hash.resize(len, 0);
+                } else {
+                    block.prev_hash.resize(len, 0);
+                }
+                assert!(matches!(
+                    validate_streamed_block(block),
+                    Err(RpcError::InvalidResponse(message))
+                        if message == format!(
+                            "GetBlockRange: block 3000000: expected a 32-byte {field}, received {len} bytes"
+                        )
+                ));
+            }
+        }
+    }
 
     /// Live: needs network access to the bundled mainnet servers.
     /// Run with `cargo test -- --ignored`.

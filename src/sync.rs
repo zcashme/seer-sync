@@ -124,7 +124,7 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
                     .prev_hash
                     .as_slice()
                     .try_into()
-                    .expect("lightwalletd block hashes are 32 bytes"),
+                    .expect("LwdClient validates streamed block hashes"),
             );
 
             if prior.is_some_and(|prior| prior.hash != prev_hash) {
@@ -191,15 +191,14 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
 fn cursor(block: &crate::proto::CompactBlock) -> Cursor {
     Cursor {
         height: BlockHeight::from_u32(
-            u32::try_from(block.height)
-                .expect("lightwalletd block heights fit Zcash's block-height type"),
+            u32::try_from(block.height).expect("LwdClient validates streamed block heights"),
         ),
         hash: BlockHash(
             block
                 .hash
                 .as_slice()
                 .try_into()
-                .expect("lightwalletd block hashes are 32 bytes"),
+                .expect("LwdClient validates streamed block hashes"),
         ),
     }
 }
@@ -242,17 +241,7 @@ async fn process_batch<P: Parameters + Sync, A: Account>(
         scan(&mut transactions, &full_transactions, keys, params)?;
 
         let block = segment.last().expect("process_batch is called with blocks");
-        let height = BlockHeight::try_from(block.height)
-            .map_err(|_| ScanError::InvalidCompactBlock(BlockHeight::from(0)))?;
-        let hash: [u8; 32] = block
-            .hash
-            .as_slice()
-            .try_into()
-            .map_err(|_| ScanError::InvalidCompactBlock(height))?;
-        let cursor = Cursor {
-            height,
-            hash: BlockHash(hash),
-        };
+        let cursor = cursor(block);
         account
             .apply_transactions(cursor, &transactions)
             .map_err(|source| SyncError::Account { source })?;
