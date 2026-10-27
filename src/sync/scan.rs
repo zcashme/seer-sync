@@ -29,6 +29,38 @@ pub struct Nullifiers {
     pub ironwood: Vec<orchard::note::Nullifier>,
 }
 
+impl Nullifiers {
+    fn update_with(&mut self, tx: &WalletTx) {
+        self.sapling
+            .retain(|nf| !tx.sapling_spends.iter().any(|s| s.nf == *nf));
+        self.orchard
+            .retain(|nf| !tx.orchard_spends.iter().any(|s| s.nf == *nf));
+        self.ironwood
+            .retain(|nf| !tx.ironwood_spends.iter().any(|s| s.nf == *nf));
+        self.sapling
+            .extend(tx.sapling_outputs.iter().filter_map(|o| o.nf));
+        self.orchard
+            .extend(tx.orchard_outputs.iter().filter_map(|o| o.nf));
+        self.ironwood
+            .extend(tx.ironwood_outputs.iter().filter_map(|o| o.nf));
+    }
+}
+
+// Fixed views stop at account boundaries; running views advance between transactions.
+enum NullifierView<'a> {
+    Fixed(&'a Nullifiers),
+    Running(&'a mut Nullifiers),
+}
+
+impl NullifierView<'_> {
+    fn get(&self) -> &Nullifiers {
+        match self {
+            Self::Fixed(nfs) => nfs,
+            Self::Running(nfs) => nfs,
+        }
+    }
+}
+
 pub struct WalletOutput<Note, Nf, Recipient> {
     pub index: u32,
     pub note: Note,
@@ -114,6 +146,25 @@ pub fn scan_compact<P: Parameters>(
     params: &P,
     nullifiers: &Nullifiers,
 ) -> Result<(Vec<WalletTx>, usize), ScanError> {
+    scan_compact_inner(blocks, keys, params, NullifierView::Fixed(nullifiers))
+}
+
+/// Scan ahead only when the account's watch list is fully described by ordinary notes.
+pub(crate) fn scan_compact_batch<P: Parameters>(
+    blocks: &[CompactBlock],
+    keys: &ScanningKeys,
+    params: &P,
+    nullifiers: &mut Nullifiers,
+) -> Result<Vec<WalletTx>, ScanError> {
+    scan_compact_inner(blocks, keys, params, NullifierView::Running(nullifiers)).map(|(txs, _)| txs)
+}
+
+fn scan_compact_inner<P: Parameters>(
+    blocks: &[CompactBlock],
+    keys: &ScanningKeys,
+    params: &P,
+    mut nullifiers: NullifierView<'_>,
+) -> Result<(Vec<WalletTx>, usize), ScanError> {
     let mut txs = Vec::new();
     let mut prev_tree_sizes: Option<(u32, u32, u32)> = None;
 
@@ -132,12 +183,12 @@ pub fn scan_compact<P: Parameters>(
             block,
             keys,
             params,
-            nullifiers,
+            &mut nullifiers,
             tree_sizes_at_block_start,
             &mut txs,
         )?);
 
-        if !txs.is_empty() {
+        if matches!(nullifiers, NullifierView::Fixed(_)) && !txs.is_empty() {
             return Ok((txs, scanned + 1));
         }
     }
@@ -149,7 +200,7 @@ fn scan_block<P: Parameters>(
     block: &CompactBlock,
     keys: &ScanningKeys,
     params: &P,
-    nullifiers: &Nullifiers,
+    nullifiers: &mut NullifierView<'_>,
     tree_sizes_at_block_start: (u32, u32, u32),
     detected_txs: &mut Vec<WalletTx>,
 ) -> Result<(u32, u32, u32), ScanError> {
@@ -216,7 +267,7 @@ fn scan_block<P: Parameters>(
 
         for (idx, spend) in tx.spends.iter().enumerate() {
             if let Ok(nf) = sapling::Nullifier::from_slice(spend.nf.as_slice()) {
-                if nullifiers.sapling.contains(&nf) {
+                if nullifiers.get().sapling.contains(&nf) {
                     wtx.sapling_spends.push(SaplingSpend {
                         index: idx as u32,
                         nf,
@@ -263,7 +314,7 @@ fn scan_block<P: Parameters>(
                 .ok()
                 .and_then(|b| orchard::note::Nullifier::from_bytes(b).into())
             {
-                if nullifiers.orchard.contains(&nf) {
+                if nullifiers.get().orchard.contains(&nf) {
                     wtx.orchard_spends.push(OrchardSpend {
                         index: idx as u32,
                         nf,
@@ -342,7 +393,7 @@ fn scan_block<P: Parameters>(
         // A transaction with no wallet output and no watched spend stays out.
         for (idx, action) in tx.ironwood_actions.iter().enumerate() {
             if let Some(nf) = action_nullifier(action) {
-                if nullifiers.ironwood.contains(&nf) {
+                if nullifiers.get().ironwood.contains(&nf) {
                     wtx.ironwood_spends.push(OrchardSpend {
                         index: idx as u32,
                         nf,
@@ -382,6 +433,9 @@ fn scan_block<P: Parameters>(
                 });
             }
             wtx.ironwood_spends = spends;
+            if let NullifierView::Running(nfs) = nullifiers {
+                nfs.update_with(&wtx);
+            }
             detected_txs.push(wtx);
         }
     }
@@ -724,6 +778,261 @@ mod tests {
     use crate::proto::{CompactSaplingSpend, CompactTx};
     use crate::sync::decrypt::ScanningKeys;
     use zcash_protocol::consensus::Network;
+
+    fn empty_watch() -> Nullifiers {
+        Nullifiers {
+            sapling: vec![],
+            orchard: vec![],
+            ironwood: vec![],
+        }
+    }
+
+    fn owned_action(
+        ironwood: bool,
+    ) -> (ScanningKeys, CompactOrchardAction, orchard::note::Nullifier) {
+        use orchard::keys::{FullViewingKey, SpendingKey};
+        use orchard::note::{ExtractedNoteCommitment, NoteVersion, RandomSeed, Rho};
+        use orchard::note_encryption::{
+            IronwoodDomain, IronwoodNoteEncryption, OrchardDomain, OrchardNoteEncryption,
+        };
+        use zcash_note_encryption::Domain;
+        let sk = SpendingKey::from_bytes([7; 32]).unwrap();
+        let fvk = FullViewingKey::from(&sk);
+        let rho = Rho::from_bytes(&nf_bytes(3)).unwrap();
+        let note = orchard::Note::from_parts(
+            fvk.address_at(0u32, Scope::External),
+            orchard::value::NoteValue::from_raw(42),
+            rho,
+            RandomSeed::from_bytes([4; 32], &rho).unwrap(),
+            if ironwood {
+                NoteVersion::V3
+            } else {
+                NoteVersion::V2
+            },
+        )
+        .unwrap();
+        let (ephemeral_key, ciphertext) = if ironwood {
+            let enc = IronwoodNoteEncryption::new(None, note, [0; 512]);
+            (
+                IronwoodDomain::epk_bytes(enc.epk()),
+                enc.encrypt_note_plaintext(),
+            )
+        } else {
+            let enc = OrchardNoteEncryption::new(None, note, [0; 512]);
+            (
+                OrchardDomain::epk_bytes(enc.epk()),
+                enc.encrypt_note_plaintext(),
+            )
+        };
+        let action = CompactOrchardAction {
+            nullifier: rho.to_bytes().to_vec(),
+            cmx: ExtractedNoteCommitment::from(note.commitment())
+                .to_bytes()
+                .to_vec(),
+            ephemeral_key: ephemeral_key.0.to_vec(),
+            ciphertext: ciphertext.as_ref()[..52].to_vec(),
+        };
+        let nf = note.nullifier(&fvk);
+        let mut keys = keys();
+        keys.orchard.push(crate::sync::decrypt::ScanningKey {
+            ivk: fvk.to_ivk(Scope::External).prepare(),
+            nk: Some(fvk),
+            ovk: None,
+            scope: Scope::External,
+        });
+        (keys, action, nf)
+    }
+
+    fn receive_and_spend(
+        ironwood: bool,
+        same_block: bool,
+    ) -> (ScanningKeys, Vec<CompactBlock>, orchard::note::Nullifier) {
+        let (keys, action, nf) = owned_action(ironwood);
+        let mut receive = block(vec![], vec![]);
+        receive.height = 3_428_143;
+        let mut spend = receive.clone();
+        spend.vtx[0].txid = vec![10; 32];
+        let mut spent_action = ironwood_action(0);
+        spent_action.nullifier = nf.to_bytes().to_vec();
+        if ironwood {
+            receive.vtx[0].ironwood_actions.push(action);
+            spend.vtx[0].ironwood_actions.push(spent_action);
+        } else {
+            receive.vtx[0].actions.push(action);
+            spend.vtx[0].actions.push(spent_action);
+        }
+        let mut blocks = if same_block {
+            receive.vtx.push(spend.vtx.remove(0));
+            vec![receive]
+        } else {
+            spend.height += 1;
+            vec![receive, spend]
+        };
+        let mut count = 0;
+        for b in &mut blocks {
+            count += b
+                .vtx
+                .iter()
+                .map(|t| {
+                    if ironwood {
+                        t.ironwood_actions.len()
+                    } else {
+                        t.actions.len()
+                    }
+                })
+                .sum::<usize>() as u32;
+            let meta = b.chain_metadata.as_mut().unwrap();
+            if ironwood {
+                meta.ironwood_commitment_tree_size = count;
+            } else {
+                meta.orchard_commitment_tree_size = count;
+            }
+        }
+        (keys, blocks, nf)
+    }
+
+    #[test]
+    fn scan_ahead_detects_new_notes_spent_in_later_blocks_or_transactions() {
+        for ironwood in [false, true] {
+            for same_block in [false, true] {
+                let (keys, blocks, nf) = receive_and_spend(ironwood, same_block);
+                let mut watch = empty_watch();
+                let txs =
+                    scan_compact_batch(&blocks, &keys, &Network::MainNetwork, &mut watch).unwrap();
+                assert_eq!(txs.len(), 2);
+                let spends = if ironwood {
+                    &txs[1].ironwood_spends
+                } else {
+                    &txs[1].orchard_spends
+                };
+                assert_eq!(spends.len(), 1);
+                assert_eq!(spends[0].nf, nf);
+                assert!(watch.orchard.is_empty());
+                assert!(watch.ironwood.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn scan_ahead_incoming_only_keys_do_not_invent_nullifiers() {
+        let (mut keys, blocks, _) = receive_and_spend(false, false);
+        keys.orchard[0].nk = None;
+        let mut watch = empty_watch();
+        let txs = scan_compact_batch(&blocks, &keys, &Network::MainNetwork, &mut watch).unwrap();
+        assert_eq!(txs.len(), 1);
+        assert!(txs[0].orchard_outputs[0].nf.is_none());
+        assert!(watch.orchard.is_empty());
+    }
+
+    #[test]
+    fn scan_ahead_restart_and_rewind_use_only_committed_state() {
+        use crate::{Account, Cursor, Db};
+        use zcash_primitives::block::BlockHash;
+        for ironwood in [false, true] {
+            let (keys, blocks, _) = receive_and_spend(ironwood, false);
+            let db = Db::open_memory().unwrap();
+            db.init_account(BlockHeight::from_u32(blocks[0].height as u32))
+                .unwrap();
+            let mut watch = db.nullifiers().unwrap();
+            let txs =
+                scan_compact_batch(&blocks[..1], &keys, &Network::MainNetwork, &mut watch).unwrap();
+            // An interrupted scan has changed memory, but not its durable checkpoint or balance.
+            assert!(db.checkpoint().unwrap().is_none());
+            assert_eq!(db.balance().unwrap(), 0);
+            let cursor = Cursor {
+                height: txs[0].height,
+                hash: BlockHash([0; 32]),
+            };
+            db.apply_transactions(cursor, &txs).unwrap();
+            let mut resumed = db.nullifiers().unwrap();
+            let txs = scan_compact_batch(&blocks[1..], &keys, &Network::MainNetwork, &mut resumed)
+                .unwrap();
+            assert_eq!(txs.len(), 1);
+            db.apply_transactions(
+                Cursor {
+                    height: txs[0].height,
+                    ..cursor
+                },
+                &txs,
+            )
+            .unwrap();
+            assert_eq!(db.balance().unwrap(), 0);
+            db.rewind(cursor).unwrap();
+            assert_eq!(db.balance().unwrap(), 42);
+            let mut resumed = db.nullifiers().unwrap();
+            assert_eq!(
+                scan_compact_batch(&blocks[1..], &keys, &Network::MainNetwork, &mut resumed)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn scan_ahead_failed_batch_commit_does_not_advance_checkpoint() {
+        use crate::{Account, Cursor, Db};
+        use zcash_primitives::block::BlockHash;
+        for ironwood in [false, true] {
+            let (keys, blocks, _) = receive_and_spend(ironwood, false);
+            let db = Db::open_memory().unwrap();
+            db.init_account(BlockHeight::from_u32(blocks[0].height as u32))
+                .unwrap();
+            let table = if ironwood {
+                "ironwood_notes"
+            } else {
+                "orchard_notes"
+            };
+            db.conn()
+                .execute_batch(&format!(
+                    "CREATE TRIGGER reject_spend BEFORE UPDATE OF spent ON {table}
+                 WHEN NEW.spent = 1 BEGIN SELECT RAISE(ABORT, 'test commit failure'); END;"
+                ))
+                .unwrap();
+            let mut watch = db.nullifiers().unwrap();
+            let txs =
+                scan_compact_batch(&blocks, &keys, &Network::MainNetwork, &mut watch).unwrap();
+            let at = Cursor {
+                height: txs[1].height,
+                hash: BlockHash([0; 32]),
+            };
+            assert!(db.apply_transactions(at, &txs).is_err());
+            assert!(db.checkpoint().unwrap().is_none());
+            assert_eq!(db.balance().unwrap(), 0);
+            assert!(db.nullifiers().unwrap().orchard.is_empty());
+            assert!(db.nullifiers().unwrap().ironwood.is_empty());
+            // Retry from durable state rather than the discarded in-memory list.
+            db.conn()
+                .execute_batch("DROP TRIGGER reject_spend")
+                .unwrap();
+            let mut watch = db.nullifiers().unwrap();
+            let retry =
+                scan_compact_batch(&blocks, &keys, &Network::MainNetwork, &mut watch).unwrap();
+            assert_eq!(retry.len(), 2);
+            db.apply_transactions(at, &retry).unwrap();
+            assert_eq!(db.checkpoint().unwrap(), Some(at));
+            assert_eq!(db.balance().unwrap(), 0);
+        }
+    }
+
+    #[cfg(feature = "zns-decrypt")]
+    #[test]
+    fn fixed_scan_keeps_consumer_boundary_for_relaxed_notes() {
+        let (keys, mut blocks, nf) = receive_and_spend(true, false);
+        // The ciphertext still decrypts, but the published cmx no longer matches
+        // its ordinary commitment. Only a consumer may admit this candidate.
+        blocks[0].vtx[0].ironwood_actions[0].cmx = vec![0; 32];
+        let mut watch = empty_watch();
+        let (txs, scanned) = scan_compact(&blocks, &keys, &Network::MainNetwork, &watch).unwrap();
+        assert_eq!(scanned, 1);
+        assert_eq!(txs[0].relaxed_ironwood_outputs.len(), 1);
+        assert!(txs[0].ironwood_outputs.is_empty());
+        // Simulate the consumer admitting a watched nullifier after verification.
+        watch.ironwood.push(nf);
+        let (txs, _) =
+            scan_compact(&blocks[scanned..], &keys, &Network::MainNetwork, &watch).unwrap();
+        assert_eq!(txs[0].ironwood_spends[0].nf, nf);
+    }
 
     fn nf_bytes(tag: u8) -> [u8; 32] {
         let mut bytes = [0u8; 32];

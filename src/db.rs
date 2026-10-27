@@ -196,6 +196,10 @@ impl Db {
 // ─── Account impl ────────────────────────────────────────────────────────────
 
 impl Account for Db {
+    fn can_scan_ahead(&self) -> bool {
+        true
+    }
+
     fn checkpoint(&self) -> Result<Option<Cursor>, Box<dyn Error + Send + Sync>> {
         let (sync_height, sync_hash): (Option<u32>, Option<Vec<u8>>) = self
             .conn

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use self::chain::{LwdClient, NoServer, RpcError};
 use self::decrypt::ScanningKeys;
-use self::scan::{scan, scan_compact, Nullifiers, ScanError, WalletTx};
+use self::scan::{scan, scan_compact, scan_compact_batch, Nullifiers, ScanError, WalletTx};
 use tokio::time::sleep;
 use tokio_stream::StreamExt;
 use zcash_primitives::block::BlockHash;
@@ -30,6 +30,15 @@ pub trait Account {
     fn checkpoint(&self) -> Result<Option<Cursor>, Box<dyn Error + Send + Sync>>;
     fn birthday(&self) -> Result<BlockHeight, Box<dyn Error + Send + Sync>>;
     fn nullifiers(&self) -> Result<Nullifiers, Box<dyn Error + Send + Sync>>;
+
+    /// Whether scanning may advance before results are applied to storage.
+    ///
+    /// Opt in only if ordinary received notes and detected spends completely
+    /// describe changes to the watch list. Custom verification or raw-block
+    /// processing that changes watched nullifiers requires the default path.
+    fn can_scan_ahead(&self) -> bool {
+        false
+    }
 
     /// Drop everything above `to`, which becomes the checkpoint, atomically.
     ///
@@ -205,11 +214,18 @@ async fn process_batch<P: Parameters + Sync, A: Account>(
     nullifiers: &mut Nullifiers,
     mut blocks: &[crate::proto::CompactBlock],
 ) -> Result<Cursor, SyncError> {
-    // The account owns the watch list, and a note received in one block can be
-    // spent in the next. So each segment ends at a block with a kept
-    // transaction, and the list is reloaded before the next segment is matched.
+    let scan_ahead = account.can_scan_ahead();
+    // Custom accounts may discover watched notes while applying results. They
+    // retain the segment/apply/reload boundary unless they explicitly opt in.
     loop {
-        let (mut transactions, scanned) = scan_compact(blocks, keys, params, nullifiers)?;
+        let (mut transactions, scanned) = if scan_ahead {
+            (
+                scan_compact_batch(blocks, keys, params, nullifiers)?,
+                blocks.len(),
+            )
+        } else {
+            scan_compact(blocks, keys, params, nullifiers)?
+        };
         let (segment, rest) = blocks.split_at(scanned);
 
         let txids: Vec<(TxId, BlockHeight)> =
@@ -236,9 +252,11 @@ async fn process_batch<P: Parameters + Sync, A: Account>(
             .apply_blocks(cursor, segment, &full_transactions)
             .map_err(|source| SyncError::Account { source })?;
 
-        *nullifiers = account
-            .nullifiers()
-            .map_err(|source| SyncError::Account { source })?;
+        if !scan_ahead {
+            *nullifiers = account
+                .nullifiers()
+                .map_err(|source| SyncError::Account { source })?;
+        }
 
         if rest.is_empty() {
             return Ok(cursor);

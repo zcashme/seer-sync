@@ -221,27 +221,40 @@ impl LwdClient {
         Ok(transactions)
     }
 
-    /// Fetches the full serialized transaction for every provided txid in parallel.
+    /// Fetch full transactions with bounded concurrency, preserving input order.
     pub(crate) async fn fetch_raw_transactions(
         &mut self,
         txids: &[(TxId, BlockHeight)],
     ) -> Result<Vec<(TxId, BlockHeight, RawTransaction)>, RpcError> {
-        let mut handles = Vec::with_capacity(txids.len());
-        for &(txid, height) in txids {
-            let mut client = self.clone();
-            handles.push(tokio::spawn(async move {
-                client
-                    .raw_transaction(&txid)
-                    .await
-                    .map(|raw| (txid, height, raw))
-            }));
+        // A scan-ahead batch can contain many relevant transactions. Bound the
+        // requests and abort unfinished fetches if any request fails.
+        const MAX_IN_FLIGHT: usize = 16;
+        let mut pending = txids.iter().copied().enumerate();
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut results = Vec::with_capacity(txids.len());
+        loop {
+            while tasks.len() < MAX_IN_FLIGHT {
+                let Some((index, (txid, height))) = pending.next() else {
+                    break;
+                };
+                let mut client = self.clone();
+                tasks.spawn(async move {
+                    client
+                        .raw_transaction(&txid)
+                        .await
+                        .map(|raw| (index, txid, height, raw))
+                });
+            }
+            let Some(result) = tasks.join_next().await else {
+                break;
+            };
+            results.push(result.expect("fetch task panicked")?);
         }
-
-        let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
-            let result = handle.await.expect("fetch task panicked")?;
-            results.push(result);
-        }
+        results.sort_unstable_by_key(|(index, ..)| *index);
+        let results = results
+            .into_iter()
+            .map(|(_, txid, height, raw)| (txid, height, raw))
+            .collect();
 
         Ok(results)
     }

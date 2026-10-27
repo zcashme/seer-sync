@@ -67,6 +67,17 @@ cargo run --release --example balance -- [db-path]
 4. **Enrich** — fetch full transactions for memos and outgoing note recovery
 5. **Apply** — persist to SQLite, update checkpoint
 
+The reference `Db` scans each buffered batch using a running in-memory nullifier
+watch list, then fetches full transactions and atomically saves the batch and
+checkpoint. Full-transaction requests are limited to 16 in flight. If processing
+fails before commit, the next run replays from the persisted checkpoint.
+
+Custom `Account` implementations keep the segment/apply/reload behavior by
+default. They can opt in with `can_scan_ahead()` only when ordinary received
+notes and detected spends completely describe their watch-list changes.
+Consumers that verify relaxed Ironwood candidates or discover watched notes in
+application hooks should keep the default.
+
 ## Reorg handling
 
 When a block's `prev_hash` doesn't match the block before it, the chain forked.

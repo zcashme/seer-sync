@@ -181,6 +181,18 @@ transport fault → bounded retry from checkpoint
 - **Two-phase scan.** Compact trial decrypt, then full-tx for memos / sent / t-addrs.
 - **Transparent** rides the same loop (stateless discovery → whole-life window).
 
+### Scan-ahead accounts
+
+`Account::can_scan_ahead()` defaults to `false`: custom accounts retain the
+segment/apply/reload boundary so application verification can affect later
+spend detection. The reference `Db` returns `true`; its ordinary note
+nullifiers advance in memory between transactions and the entire buffered
+batch is persisted once. It ignores relaxed candidates as before. Opt-in
+accounts must not introduce watched nullifiers outside ordinary scan results.
+Full-transaction fetching has at most 16 requests in flight and preserves
+input order; dropping a failed fetch cancels pending tasks. On failure before
+commit, restart from durable account state rather than the mutated scan list.
+
 ## Schema (`db` feature), in one breath
 
 Single-account SQLite (WAL): birthday + sync cursor on `account`; `txs`;
