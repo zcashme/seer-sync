@@ -39,24 +39,16 @@ pub struct LwdClient {
 }
 
 #[derive(thiserror::Error, Debug)]
-#[error("lightwalletd RPC {code}: {message}")]
-pub struct RpcError {
-    pub code: String,
-    pub message: String,
+pub enum RpcError {
+    #[error("lightwalletd RPC failed: {0}")]
+    Status(#[from] tonic::Status),
+    #[error("invalid lightwalletd response: {0}")]
+    InvalidResponse(String),
 }
 
 #[derive(thiserror::Error, Debug)]
 #[error("no bundled lightwalletd server is available")]
 pub struct NoServer;
-
-impl From<tonic::Status> for RpcError {
-    fn from(status: tonic::Status) -> Self {
-        Self {
-            code: format!("{:?}", status.code()),
-            message: status.message().to_owned(),
-        }
-    }
-}
 
 /// Connect to the first bundled server for `params.network_type()` that
 /// serves its tip within `SERVER_ATTEMPT`; a stall tries the next server.
@@ -97,19 +89,19 @@ impl LwdClient {
             .await?
             .into_inner();
 
-        Ok((
-            BlockHeight::from_u32(
-                u32::try_from(block.height)
-                    .expect("lightwalletd block heights fit Zcash's block-height type"),
-            ),
-            BlockHash(
-                block
-                    .hash
-                    .as_slice()
-                    .try_into()
-                    .expect("lightwalletd block hashes are 32 bytes"),
-            ),
-        ))
+        let height = BlockHeight::try_from(block.height).map_err(|_| {
+            RpcError::InvalidResponse(format!(
+                "GetLatestBlock: height {} exceeds u32",
+                block.height
+            ))
+        })?;
+        let hash = BlockHash::try_from_slice(&block.hash).ok_or_else(|| {
+            RpcError::InvalidResponse(format!(
+                "GetLatestBlock: expected a 32-byte block hash, received {} bytes",
+                block.hash.len()
+            ))
+        })?;
+        Ok((height, hash))
     }
 
     pub(crate) async fn block_hash(&mut self, height: BlockHeight) -> Result<BlockHash, RpcError> {
@@ -122,13 +114,12 @@ impl LwdClient {
             .await?
             .into_inner();
 
-        Ok(BlockHash(
-            block
-                .hash
-                .as_slice()
-                .try_into()
-                .expect("lightwalletd block hashes are 32 bytes"),
-        ))
+        BlockHash::try_from_slice(&block.hash).ok_or_else(|| {
+            RpcError::InvalidResponse(format!(
+                "GetBlock: expected a 32-byte block hash, received {} bytes",
+                block.hash.len()
+            ))
+        })
     }
 
     pub(crate) async fn blocks(
