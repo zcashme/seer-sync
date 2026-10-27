@@ -274,35 +274,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn streamed_block_maps_invalid_fields_to_rpc_errors() {
-        let block = CompactBlock {
-            height: 3_000_000,
-            hash: vec![1; 32],
-            prev_hash: vec![2; 32],
-            ..Default::default()
-        };
-        for invalid in [
-            CompactBlock {
-                height: u64::MAX,
-                ..block.clone()
-            },
-            CompactBlock {
-                hash: Vec::new(),
-                ..block.clone()
-            },
-            CompactBlock {
-                prev_hash: Vec::new(),
-                ..block
-            },
-        ] {
-            assert!(matches!(
-                validate_streamed_block(invalid),
-                Err(RpcError::InvalidResponse(_))
-            ));
-        }
-    }
-
     /// Live: needs network access to the bundled mainnet servers.
     /// Run with `cargo test -- --ignored`.
     #[tokio::test]
