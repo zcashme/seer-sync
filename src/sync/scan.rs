@@ -481,8 +481,7 @@ pub fn scan<P: Parameters>(
         }
 
         if let Some(bundle) = tx.orchard_bundle() {
-            let actions: Vec<_> = bundle.actions().iter().cloned().collect();
-            let full = decrypt_full_orchard(&actions, keys);
+            let full = decrypt_full_orchard(bundle.actions().iter(), keys);
             for (idx, opt) in full.into_iter().enumerate() {
                 if let Some(o) = wtx
                     .orchard_outputs
@@ -497,7 +496,7 @@ pub fn scan<P: Parameters>(
                     }
                 }
             }
-            let outgoing = recover_outgoing_orchard(&actions, keys);
+            let outgoing = recover_outgoing_orchard(bundle.actions().iter(), keys);
             for (idx, opt) in outgoing.into_iter().enumerate() {
                 if opt.is_some() && !wtx.orchard_outputs.iter().any(|o| o.index == idx as u32) {
                     if let Some(DecryptResult {
@@ -526,8 +525,7 @@ pub fn scan<P: Parameters>(
         if let Some(bundle) = tx.ironwood_bundle() {
             #[cfg(not(feature = "zns-decrypt"))]
             {
-                let actions: Vec<_> = bundle.actions().iter().cloned().collect();
-                let full = decrypt_full_ironwood(&actions, keys);
+                let full = decrypt_full_ironwood(bundle.actions().iter(), keys);
                 for (idx, opt) in full.into_iter().enumerate() {
                     if let Some(o) = wtx
                         .ironwood_outputs
@@ -542,7 +540,7 @@ pub fn scan<P: Parameters>(
                         }
                     }
                 }
-                let outgoing = recover_outgoing_ironwood(&actions, keys);
+                let outgoing = recover_outgoing_ironwood(bundle.actions().iter(), keys);
                 for (idx, opt) in outgoing.into_iter().enumerate() {
                     if opt.is_some() && !wtx.ironwood_outputs.iter().any(|o| o.index == idx as u32)
                     {
@@ -570,8 +568,7 @@ pub fn scan<P: Parameters>(
             }
             #[cfg(feature = "zns-decrypt")]
             {
-                let actions: Vec<_> = bundle.actions().iter().cloned().collect();
-                let (full, ivk_hits) = decrypt_full_ironwood_relaxed(&actions, keys);
+                let (full, ivk_hits) = decrypt_full_ironwood_relaxed(bundle.actions().iter(), keys);
                 for (idx, opt) in full.into_iter().enumerate() {
                     if let Some(o) = wtx
                         .ironwood_outputs
@@ -586,7 +583,8 @@ pub fn scan<P: Parameters>(
                         }
                     }
                 }
-                let (ovk_ordinary, ovk_hits) = recover_outgoing_ironwood_relaxed(&actions, keys);
+                let (ovk_ordinary, ovk_hits) =
+                    recover_outgoing_ironwood_relaxed(bundle.actions().iter(), keys);
                 for (idx, opt) in ovk_ordinary.into_iter().enumerate() {
                     if opt.is_some() && !wtx.ironwood_outputs.iter().any(|o| o.index == idx as u32)
                     {

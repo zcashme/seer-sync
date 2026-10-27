@@ -240,8 +240,8 @@ pub(crate) fn decrypt_full_sapling(
         .collect()
 }
 
-pub(crate) fn decrypt_full_orchard<T>(
-    actions: &[orchard::Action<T>],
+pub(crate) fn decrypt_full_orchard<'a, T: 'a>(
+    actions: impl ExactSizeIterator<Item = &'a orchard::Action<T>>,
     keys: &ScanningKeys,
 ) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
     let ivks: Vec<_> = keys.orchard.iter().map(|k| k.ivk.clone()).collect();
@@ -250,7 +250,6 @@ pub(crate) fn decrypt_full_orchard<T>(
     }
 
     actions
-        .iter()
         .map(|action| {
             let domain = OrchardDomain::for_action(action);
             for (key_index, ivk) in ivks.iter().enumerate() {
@@ -269,8 +268,8 @@ pub(crate) fn decrypt_full_orchard<T>(
 }
 
 #[cfg(not(feature = "zns-decrypt"))]
-pub(crate) fn decrypt_full_ironwood<T>(
-    actions: &[orchard::Action<T>],
+pub(crate) fn decrypt_full_ironwood<'a, T: 'a>(
+    actions: impl ExactSizeIterator<Item = &'a orchard::Action<T>>,
     keys: &ScanningKeys,
 ) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
     let ivks: Vec<_> = keys.orchard.iter().map(|k| k.ivk.clone()).collect();
@@ -279,7 +278,6 @@ pub(crate) fn decrypt_full_ironwood<T>(
     }
 
     actions
-        .iter()
         .map(|action| {
             let domain = IronwoodDomain::for_action(action);
             for (key_index, ivk) in ivks.iter().enumerate() {
@@ -343,8 +341,8 @@ pub(crate) fn recover_outgoing_sapling(
         .collect()
 }
 
-pub(crate) fn recover_outgoing_orchard<T>(
-    actions: &[orchard::Action<T>],
+pub(crate) fn recover_outgoing_orchard<'a, T: 'a>(
+    actions: impl ExactSizeIterator<Item = &'a orchard::Action<T>>,
     keys: &ScanningKeys,
 ) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
     let ovks = outgoing_keys(&keys.orchard);
@@ -354,7 +352,6 @@ pub(crate) fn recover_outgoing_orchard<T>(
     }
 
     actions
-        .iter()
         .map(|action| {
             let domain = OrchardDomain::for_action(action);
             for &(i, ovk) in &ovks {
@@ -379,8 +376,8 @@ pub(crate) fn recover_outgoing_orchard<T>(
 }
 
 #[cfg(not(feature = "zns-decrypt"))]
-pub(crate) fn recover_outgoing_ironwood<T>(
-    actions: &[orchard::Action<T>],
+pub(crate) fn recover_outgoing_ironwood<'a, T: 'a>(
+    actions: impl ExactSizeIterator<Item = &'a orchard::Action<T>>,
     keys: &ScanningKeys,
 ) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
     let ovks = outgoing_keys(&keys.orchard);
@@ -390,7 +387,6 @@ pub(crate) fn recover_outgoing_ironwood<T>(
     }
 
     actions
-        .iter()
         .map(|action| {
             let domain = IronwoodDomain::for_action(action);
             for &(i, ovk) in &ovks {
@@ -490,8 +486,8 @@ pub(crate) fn decrypt_compact_ironwood_relaxed(
 }
 
 #[cfg(feature = "zns-decrypt")]
-pub(crate) fn decrypt_full_ironwood_relaxed<T: Clone>(
-    actions: &[orchard::Action<T>],
+pub(crate) fn decrypt_full_ironwood_relaxed<'a, T: 'a>(
+    actions: impl ExactSizeIterator<Item = &'a orchard::Action<T>>,
     keys: &ScanningKeys,
 ) -> (
     Vec<Option<DecryptResult<orchard::Note, orchard::Address>>>,
@@ -503,14 +499,13 @@ pub(crate) fn decrypt_full_ironwood_relaxed<T: Clone>(
     }
 
     let pairs: Vec<_> = actions
-        .iter()
-        .map(|a| (ZnsIronwoodDomain::for_action(a), a.clone()))
+        .map(|a| (ZnsIronwoodDomain::for_action(a), a))
         .collect();
 
     let raw = batch_try_note_decryption(&ivks, &pairs);
 
     let mut ordinary: Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> =
-        (0..actions.len()).map(|_| None).collect();
+        (0..pairs.len()).map(|_| None).collect();
     let mut relaxed = Vec::new();
     for (idx, r) in raw.into_iter().enumerate() {
         if let Some(((candidate, recipient, memo), key_index)) = r {
@@ -522,7 +517,7 @@ pub(crate) fn decrypt_full_ironwood_relaxed<T: Clone>(
                     key_index,
                 });
             } else {
-                relaxed.push((idx, candidate, *actions[idx].nullifier(), Some(memo), false));
+                relaxed.push((idx, candidate, *pairs[idx].1.nullifier(), Some(memo), false));
             }
         }
     }
@@ -530,8 +525,8 @@ pub(crate) fn decrypt_full_ironwood_relaxed<T: Clone>(
 }
 
 #[cfg(feature = "zns-decrypt")]
-pub(crate) fn recover_outgoing_ironwood_relaxed<T>(
-    actions: &[orchard::Action<T>],
+pub(crate) fn recover_outgoing_ironwood_relaxed<'a, T: 'a>(
+    actions: impl ExactSizeIterator<Item = &'a orchard::Action<T>>,
     keys: &ScanningKeys,
 ) -> (
     Vec<Option<DecryptResult<orchard::Note, orchard::Address>>>,
@@ -545,7 +540,7 @@ pub(crate) fn recover_outgoing_ironwood_relaxed<T>(
     let mut ordinary: Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> =
         (0..actions.len()).map(|_| None).collect();
     let mut relaxed = Vec::new();
-    for (idx, action) in actions.iter().enumerate() {
+    for (idx, action) in actions.enumerate() {
         let domain = ZnsIronwoodDomain::for_action(action);
         let nf = *action.nullifier();
         for &(i, ovk) in &ovks {
