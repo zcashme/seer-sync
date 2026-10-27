@@ -297,13 +297,21 @@ pub(crate) fn decrypt_full_ironwood<T>(
         .collect()
 }
 
+/// Each outgoing key with its index into the pool's key list, so a recovered
+/// output's `key_index` names the key (and scope) that recovered it.
+fn outgoing_keys<Ivk, Nk, Ovk>(keys: &[ScanningKey<Ivk, Nk, Ovk>]) -> Vec<(usize, &Ovk)> {
+    keys.iter()
+        .enumerate()
+        .filter_map(|(i, k)| k.ovk.as_ref().map(|ovk| (i, ovk)))
+        .collect()
+}
+
 pub(crate) fn recover_outgoing_sapling(
     outputs: &[sapling::bundle::OutputDescription<sapling::bundle::GrothProofBytes>],
     keys: &ScanningKeys,
     zip212: Zip212Enforcement,
 ) -> Vec<Option<DecryptResult<sapling::Note, sapling::PaymentAddress>>> {
-    let ovks: Vec<&sapling::keys::OutgoingViewingKey> =
-        keys.sapling.iter().filter_map(|k| k.ovk.as_ref()).collect();
+    let ovks = outgoing_keys(&keys.sapling);
 
     if ovks.is_empty() {
         return (0..outputs.len()).map(|_| None).collect();
@@ -314,7 +322,7 @@ pub(crate) fn recover_outgoing_sapling(
     outputs
         .iter()
         .map(|output| {
-            for (i, ovk) in ovks.iter().enumerate() {
+            for &(i, ovk) in &ovks {
                 if let Some((note, recipient, memo)) = try_output_recovery_with_ovk(
                     &domain,
                     ovk,
@@ -339,8 +347,7 @@ pub(crate) fn recover_outgoing_orchard<T>(
     actions: &[orchard::Action<T>],
     keys: &ScanningKeys,
 ) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
-    let ovks: Vec<&orchard::keys::OutgoingViewingKey> =
-        keys.orchard.iter().filter_map(|k| k.ovk.as_ref()).collect();
+    let ovks = outgoing_keys(&keys.orchard);
 
     if ovks.is_empty() {
         return (0..actions.len()).map(|_| None).collect();
@@ -350,7 +357,7 @@ pub(crate) fn recover_outgoing_orchard<T>(
         .iter()
         .map(|action| {
             let domain = OrchardDomain::for_action(action);
-            for (i, ovk) in ovks.iter().enumerate() {
+            for &(i, ovk) in &ovks {
                 if let Some((note, recipient, memo)) = try_output_recovery_with_ovk(
                     &domain,
                     ovk,
@@ -376,8 +383,7 @@ pub(crate) fn recover_outgoing_ironwood<T>(
     actions: &[orchard::Action<T>],
     keys: &ScanningKeys,
 ) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
-    let ovks: Vec<&orchard::keys::OutgoingViewingKey> =
-        keys.orchard.iter().filter_map(|k| k.ovk.as_ref()).collect();
+    let ovks = outgoing_keys(&keys.orchard);
 
     if ovks.is_empty() {
         return (0..actions.len()).map(|_| None).collect();
@@ -387,7 +393,7 @@ pub(crate) fn recover_outgoing_ironwood<T>(
         .iter()
         .map(|action| {
             let domain = IronwoodDomain::for_action(action);
-            for (i, ovk) in ovks.iter().enumerate() {
+            for &(i, ovk) in &ovks {
                 if let Some((note, recipient, memo)) = try_output_recovery_with_ovk(
                     &domain,
                     ovk,
@@ -531,8 +537,7 @@ pub(crate) fn recover_outgoing_ironwood_relaxed<T>(
     Vec<Option<DecryptResult<orchard::Note, orchard::Address>>>,
     Vec<RelaxedIronwoodOutput>,
 ) {
-    let ovks: Vec<&orchard::keys::OutgoingViewingKey> =
-        keys.orchard.iter().filter_map(|k| k.ovk.as_ref()).collect();
+    let ovks = outgoing_keys(&keys.orchard);
     if ovks.is_empty() {
         return ((0..actions.len()).map(|_| None).collect(), Vec::new());
     }
@@ -543,7 +548,7 @@ pub(crate) fn recover_outgoing_ironwood_relaxed<T>(
     for (idx, action) in actions.iter().enumerate() {
         let domain = ZnsIronwoodDomain::for_action(action);
         let nf = *action.nullifier();
-        for (i, ovk) in ovks.iter().enumerate() {
+        for &(i, ovk) in &ovks {
             if let Some((candidate, recipient, memo)) = domain.try_decrypt_sent(action, ovk) {
                 if rseed_guard(&candidate) {
                     ordinary[idx] = Some(DecryptResult {

@@ -141,8 +141,32 @@ impl Db {
             CREATE INDEX IF NOT EXISTS idx_sapling_nf   ON sapling_notes(nf);
             CREATE INDEX IF NOT EXISTS idx_orchard_nf   ON orchard_notes(nf);
             CREATE INDEX IF NOT EXISTS idx_ironwood_nf  ON ironwood_notes(nf);
+            CREATE INDEX IF NOT EXISTS idx_sapling_spent_txid ON sapling_notes(spent_txid);
+            CREATE INDEX IF NOT EXISTS idx_orchard_spent_txid ON orchard_notes(spent_txid);
+            CREATE INDEX IF NOT EXISTS idx_ironwood_spent_txid ON ironwood_notes(spent_txid);
             ",
         )?;
+        if conn.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))? < 1 {
+            let tx = conn.unchecked_transaction()?;
+            let txids = tx
+                .prepare("SELECT txid FROM txs")?
+                .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for txid in txids {
+                let (amount, is_outgoing) = transaction_accounting(&tx, &txid)?;
+                tx.execute(
+                    "UPDATE txs SET amount = ?, is_outgoing = ? WHERE txid = ?",
+                    params![amount, is_outgoing, txid],
+                )?;
+            }
+            tx.execute_batch(
+                "UPDATE sapling_notes SET is_change = (scope = 1 AND is_sent = 0);
+                 UPDATE orchard_notes SET is_change = (scope = 1 AND is_sent = 0);
+                 UPDATE ironwood_notes SET is_change = (scope = 1 AND is_sent = 0);
+                 PRAGMA user_version = 1;",
+            )?;
+            tx.commit()?;
+        }
         Ok(())
     }
 
@@ -162,32 +186,28 @@ impl Db {
     }
 
     /// Total unspent balance across all shielded pools, in zatoshis.
-    /// Note values are stored in the note blob; this extracts the 8-byte
-    /// little-endian value at offset 43 (after the 43-byte recipient).
+    ///
+    /// Only notes we own count. A sent note is someone else's: recovered with
+    /// the outgoing key, it has no nullifier of ours and is never marked spent.
     pub fn balance(&self) -> Result<u64, DbError> {
         let mut total: u64 = 0;
-        let sapling = self
-            .conn
-            .prepare("SELECT note FROM sapling_notes WHERE spent = 0")?
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        let orchard = self
-            .conn
-            .prepare("SELECT note FROM orchard_notes WHERE spent = 0")?
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        let ironwood = self
-            .conn
-            .prepare("SELECT note FROM ironwood_notes WHERE spent = 0")?
-            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        for blob in sapling.into_iter().chain(orchard).chain(ironwood) {
-            // Value is at bytes 43..51 (after 43-byte recipient).
-            if blob.len() >= 51 {
-                let mut arr = [0u8; 8];
-                arr.copy_from_slice(&blob[43..51]);
-                total = total.saturating_add(u64::from_le_bytes(arr));
-            }
+        let sapling = note_values(
+            &self.conn,
+            "SELECT note FROM sapling_notes WHERE spent = 0 AND is_sent = 0",
+            [],
+        )?;
+        let orchard = note_values(
+            &self.conn,
+            "SELECT note FROM orchard_notes WHERE spent = 0 AND is_sent = 0",
+            [],
+        )?;
+        let ironwood = note_values(
+            &self.conn,
+            "SELECT note FROM ironwood_notes WHERE spent = 0 AND is_sent = 0",
+            [],
+        )?;
+        for value in sapling.into_iter().chain(orchard).chain(ironwood) {
+            total = total.saturating_add(value);
         }
         Ok(total)
     }
@@ -224,11 +244,11 @@ impl Account for Db {
     }
 
     fn birthday(&self) -> Result<BlockHeight, Box<dyn Error + Send + Sync>> {
-        let birthday: u32 = self.conn.query_row(
-            "SELECT birthday FROM account WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )?;
+        let birthday: u32 =
+            self.conn
+                .query_row("SELECT birthday FROM account WHERE id = 1", [], |row| {
+                    row.get(0)
+                })?;
         Ok(BlockHeight::from_u32(birthday))
     }
 
@@ -297,38 +317,6 @@ impl Account for Db {
         let tx = self.conn.unchecked_transaction()?;
 
         for wtx in transactions {
-            // Determine if this tx is outgoing (any is_sent output).
-            let is_outgoing = wtx.sapling_outputs.iter().any(|o| o.is_sent)
-                || wtx.orchard_outputs.iter().any(|o| o.is_sent)
-                || wtx.ironwood_outputs.iter().any(|o| o.is_sent);
-
-            // Total value of all our notes in this tx.
-            let amount: u64 = wtx
-                .sapling_outputs
-                .iter()
-                .map(|o| o.note.value().inner())
-                .chain(wtx.orchard_outputs.iter().map(|o| o.note.value().inner()))
-                .chain(wtx.ironwood_outputs.iter().map(|o| o.note.value().inner()))
-                .sum();
-
-            // Upsert tx row (ON CONFLICT in case we re-scan the same block).
-            tx.execute(
-                "INSERT INTO txs (txid, block_height, tx_index, amount, is_outgoing)
-                 VALUES (?, ?, ?, ?, ?)
-                 ON CONFLICT(txid) DO UPDATE SET
-                    block_height = excluded.block_height,
-                    tx_index = excluded.tx_index,
-                    amount = excluded.amount,
-                    is_outgoing = excluded.is_outgoing",
-                params![
-                    wtx.txid.as_ref(),
-                    u32::from(wtx.height),
-                    wtx.tx_index,
-                    amount as i64,
-                    is_outgoing as i64,
-                ],
-            )?;
-
             // Insert notes.
             for o in &wtx.sapling_outputs {
                 insert_note_sapling(&tx, &wtx.txid, wtx.height, o)?;
@@ -362,6 +350,27 @@ impl Account for Db {
                     params![u32::from(wtx.height), wtx.txid.as_ref(), s.index, s.nf.to_bytes().to_vec()],
                 )?;
             }
+
+            // Read persisted notes so replaying a transaction keeps the same net amount.
+            let (amount, is_outgoing) = transaction_accounting(&tx, wtx.txid.as_ref())?;
+
+            // Upsert tx row (ON CONFLICT in case we re-scan the same block).
+            tx.execute(
+                "INSERT INTO txs (txid, block_height, tx_index, amount, is_outgoing)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT(txid) DO UPDATE SET
+                    block_height = excluded.block_height,
+                    tx_index = excluded.tx_index,
+                    amount = excluded.amount,
+                    is_outgoing = excluded.is_outgoing",
+                params![
+                    wtx.txid.as_ref(),
+                    u32::from(wtx.height),
+                    wtx.tx_index,
+                    amount,
+                    is_outgoing as i64,
+                ],
+            )?;
         }
 
         // Update checkpoint.
@@ -376,6 +385,52 @@ impl Account for Db {
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+/// Net owned value and outgoing status, shared with the historical backfill.
+fn transaction_accounting(conn: &Connection, txid: &[u8]) -> Result<(i64, bool), rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT note, is_sent, 0 FROM sapling_notes WHERE txid = ?1
+         UNION ALL SELECT note, is_sent, 0 FROM orchard_notes WHERE txid = ?1
+         UNION ALL SELECT note, is_sent, 0 FROM ironwood_notes WHERE txid = ?1
+         UNION ALL SELECT note, 0, 1 FROM sapling_notes WHERE spent_txid = ?1 AND is_sent = 0
+         UNION ALL SELECT note, 0, 1 FROM orchard_notes WHERE spent_txid = ?1 AND is_sent = 0
+         UNION ALL SELECT note, 0, 1 FROM ironwood_notes WHERE spent_txid = ?1 AND is_sent = 0",
+    )?;
+    let mut rows = stmt.query([txid])?;
+    let (mut amount, mut outgoing) = (0i64, false);
+    while let Some(row) = rows.next()? {
+        let blob: Vec<u8> = row.get(0)?;
+        let sent: bool = row.get(1)?;
+        let spent: bool = row.get(2)?;
+        let value = blob.get(43..51).map_or(0, |bytes| {
+            u64::from_le_bytes(bytes.try_into().expect("8 bytes"))
+        }) as i64;
+        outgoing |= sent || spent;
+        if spent {
+            amount -= value;
+        } else if !sent {
+            amount += value;
+        }
+    }
+    Ok((amount, outgoing))
+}
+
+/// The values of the notes `sql` selects. Every pool's note blob carries the
+/// 8-byte little-endian value right after the 43-byte recipient.
+fn note_values(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<u64>, rusqlite::Error> {
+    conn.prepare(sql)?
+        .query_map(params, |row| {
+            let blob: Vec<u8> = row.get(0)?;
+            Ok(blob.get(43..51).map_or(0, |value| {
+                u64::from_le_bytes(value.try_into().expect("8 bytes"))
+            }))
+        })?
+        .collect()
+}
 
 impl Db {
     fn load_nullifiers(&self) -> Result<Nullifiers, DbError> {
@@ -556,6 +611,13 @@ fn scope_to_u8(scope: Scope) -> u8 {
 mod tests {
     use super::*;
 
+    use orchard::keys::{FullViewingKey, SpendingKey};
+    use orchard::note::{RandomSeed, Rho};
+    use orchard::value::NoteValue;
+    use orchard::NoteVersion;
+
+    use crate::sync::scan::OrchardSpend;
+
     fn insert_note(db: &Db, txid: u8, height: u32, spent_height: Option<u32>) {
         db.conn
             .execute(
@@ -565,6 +627,99 @@ mod tests {
                 params![vec![txid; 32], height, spent_height.is_some(), spent_height],
             )
             .unwrap();
+    }
+
+    fn fvk() -> FullViewingKey {
+        FullViewingKey::from(&SpendingKey::from_bytes([0; 32]).unwrap())
+    }
+
+    /// A note of `value`, made distinct by `tag`.
+    fn note(tag: u8, value: u64) -> orchard::Note {
+        let rho = Rho::from_bytes(&[tag; 32]).unwrap();
+        let rseed = RandomSeed::from_bytes([tag; 32], &rho).unwrap();
+        let recipient = fvk().address_at(0u32, Scope::External);
+        orchard::Note::from_parts(
+            recipient,
+            NoteValue::from_raw(value),
+            rho,
+            rseed,
+            NoteVersion::V2,
+        )
+        .unwrap()
+    }
+
+    /// A note we own carries our nullifier; a note we sent has none.
+    fn output(index: u32, note: orchard::Note, is_sent: bool) -> OrchardOutput {
+        OrchardOutput {
+            index,
+            recipient: note.recipient(),
+            note,
+            nf: (!is_sent).then(|| note.nullifier(&fvk())),
+            position: 0,
+            scope: Scope::External,
+            memo: None,
+            is_sent,
+            is_change: false,
+        }
+    }
+
+    fn wallet_tx(
+        height: u32,
+        orchard_outputs: Vec<OrchardOutput>,
+        orchard_spends: Vec<OrchardSpend>,
+    ) -> WalletTx {
+        WalletTx {
+            txid: TxId::from_bytes([height as u8; 32]),
+            height: BlockHeight::from_u32(height),
+            tx_index: 0,
+            sapling_outputs: vec![],
+            sapling_spends: vec![],
+            orchard_outputs,
+            orchard_spends,
+            ironwood_outputs: vec![],
+            ironwood_spends: vec![],
+            #[cfg(feature = "zns-decrypt")]
+            relaxed_ironwood_outputs: vec![],
+            transparent_outputs: vec![],
+            transparent_spends: vec![],
+        }
+    }
+
+    #[test]
+    fn a_payment_nets_out_and_the_note_it_sent_is_not_balance() {
+        let db = Db::open_memory().unwrap();
+        db.init_account(BlockHeight::from_u32(1)).unwrap();
+
+        // Receive 100_000, then pay 30_000 with 69_999 change and a 1 fee.
+        let funds = note(1, 100_000);
+        let receive = wallet_tx(1, vec![output(0, funds, false)], vec![]);
+        let pay = wallet_tx(
+            2,
+            vec![
+                output(0, note(2, 69_999), false),
+                output(1, note(3, 30_000), true),
+            ],
+            vec![OrchardSpend {
+                index: 0,
+                nf: funds.nullifier(&fvk()),
+            }],
+        );
+        let tip = Cursor {
+            height: BlockHeight::from_u32(2),
+            hash: BlockHash([0; 32]),
+        };
+        db.apply_transactions(tip, &[receive, pay]).unwrap();
+
+        let payment: (i64, bool) = db
+            .conn
+            .query_row(
+                "SELECT amount, is_outgoing FROM txs WHERE block_height = 2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(db.balance().unwrap(), 69_999);
+        assert_eq!(payment, (-30_001, true));
     }
 
     #[test]

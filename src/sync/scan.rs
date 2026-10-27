@@ -208,7 +208,7 @@ fn scan_block<P: Parameters>(
                     scope: key.scope,
                     memo: None,
                     is_sent: false,
-                    is_change: false,
+                    is_change: key.scope == Scope::Internal,
                 });
             }
         }
@@ -249,7 +249,7 @@ fn scan_block<P: Parameters>(
                     scope: key.scope,
                     memo: None,
                     is_sent: false,
-                    is_change: false,
+                    is_change: key.scope == Scope::Internal,
                 });
             }
         }
@@ -298,7 +298,7 @@ fn scan_block<P: Parameters>(
                         scope: key.scope,
                         memo: None,
                         is_sent: false,
-                        is_change: false,
+                        is_change: key.scope == Scope::Internal,
                     });
                 }
             }
@@ -330,7 +330,7 @@ fn scan_block<P: Parameters>(
                         scope: key.scope,
                         memo: None,
                         is_sent: false,
-                        is_change: false,
+                        is_change: key.scope == Scope::Internal,
                     });
                 }
             }
@@ -470,11 +470,7 @@ pub fn scan<P: Parameters>(
                             recipient,
                             nf: None,
                             position: 0u64,
-                            scope: if key_index == 0 {
-                                Scope::External
-                            } else {
-                                Scope::Internal
-                            },
+                            scope: keys.sapling[key_index].scope,
                             memo: Some(memo),
                             is_sent: true,
                             is_change: false,
@@ -517,11 +513,7 @@ pub fn scan<P: Parameters>(
                             recipient,
                             nf: None,
                             position: 0u64,
-                            scope: if key_index == 0 {
-                                Scope::External
-                            } else {
-                                Scope::Internal
-                            },
+                            scope: keys.orchard[key_index].scope,
                             memo: Some(memo),
                             is_sent: true,
                             is_change: false,
@@ -567,11 +559,7 @@ pub fn scan<P: Parameters>(
                                 recipient,
                                 nf: None,
                                 position: 0u64,
-                                scope: if key_index == 0 {
-                                    Scope::External
-                                } else {
-                                    Scope::Internal
-                                },
+                                scope: keys.orchard[key_index].scope,
                                 memo: Some(memo),
                                 is_sent: true,
                                 is_change: false,
@@ -615,11 +603,7 @@ pub fn scan<P: Parameters>(
                                 recipient,
                                 nf: None,
                                 position: 0u64,
-                                scope: if key_index == 0 {
-                                    Scope::External
-                                } else {
-                                    Scope::Internal
-                                },
+                                scope: keys.orchard[key_index].scope,
                                 memo: Some(memo),
                                 is_sent: true,
                                 is_change: false,

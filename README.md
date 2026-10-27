@@ -19,7 +19,7 @@ no `zcash_client_backend`, no `zcash_client_sqlite`.
 
 ```toml
 [dependencies]
-seer-sync = "0.7"
+seer-sync = "0.8"
 ```
 
 ```rust
@@ -87,6 +87,16 @@ sapling_notes txid, output_index, block_height, nf, note, recipient, memo,
 orchard_notes (same)
 ironwood_notes (same)
 ```
+
+`Db::balance()` counts unspent received notes, excluding outputs recovered only
+with an outgoing key. `txs.amount` is the signed change to owned funds:
+received value minus stored notes spent. `is_outgoing` also covers spends
+without recovered outputs. Opening an existing database backfills these
+transaction fields and change flags once.
+
+With a UIVK, spends are invisible, so the balance is total received value.
+Spends of notes from before the birthday cannot be deducted from transaction
+amounts because those notes are absent from the database.
 
 Spends are columns on the note they consume (`spent`, `spent_height`,
 `spent_txid`, `spent_index`) — no separate spend tables.
