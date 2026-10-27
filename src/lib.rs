@@ -30,7 +30,7 @@ pub use sync::{Account, Cursor, Resume, SyncError};
 pub use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 pub use zcash_protocol::consensus::{BlockHeight, Network, Parameters};
 
-use sync::chain::LwdClient;
+use sync::chain;
 use sync::decrypt::ScanningKeys;
 use sync::SyncError as SeerSyncError;
 
@@ -53,7 +53,7 @@ pub async fn run<P: Parameters + Sync, A: Account>(
     };
 
     // Connect to a lightwalletd server.
-    let client = LwdClient::connect_auto(params).await?;
+    let client = chain::connect_bundled(params).await?;
 
     // Run the sync engine.
     sync::run(client, &keys, params, account).await
