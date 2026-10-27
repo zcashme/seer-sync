@@ -148,9 +148,9 @@ impl LwdClient {
             .into_inner();
 
         Ok(stream.map(|result| {
-            result
-                .map_err(RpcError::from)
-                .and_then(validate_streamed_block)
+            let block = result.map_err(RpcError::from)?;
+            check_block_fields(&block)?;
+            Ok(block)
         }))
     }
 
@@ -249,7 +249,7 @@ impl LwdClient {
     }
 }
 
-fn validate_streamed_block(block: CompactBlock) -> Result<CompactBlock, RpcError> {
+fn check_block_fields(block: &CompactBlock) -> Result<(), RpcError> {
     BlockHeight::try_from(block.height).map_err(|_| {
         RpcError::InvalidResponse(format!(
             "GetBlockRange: height {} exceeds u32",
@@ -265,7 +265,7 @@ fn validate_streamed_block(block: CompactBlock) -> Result<CompactBlock, RpcError
             ))
         })?;
     }
-    Ok(block)
+    Ok(())
 }
 
 #[cfg(test)]
