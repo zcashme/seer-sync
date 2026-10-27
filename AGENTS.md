@@ -98,7 +98,7 @@ src/
   decrypt.rs      view-key capability preparation; per-pool compact/full
                   decryption via `zcash_note_encryption`; parse helpers
   proto.rs        include! of build.rs output (client stubs only)
-  sync.rs         run(), Account, Batch, Cursor, Resume, SyncError<E>
+  sync.rs         run(), Account, Batch, Cursor, SyncError<E>
   sync/
     chain.rs      only I/O — lightwalletd connect/stream/fetch (BlockHeight-typed)
     scan.rs       sans-IO: scan_compact, enrich_memos, scan_sent, scan_commitments, …
@@ -119,7 +119,9 @@ Fold over the chain. One associated error type (not boxed):
 trait Account {
     type Error: Error + Send + Sync + 'static;
 
-    fn resume(&self) -> Result<Resume, Self::Error>;
+    fn checkpoint(&self) -> Result<Option<Cursor>, Self::Error>;
+    fn birthday(&self) -> Result<BlockHeight, Self::Error>;
+    fn nullifiers(&self) -> Result<Nullifiers, Self::Error>;
     fn rewind(&self, to: Cursor) -> Result<(), Self::Error>;  // keep ≤ to; to is the checkpoint
     fn apply(&self, at: Cursor, batch: &Batch) -> Result<(), Self::Error>;
     fn wants_commitments(&self) -> bool { false }  // opt-in cmx firehose
@@ -128,7 +130,7 @@ trait Account {
 
 | Type | Meaning |
 |------|---------|
-| `Resume` | birthday, optional checkpoint `Cursor`, watched nullifiers + outpoints |
+| `Nullifiers` | watched nullifiers, read separately from birthday and checkpoint |
 | `Cursor` | fully applied height + optional seam `BlockHash` |
 | `Batch` | notes, spends, transparent outs/spends, optional commitments |
 
@@ -159,12 +161,12 @@ Proto still speaks `u64` heights internally; convert at the boundary.
 Persistence-free: never opens the consumer's store. Only calls `Account`.
 
 ```
-resume → discover transparent (whole life, gap-limit)
+checkpoint → discover transparent (whole life, gap-limit)
       → stream blocks [start, tip] (chunked, backpressured)
       → scan_compact → fetch full txs → enrich_memos / scan_sent / scan_transparent
       → optional scan_commitments
       → apply(Cursor, Batch)
-reorg  → drop buffer → rewind 100 below if the checkpoint broke → re-resume
+reorg  → drop buffer → rewind 100 below if the checkpoint broke → reload checkpoint
 transport fault → bounded retry from checkpoint
 ```
 

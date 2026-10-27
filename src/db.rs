@@ -27,7 +27,7 @@ use zcash_protocol::consensus::BlockHeight;
 use zip32::Scope;
 
 use crate::sync::scan::{Nullifiers, OrchardOutput, SaplingOutput, WalletTx};
-use crate::sync::{Account, Cursor, Resume};
+use crate::sync::{Account, Cursor};
 
 // ─── errors ──────────────────────────────────────────────────────────────────
 
@@ -196,13 +196,13 @@ impl Db {
 // ─── Account impl ────────────────────────────────────────────────────────────
 
 impl Account for Db {
-    fn resume(&self) -> Result<Resume, Box<dyn Error + Send + Sync>> {
-        let (birthday, sync_height, sync_hash): (u32, Option<u32>, Option<Vec<u8>>) = self
+    fn checkpoint(&self) -> Result<Option<Cursor>, Box<dyn Error + Send + Sync>> {
+        let (sync_height, sync_hash): (Option<u32>, Option<Vec<u8>>) = self
             .conn
             .query_row(
-                "SELECT birthday, sync_height, sync_hash FROM account WHERE id = 1",
+                "SELECT sync_height, sync_hash FROM account WHERE id = 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(DbError::from)?;
 
@@ -220,13 +220,20 @@ impl Account for Db {
             _ => None,
         };
 
-        let nullifiers = self.load_nullifiers()?;
+        Ok(checkpoint)
+    }
 
-        Ok(Resume {
-            birthday: BlockHeight::from_u32(birthday),
-            checkpoint,
-            nullifiers,
-        })
+    fn birthday(&self) -> Result<BlockHeight, Box<dyn Error + Send + Sync>> {
+        let birthday: u32 = self.conn.query_row(
+            "SELECT birthday FROM account WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(BlockHeight::from_u32(birthday))
+    }
+
+    fn nullifiers(&self) -> Result<Nullifiers, Box<dyn Error + Send + Sync>> {
+        Ok(self.load_nullifiers()?)
     }
 
     fn rewind(&self, to: Cursor) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -582,6 +589,6 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(notes, vec![(20, false)], "20 stays, unspent; 30 is gone");
-        assert_eq!(db.resume().unwrap().checkpoint, Some(to));
+        assert_eq!(db.checkpoint().unwrap(), Some(to));
     }
 }

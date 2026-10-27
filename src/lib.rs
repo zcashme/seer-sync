@@ -29,7 +29,7 @@ pub mod sync;
 
 pub use db::{Db, DbError};
 pub use sync::scan::Nullifiers;
-pub use sync::{Account, Cursor, Resume, SyncError};
+pub use sync::{Account, Cursor, SyncError};
 
 pub use zcash_keys::keys::{UnifiedFullViewingKey, UnifiedIncomingViewingKey};
 pub use zcash_protocol::consensus::{BlockHeight, Network, Parameters};
