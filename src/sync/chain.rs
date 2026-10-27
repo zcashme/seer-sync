@@ -17,6 +17,8 @@ const MAINNET_SERVERS: &[&str] = &[
     "https://na.zec.rocks:443",
     "https://eu.zec.rocks:443",
     "https://ap.zec.rocks:443",
+    "https://us.zec.stardust.rest:443",
+    "https://eu.zec.stardust.rest:443",
 ];
 const TESTNET_SERVERS: &[&str] = &["https://testnet.zec.rocks:443"];
 
@@ -47,7 +49,7 @@ pub enum RpcError {
 }
 
 #[derive(thiserror::Error, Debug)]
-#[error("no bundled lightwalletd server is available")]
+#[error("no lightwalletd server is available")]
 pub struct NoServer;
 
 /// Connect to the first bundled server for `params.network_type()` that
