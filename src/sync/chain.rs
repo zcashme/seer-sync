@@ -39,23 +39,35 @@ pub struct LwdClient {
 }
 
 #[derive(thiserror::Error, Debug)]
-#[error("lightwalletd RPC {code}: {message}")]
-pub struct RpcError {
-    pub code: String,
-    pub message: String,
+pub enum RpcError {
+    #[error("lightwalletd RPC failed: {0}")]
+    Status(#[from] tonic::Status),
+    #[error("invalid lightwalletd response: {0}")]
+    InvalidResponse(String),
 }
 
 #[derive(thiserror::Error, Debug)]
 #[error("no bundled lightwalletd server is available")]
 pub struct NoServer;
 
-impl From<tonic::Status> for RpcError {
-    fn from(status: tonic::Status) -> Self {
-        Self {
-            code: format!("{:?}", status.code()),
-            message: status.message().to_owned(),
-        }
-    }
+fn parse_block_hash(bytes: &[u8], method: &str) -> Result<BlockHash, RpcError> {
+    BlockHash::try_from_slice(bytes).ok_or_else(|| {
+        RpcError::InvalidResponse(format!(
+            "{method}: expected a 32-byte block hash, received {} bytes",
+            bytes.len()
+        ))
+    })
+}
+
+fn parse_block_id(block: BlockId) -> Result<(BlockHeight, BlockHash), RpcError> {
+    let height = BlockHeight::try_from(block.height).map_err(|_| {
+        RpcError::InvalidResponse(format!(
+            "GetLatestBlock: height {} exceeds u32",
+            block.height
+        ))
+    })?;
+    let hash = parse_block_hash(&block.hash, "GetLatestBlock")?;
+    Ok((height, hash))
 }
 
 /// Connect to the first bundled server for `params.network_type()` that
@@ -97,19 +109,7 @@ impl LwdClient {
             .await?
             .into_inner();
 
-        Ok((
-            BlockHeight::from_u32(
-                u32::try_from(block.height)
-                    .expect("lightwalletd block heights fit Zcash's block-height type"),
-            ),
-            BlockHash(
-                block
-                    .hash
-                    .as_slice()
-                    .try_into()
-                    .expect("lightwalletd block hashes are 32 bytes"),
-            ),
-        ))
+        parse_block_id(block)
     }
 
     pub(crate) async fn block_hash(&mut self, height: BlockHeight) -> Result<BlockHash, RpcError> {
@@ -122,13 +122,7 @@ impl LwdClient {
             .await?
             .into_inner();
 
-        Ok(BlockHash(
-            block
-                .hash
-                .as_slice()
-                .try_into()
-                .expect("lightwalletd block hashes are 32 bytes"),
-        ))
+        parse_block_hash(&block.hash, "GetBlock")
     }
 
     pub(crate) async fn blocks(
@@ -255,6 +249,62 @@ mod tests {
     use zcash_protocol::consensus::{MainNetwork, NetworkUpgrade};
 
     use super::*;
+
+    #[test]
+    fn block_id_rejects_malformed_fields_without_panicking() {
+        let height = u64::from(u32::MAX) + 1;
+        let error = parse_block_id(BlockId {
+            height,
+            hash: vec![0; 32],
+        })
+        .unwrap_err();
+        assert!(matches!(error, RpcError::InvalidResponse(_)));
+        assert!(error.to_string().contains(&height.to_string()));
+
+        for len in [0, 31, 33] {
+            let error = parse_block_id(BlockId {
+                height: 42,
+                hash: vec![0; len],
+            })
+            .unwrap_err();
+            assert!(matches!(error, RpcError::InvalidResponse(_)));
+            assert!(error.to_string().contains("GetLatestBlock"));
+            assert!(error.to_string().contains(&format!("received {len} bytes")));
+
+            let error = parse_block_hash(&vec![0; len], "GetBlock").unwrap_err();
+            assert!(matches!(error, RpcError::InvalidResponse(_)));
+            assert!(error.to_string().contains("GetBlock"));
+        }
+    }
+
+    #[test]
+    fn block_id_preserves_valid_fields() {
+        let height = u32::MAX;
+        let hash = [7; 32];
+        assert_eq!(
+            parse_block_id(BlockId {
+                height: u64::from(height),
+                hash: hash.to_vec()
+            })
+            .unwrap(),
+            (BlockHeight::from_u32(height), BlockHash(hash)),
+        );
+    }
+
+    #[test]
+    fn rpc_status_preserves_code_message_and_metadata() {
+        let mut status = tonic::Status::unavailable("server restarting");
+        status
+            .metadata_mut()
+            .insert("retry-after", "30".parse().unwrap());
+        let error = RpcError::from(status);
+        let RpcError::Status(status) = error else {
+            panic!("expected RPC status")
+        };
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert_eq!(status.message(), "server restarting");
+        assert_eq!(status.metadata().get("retry-after").unwrap(), "30");
+    }
 
     /// Live: needs network access to the bundled mainnet servers.
     /// Run with `cargo test -- --ignored`.
