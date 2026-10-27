@@ -20,7 +20,7 @@ use crate::sync::decrypt::{
 };
 use crate::sync::decrypt::{
     decrypt_compact_orchard, decrypt_compact_sapling, decrypt_full_orchard, decrypt_full_sapling,
-    recover_outgoing_orchard, recover_outgoing_sapling, DecryptResult, ScanningKeys,
+    recover_outgoing_orchard, recover_outgoing_sapling, ScanningKeys,
 };
 
 pub struct Nullifiers {
@@ -190,13 +190,7 @@ fn scan_block<P: Parameters>(
         let sap_decrypted = decrypt_compact_sapling(&tx.outputs, keys, zip212);
         for (idx, opt) in sap_decrypted.into_iter().enumerate() {
             let position = u64::from(sap_pos) + idx as u64;
-            if let Some(DecryptResult {
-                note,
-                recipient,
-                key_index,
-                ..
-            }) = opt
-            {
+            if let Some(((note, recipient), key_index)) = opt {
                 let key = &keys.sapling[key_index];
                 let nf = key.nk.as_ref().map(|nk| note.nf(nk, position));
                 wtx.sapling_outputs.push(SaplingOutput {
@@ -228,13 +222,7 @@ fn scan_block<P: Parameters>(
         let orch_decrypted = decrypt_compact_orchard(&tx.actions, keys);
         for (idx, opt) in orch_decrypted.into_iter().enumerate() {
             let position = u64::from(orch_pos) + idx as u64;
-            if let Some(DecryptResult {
-                note,
-                recipient,
-                key_index,
-                ..
-            }) = opt
-            {
+            if let Some(((note, recipient), key_index)) = opt {
                 let key = &keys.orchard[key_index];
                 let nf = key
                     .nk
@@ -277,13 +265,7 @@ fn scan_block<P: Parameters>(
             let iorn_decrypted = decrypt_compact_ironwood(&tx.ironwood_actions, keys);
             for (idx, opt) in iorn_decrypted.into_iter().enumerate() {
                 let position = u64::from(iorn_pos) + idx as u64;
-                if let Some(DecryptResult {
-                    note,
-                    recipient,
-                    key_index,
-                    ..
-                }) = opt
-                {
+                if let Some(((note, recipient), key_index)) = opt {
                     let key = &keys.orchard[key_index];
                     let nf = key
                         .nk
@@ -309,13 +291,7 @@ fn scan_block<P: Parameters>(
                 decrypt_compact_ironwood_relaxed(&tx.ironwood_actions, keys);
             for (idx, opt) in iorn_decrypted.into_iter().enumerate() {
                 let position = u64::from(iorn_pos) + idx as u64;
-                if let Some(DecryptResult {
-                    note,
-                    recipient,
-                    key_index,
-                    ..
-                }) = opt
-                {
+                if let Some(((note, recipient), key_index)) = opt {
                     let key = &keys.orchard[key_index];
                     let nf = key
                         .nk
@@ -446,37 +422,29 @@ pub fn scan<P: Parameters>(
                     .iter_mut()
                     .find(|o| o.index == idx as u32)
                 {
-                    if let Some(DecryptResult {
-                        memo: Some(memo), ..
-                    }) = opt
-                    {
+                    if let Some(((_, _, memo), _)) = opt {
                         o.memo = Some(memo);
                     }
                 }
             }
-            let outgoing = recover_outgoing_sapling(outputs, keys, zip212);
-            for (idx, opt) in outgoing.into_iter().enumerate() {
-                if opt.is_some() && !wtx.sapling_outputs.iter().any(|o| o.index == idx as u32) {
-                    if let Some(DecryptResult {
-                        note,
-                        recipient,
-                        memo: Some(memo),
-                        key_index,
-                    }) = opt
-                    {
-                        wtx.sapling_outputs.push(SaplingOutput {
-                            index: idx as u32,
-                            note,
-                            recipient,
-                            nf: None,
-                            position: 0u64,
-                            scope: keys.sapling[key_index].scope,
-                            memo: Some(memo),
-                            is_sent: true,
-                            is_change: false,
-                        });
-                    }
-                }
+            // Recovery cannot add information to an output already retained here.
+            let candidates = outputs
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| !wtx.sapling_outputs.iter().any(|o| o.index == *idx as u32));
+            let outgoing = recover_outgoing_sapling(candidates, keys, zip212);
+            for (index, ((note, recipient, memo), key_index)) in outgoing {
+                wtx.sapling_outputs.push(SaplingOutput {
+                    index: index as u32,
+                    note,
+                    recipient,
+                    nf: None,
+                    position: 0u64,
+                    scope: keys.sapling[key_index].scope,
+                    memo: Some(memo),
+                    is_sent: true,
+                    is_change: false,
+                });
             }
         }
 
@@ -488,37 +456,29 @@ pub fn scan<P: Parameters>(
                     .iter_mut()
                     .find(|o| o.index == idx as u32)
                 {
-                    if let Some(DecryptResult {
-                        memo: Some(memo), ..
-                    }) = opt
-                    {
+                    if let Some(((_, _, memo), _)) = opt {
                         o.memo = Some(memo);
                     }
                 }
             }
-            let outgoing = recover_outgoing_orchard(bundle.actions().iter(), keys);
-            for (idx, opt) in outgoing.into_iter().enumerate() {
-                if opt.is_some() && !wtx.orchard_outputs.iter().any(|o| o.index == idx as u32) {
-                    if let Some(DecryptResult {
-                        note,
-                        recipient,
-                        memo: Some(memo),
-                        key_index,
-                    }) = opt
-                    {
-                        wtx.orchard_outputs.push(OrchardOutput {
-                            index: idx as u32,
-                            note,
-                            recipient,
-                            nf: None,
-                            position: 0u64,
-                            scope: keys.orchard[key_index].scope,
-                            memo: Some(memo),
-                            is_sent: true,
-                            is_change: false,
-                        });
-                    }
-                }
+            let candidates = bundle
+                .actions()
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| !wtx.orchard_outputs.iter().any(|o| o.index == *idx as u32));
+            let outgoing = recover_outgoing_orchard(candidates, keys);
+            for (index, ((note, recipient, memo), key_index)) in outgoing {
+                wtx.orchard_outputs.push(OrchardOutput {
+                    index: index as u32,
+                    note,
+                    recipient,
+                    nf: None,
+                    position: 0u64,
+                    scope: keys.orchard[key_index].scope,
+                    memo: Some(memo),
+                    is_sent: true,
+                    is_change: false,
+                });
             }
         }
 
@@ -532,38 +492,27 @@ pub fn scan<P: Parameters>(
                         .iter_mut()
                         .find(|o| o.index == idx as u32)
                     {
-                        if let Some(DecryptResult {
-                            memo: Some(memo), ..
-                        }) = opt
-                        {
+                        if let Some(((_, _, memo), _)) = opt {
                             o.memo = Some(memo);
                         }
                     }
                 }
-                let outgoing = recover_outgoing_ironwood(bundle.actions().iter(), keys);
-                for (idx, opt) in outgoing.into_iter().enumerate() {
-                    if opt.is_some() && !wtx.ironwood_outputs.iter().any(|o| o.index == idx as u32)
-                    {
-                        if let Some(DecryptResult {
-                            note,
-                            recipient,
-                            memo: Some(memo),
-                            key_index,
-                        }) = opt
-                        {
-                            wtx.ironwood_outputs.push(OrchardOutput {
-                                index: idx as u32,
-                                note,
-                                recipient,
-                                nf: None,
-                                position: 0u64,
-                                scope: keys.orchard[key_index].scope,
-                                memo: Some(memo),
-                                is_sent: true,
-                                is_change: false,
-                            });
-                        }
-                    }
+                let candidates = bundle.actions().iter().enumerate().filter(|(idx, _)| {
+                    !wtx.ironwood_outputs.iter().any(|o| o.index == *idx as u32)
+                });
+                let outgoing = recover_outgoing_ironwood(candidates, keys);
+                for (index, ((note, recipient, memo), key_index)) in outgoing {
+                    wtx.ironwood_outputs.push(OrchardOutput {
+                        index: index as u32,
+                        note,
+                        recipient,
+                        nf: None,
+                        position: 0u64,
+                        scope: keys.orchard[key_index].scope,
+                        memo: Some(memo),
+                        is_sent: true,
+                        is_change: false,
+                    });
                 }
             }
             #[cfg(feature = "zns-decrypt")]
@@ -575,39 +524,28 @@ pub fn scan<P: Parameters>(
                         .iter_mut()
                         .find(|o| o.index == idx as u32)
                     {
-                        if let Some(DecryptResult {
-                            memo: Some(memo), ..
-                        }) = opt
-                        {
+                        if let Some(((_, _, memo), _)) = opt {
                             o.memo = Some(memo);
                         }
                     }
                 }
-                let (ovk_ordinary, ovk_hits) =
-                    recover_outgoing_ironwood_relaxed(bundle.actions().iter(), keys);
-                for (idx, opt) in ovk_ordinary.into_iter().enumerate() {
-                    if opt.is_some() && !wtx.ironwood_outputs.iter().any(|o| o.index == idx as u32)
-                    {
-                        if let Some(DecryptResult {
-                            note,
-                            recipient,
-                            memo: Some(memo),
-                            key_index,
-                        }) = opt
-                        {
-                            wtx.ironwood_outputs.push(OrchardOutput {
-                                index: idx as u32,
-                                note,
-                                recipient,
-                                nf: None,
-                                position: 0u64,
-                                scope: keys.orchard[key_index].scope,
-                                memo: Some(memo),
-                                is_sent: true,
-                                is_change: false,
-                            });
-                        }
-                    }
+                // Relaxed candidates still need OVK confirmation of `is_sent`.
+                let candidates = bundle.actions().iter().enumerate().filter(|(idx, _)| {
+                    !wtx.ironwood_outputs.iter().any(|o| o.index == *idx as u32)
+                });
+                let (ovk_ordinary, ovk_hits) = recover_outgoing_ironwood_relaxed(candidates, keys);
+                for (index, ((note, recipient, memo), key_index)) in ovk_ordinary {
+                    wtx.ironwood_outputs.push(OrchardOutput {
+                        index: index as u32,
+                        note,
+                        recipient,
+                        nf: None,
+                        position: 0u64,
+                        scope: keys.orchard[key_index].scope,
+                        memo: Some(memo),
+                        is_sent: true,
+                        is_change: false,
+                    });
                 }
                 // Update-or-insert by action index; the OVK pass runs last, so its
                 // is_sent: true wins.

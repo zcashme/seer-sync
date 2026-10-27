@@ -98,18 +98,16 @@ impl ScanningKeys {
     }
 }
 
-pub(crate) struct DecryptResult<Note, Recipient> {
-    pub note: Note,
-    pub recipient: Recipient,
-    pub memo: Option<[u8; 512]>,
-    pub key_index: usize,
-}
+// Match upstream batch-decryption payloads, including the matching key index.
+pub(crate) type CompactDecryptResult<Note, Recipient> = ((Note, Recipient), usize);
+pub(crate) type FullDecryptResult<Note, Recipient> = ((Note, Recipient, [u8; 512]), usize);
+type IndexedFullDecryptResult<Note, Recipient> = (usize, FullDecryptResult<Note, Recipient>);
 
 pub(crate) fn decrypt_compact_sapling(
     outputs: &[CompactSaplingOutput],
     keys: &ScanningKeys,
     zip212: Zip212Enforcement,
-) -> Vec<Option<DecryptResult<sapling::Note, sapling::PaymentAddress>>> {
+) -> Vec<Option<CompactDecryptResult<sapling::Note, sapling::PaymentAddress>>> {
     let ivks: Vec<_> = keys.sapling.iter().map(|k| k.ivk.clone()).collect();
     if ivks.is_empty() {
         return (0..outputs.len()).map(|_| None).collect();
@@ -126,17 +124,10 @@ pub(crate) fn decrypt_compact_sapling(
 
     let raw = try_compact_note_decryption(&ivks, &pairs);
 
-    let mut results: Vec<Option<DecryptResult<sapling::Note, sapling::PaymentAddress>>> =
+    let mut results: Vec<Option<CompactDecryptResult<sapling::Note, sapling::PaymentAddress>>> =
         (0..outputs.len()).map(|_| None).collect();
-    for (idx, r) in indices.into_iter().zip(raw) {
-        if let Some(((note, recipient), key_index)) = r {
-            results[idx] = Some(DecryptResult {
-                note,
-                recipient,
-                memo: None,
-                key_index,
-            });
-        }
+    for (idx, result) in indices.into_iter().zip(raw) {
+        results[idx] = result;
     }
     results
 }
@@ -144,7 +135,7 @@ pub(crate) fn decrypt_compact_sapling(
 pub(crate) fn decrypt_compact_orchard(
     actions: &[CompactOrchardAction],
     keys: &ScanningKeys,
-) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
+) -> Vec<Option<CompactDecryptResult<orchard::Note, orchard::Address>>> {
     let ivks: Vec<_> = keys.orchard.iter().map(|k| k.ivk.clone()).collect();
     if ivks.is_empty() {
         return (0..actions.len()).map(|_| None).collect();
@@ -161,17 +152,10 @@ pub(crate) fn decrypt_compact_orchard(
 
     let raw = try_compact_note_decryption(&ivks, &pairs);
 
-    let mut results: Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> =
+    let mut results: Vec<Option<CompactDecryptResult<orchard::Note, orchard::Address>>> =
         (0..actions.len()).map(|_| None).collect();
-    for (idx, r) in indices.into_iter().zip(raw) {
-        if let Some(((note, recipient), key_index)) = r {
-            results[idx] = Some(DecryptResult {
-                note,
-                recipient,
-                memo: None,
-                key_index,
-            });
-        }
+    for (idx, result) in indices.into_iter().zip(raw) {
+        results[idx] = result;
     }
     results
 }
@@ -180,7 +164,7 @@ pub(crate) fn decrypt_compact_orchard(
 pub(crate) fn decrypt_compact_ironwood(
     actions: &[CompactOrchardAction],
     keys: &ScanningKeys,
-) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
+) -> Vec<Option<CompactDecryptResult<orchard::Note, orchard::Address>>> {
     let ivks: Vec<_> = keys.orchard.iter().map(|k| k.ivk.clone()).collect();
     if ivks.is_empty() {
         return (0..actions.len()).map(|_| None).collect();
@@ -197,17 +181,10 @@ pub(crate) fn decrypt_compact_ironwood(
 
     let raw = try_compact_note_decryption(&ivks, &pairs);
 
-    let mut results: Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> =
+    let mut results: Vec<Option<CompactDecryptResult<orchard::Note, orchard::Address>>> =
         (0..actions.len()).map(|_| None).collect();
-    for (idx, r) in indices.into_iter().zip(raw) {
-        if let Some(((note, recipient), key_index)) = r {
-            results[idx] = Some(DecryptResult {
-                note,
-                recipient,
-                memo: None,
-                key_index,
-            });
-        }
+    for (idx, result) in indices.into_iter().zip(raw) {
+        results[idx] = result;
     }
     results
 }
@@ -216,7 +193,7 @@ pub(crate) fn decrypt_full_sapling(
     outputs: &[sapling::bundle::OutputDescription<sapling::bundle::GrothProofBytes>],
     keys: &ScanningKeys,
     zip212: Zip212Enforcement,
-) -> Vec<Option<DecryptResult<sapling::Note, sapling::PaymentAddress>>> {
+) -> Vec<Option<FullDecryptResult<sapling::Note, sapling::PaymentAddress>>> {
     let ivks: Vec<_> = keys.sapling.iter().map(|k| k.ivk.clone()).collect();
     if ivks.is_empty() {
         return (0..outputs.len()).map(|_| None).collect();
@@ -228,22 +205,12 @@ pub(crate) fn decrypt_full_sapling(
         .collect();
 
     batch_try_note_decryption(&ivks, &pairs)
-        .into_iter()
-        .map(|r| {
-            r.map(|((note, recipient, memo), key_index)| DecryptResult {
-                note,
-                recipient,
-                memo: Some(memo),
-                key_index,
-            })
-        })
-        .collect()
 }
 
 pub(crate) fn decrypt_full_orchard<'a, T: 'a>(
     actions: impl ExactSizeIterator<Item = &'a orchard::Action<T>>,
     keys: &ScanningKeys,
-) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
+) -> Vec<Option<FullDecryptResult<orchard::Note, orchard::Address>>> {
     let ivks: Vec<_> = keys.orchard.iter().map(|k| k.ivk.clone()).collect();
     if ivks.is_empty() {
         return (0..actions.len()).map(|_| None).collect();
@@ -254,12 +221,7 @@ pub(crate) fn decrypt_full_orchard<'a, T: 'a>(
             let domain = OrchardDomain::for_action(action);
             for (key_index, ivk) in ivks.iter().enumerate() {
                 if let Some((note, recipient, memo)) = try_note_decryption(&domain, ivk, action) {
-                    return Some(DecryptResult {
-                        note,
-                        recipient,
-                        memo: Some(memo),
-                        key_index,
-                    });
+                    return Some(((note, recipient, memo), key_index));
                 }
             }
             None
@@ -271,7 +233,7 @@ pub(crate) fn decrypt_full_orchard<'a, T: 'a>(
 pub(crate) fn decrypt_full_ironwood<'a, T: 'a>(
     actions: impl ExactSizeIterator<Item = &'a orchard::Action<T>>,
     keys: &ScanningKeys,
-) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
+) -> Vec<Option<FullDecryptResult<orchard::Note, orchard::Address>>> {
     let ivks: Vec<_> = keys.orchard.iter().map(|k| k.ivk.clone()).collect();
     if ivks.is_empty() {
         return (0..actions.len()).map(|_| None).collect();
@@ -282,12 +244,7 @@ pub(crate) fn decrypt_full_ironwood<'a, T: 'a>(
             let domain = IronwoodDomain::for_action(action);
             for (key_index, ivk) in ivks.iter().enumerate() {
                 if let Some((note, recipient, memo)) = try_note_decryption(&domain, ivk, action) {
-                    return Some(DecryptResult {
-                        note,
-                        recipient,
-                        memo: Some(memo),
-                        key_index,
-                    });
+                    return Some(((note, recipient, memo), key_index));
                 }
             }
             None
@@ -304,22 +261,26 @@ fn outgoing_keys<Ivk, Nk, Ovk>(keys: &[ScanningKey<Ivk, Nk, Ovk>]) -> Vec<(usize
         .collect()
 }
 
-pub(crate) fn recover_outgoing_sapling(
-    outputs: &[sapling::bundle::OutputDescription<sapling::bundle::GrothProofBytes>],
+pub(crate) fn recover_outgoing_sapling<'a>(
+    outputs: impl Iterator<
+        Item = (
+            usize,
+            &'a sapling::bundle::OutputDescription<sapling::bundle::GrothProofBytes>,
+        ),
+    >,
     keys: &ScanningKeys,
     zip212: Zip212Enforcement,
-) -> Vec<Option<DecryptResult<sapling::Note, sapling::PaymentAddress>>> {
+) -> Vec<IndexedFullDecryptResult<sapling::Note, sapling::PaymentAddress>> {
     let ovks = outgoing_keys(&keys.sapling);
 
     if ovks.is_empty() {
-        return (0..outputs.len()).map(|_| None).collect();
+        return Vec::new();
     }
 
     let domain = SaplingDomain::new(zip212);
 
     outputs
-        .iter()
-        .map(|output| {
+        .filter_map(|(idx, output)| {
             for &(i, ovk) in &ovks {
                 if let Some((note, recipient, memo)) = try_output_recovery_with_ovk(
                     &domain,
@@ -328,12 +289,7 @@ pub(crate) fn recover_outgoing_sapling(
                     output.cv(),
                     output.out_ciphertext(),
                 ) {
-                    return Some(DecryptResult {
-                        note,
-                        recipient,
-                        memo: Some(memo),
-                        key_index: i,
-                    });
+                    return Some((idx, ((note, recipient, memo), i)));
                 }
             }
             None
@@ -342,17 +298,17 @@ pub(crate) fn recover_outgoing_sapling(
 }
 
 pub(crate) fn recover_outgoing_orchard<'a, T: 'a>(
-    actions: impl ExactSizeIterator<Item = &'a orchard::Action<T>>,
+    actions: impl Iterator<Item = (usize, &'a orchard::Action<T>)>,
     keys: &ScanningKeys,
-) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
+) -> Vec<IndexedFullDecryptResult<orchard::Note, orchard::Address>> {
     let ovks = outgoing_keys(&keys.orchard);
 
     if ovks.is_empty() {
-        return (0..actions.len()).map(|_| None).collect();
+        return Vec::new();
     }
 
     actions
-        .map(|action| {
+        .filter_map(|(idx, action)| {
             let domain = OrchardDomain::for_action(action);
             for &(i, ovk) in &ovks {
                 if let Some((note, recipient, memo)) = try_output_recovery_with_ovk(
@@ -362,12 +318,7 @@ pub(crate) fn recover_outgoing_orchard<'a, T: 'a>(
                     action.cv_net(),
                     &action.encrypted_note().out_ciphertext,
                 ) {
-                    return Some(DecryptResult {
-                        note,
-                        recipient,
-                        memo: Some(memo),
-                        key_index: i,
-                    });
+                    return Some((idx, ((note, recipient, memo), i)));
                 }
             }
             None
@@ -377,17 +328,17 @@ pub(crate) fn recover_outgoing_orchard<'a, T: 'a>(
 
 #[cfg(not(feature = "zns-decrypt"))]
 pub(crate) fn recover_outgoing_ironwood<'a, T: 'a>(
-    actions: impl ExactSizeIterator<Item = &'a orchard::Action<T>>,
+    actions: impl Iterator<Item = (usize, &'a orchard::Action<T>)>,
     keys: &ScanningKeys,
-) -> Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> {
+) -> Vec<IndexedFullDecryptResult<orchard::Note, orchard::Address>> {
     let ovks = outgoing_keys(&keys.orchard);
 
     if ovks.is_empty() {
-        return (0..actions.len()).map(|_| None).collect();
+        return Vec::new();
     }
 
     actions
-        .map(|action| {
+        .filter_map(|(idx, action)| {
             let domain = IronwoodDomain::for_action(action);
             for &(i, ovk) in &ovks {
                 if let Some((note, recipient, memo)) = try_output_recovery_with_ovk(
@@ -397,12 +348,7 @@ pub(crate) fn recover_outgoing_ironwood<'a, T: 'a>(
                     action.cv_net(),
                     &action.encrypted_note().out_ciphertext,
                 ) {
-                    return Some(DecryptResult {
-                        note,
-                        recipient,
-                        memo: Some(memo),
-                        key_index: i,
-                    });
+                    return Some((idx, ((note, recipient, memo), i)));
                 }
             }
             None
@@ -443,7 +389,7 @@ pub(crate) fn decrypt_compact_ironwood_relaxed(
     actions: &[CompactOrchardAction],
     keys: &ScanningKeys,
 ) -> (
-    Vec<Option<DecryptResult<orchard::Note, orchard::Address>>>,
+    Vec<Option<CompactDecryptResult<orchard::Note, orchard::Address>>>,
     Vec<RelaxedIronwoodOutput>,
 ) {
     let ivks: Vec<_> = keys.orchard.iter().map(|k| k.ivk.clone()).collect();
@@ -465,18 +411,13 @@ pub(crate) fn decrypt_compact_ironwood_relaxed(
 
     let raw = try_compact_note_decryption(&ivks, &pairs);
 
-    let mut ordinary: Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> =
+    let mut ordinary: Vec<Option<CompactDecryptResult<orchard::Note, orchard::Address>>> =
         (0..actions.len()).map(|_| None).collect();
     let mut relaxed = Vec::new();
     for ((idx, ca), r) in parsed.into_iter().zip(raw) {
         if let Some(((candidate, recipient), key_index)) = r {
             if rseed_guard(&candidate) {
-                ordinary[idx] = Some(DecryptResult {
-                    note: *candidate.note(),
-                    recipient,
-                    memo: None,
-                    key_index,
-                });
+                ordinary[idx] = Some(((*candidate.note(), recipient), key_index));
             } else {
                 relaxed.push((idx, candidate, ca.nullifier(), None, false));
             }
@@ -490,7 +431,7 @@ pub(crate) fn decrypt_full_ironwood_relaxed<'a, T: 'a>(
     actions: impl ExactSizeIterator<Item = &'a orchard::Action<T>>,
     keys: &ScanningKeys,
 ) -> (
-    Vec<Option<DecryptResult<orchard::Note, orchard::Address>>>,
+    Vec<Option<FullDecryptResult<orchard::Note, orchard::Address>>>,
     Vec<RelaxedIronwoodOutput>,
 ) {
     let ivks: Vec<_> = keys.orchard.iter().map(|k| k.ivk.clone()).collect();
@@ -504,18 +445,13 @@ pub(crate) fn decrypt_full_ironwood_relaxed<'a, T: 'a>(
 
     let raw = batch_try_note_decryption(&ivks, &pairs);
 
-    let mut ordinary: Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> =
+    let mut ordinary: Vec<Option<FullDecryptResult<orchard::Note, orchard::Address>>> =
         (0..pairs.len()).map(|_| None).collect();
     let mut relaxed = Vec::new();
     for (idx, r) in raw.into_iter().enumerate() {
         if let Some(((candidate, recipient, memo), key_index)) = r {
             if rseed_guard(&candidate) {
-                ordinary[idx] = Some(DecryptResult {
-                    note: *candidate.note(),
-                    recipient,
-                    memo: Some(memo),
-                    key_index,
-                });
+                ordinary[idx] = Some(((*candidate.note(), recipient, memo), key_index));
             } else {
                 relaxed.push((idx, candidate, *pairs[idx].1.nullifier(), Some(memo), false));
             }
@@ -526,32 +462,26 @@ pub(crate) fn decrypt_full_ironwood_relaxed<'a, T: 'a>(
 
 #[cfg(feature = "zns-decrypt")]
 pub(crate) fn recover_outgoing_ironwood_relaxed<'a, T: 'a>(
-    actions: impl ExactSizeIterator<Item = &'a orchard::Action<T>>,
+    actions: impl Iterator<Item = (usize, &'a orchard::Action<T>)>,
     keys: &ScanningKeys,
 ) -> (
-    Vec<Option<DecryptResult<orchard::Note, orchard::Address>>>,
+    Vec<IndexedFullDecryptResult<orchard::Note, orchard::Address>>,
     Vec<RelaxedIronwoodOutput>,
 ) {
     let ovks = outgoing_keys(&keys.orchard);
     if ovks.is_empty() {
-        return ((0..actions.len()).map(|_| None).collect(), Vec::new());
+        return (Vec::new(), Vec::new());
     }
 
-    let mut ordinary: Vec<Option<DecryptResult<orchard::Note, orchard::Address>>> =
-        (0..actions.len()).map(|_| None).collect();
+    let mut ordinary = Vec::new();
     let mut relaxed = Vec::new();
-    for (idx, action) in actions.enumerate() {
+    for (idx, action) in actions {
         let domain = ZnsIronwoodDomain::for_action(action);
         let nf = *action.nullifier();
         for &(i, ovk) in &ovks {
             if let Some((candidate, recipient, memo)) = domain.try_decrypt_sent(action, ovk) {
                 if rseed_guard(&candidate) {
-                    ordinary[idx] = Some(DecryptResult {
-                        note: *candidate.note(),
-                        recipient,
-                        memo: Some(memo),
-                        key_index: i,
-                    });
+                    ordinary.push((idx, ((*candidate.note(), recipient, memo), i)));
                 } else {
                     relaxed.push((idx, candidate, nf, Some(memo), true));
                 }
