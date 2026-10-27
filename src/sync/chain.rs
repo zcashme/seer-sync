@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use futures_util::future::try_join_all;
 use tokio_stream::{Stream, StreamExt};
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_primitives::block::BlockHash;
@@ -221,29 +222,22 @@ impl LwdClient {
         Ok(transactions)
     }
 
-    /// Fetches the full serialized transaction for every provided txid in parallel.
+    /// Fetches full transactions concurrently, preserving input order.
+    /// Unfinished fetches are dropped when this call is cancelled or returns an error.
     pub(crate) async fn fetch_raw_transactions(
         &mut self,
         txids: &[(TxId, BlockHeight)],
     ) -> Result<Vec<(TxId, BlockHeight, RawTransaction)>, RpcError> {
-        let mut handles = Vec::with_capacity(txids.len());
-        for &(txid, height) in txids {
+        try_join_all(txids.iter().map(|&(txid, height)| {
             let mut client = self.clone();
-            handles.push(tokio::spawn(async move {
+            async move {
                 client
                     .raw_transaction(&txid)
                     .await
                     .map(|raw| (txid, height, raw))
-            }));
-        }
-
-        let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
-            let result = handle.await.expect("fetch task panicked")?;
-            results.push(result);
-        }
-
-        Ok(results)
+            }
+        }))
+        .await
     }
 
     /// Returns unspent transparent outputs for the given addresses at or above
