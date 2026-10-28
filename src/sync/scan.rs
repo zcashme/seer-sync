@@ -125,6 +125,7 @@ pub fn scan_compact<P: Parameters>(
 
         prev_tree_sizes = Some(scan_block(
             block,
+            height,
             keys,
             params,
             nullifiers,
@@ -142,16 +143,13 @@ pub fn scan_compact<P: Parameters>(
 
 fn scan_block<P: Parameters>(
     block: &CompactBlock,
+    height: BlockHeight,
     keys: &ScanningKeys,
     params: &P,
     nullifiers: &Nullifiers,
     tree_sizes_at_block_start: (u32, u32, u32),
     detected_txs: &mut Vec<WalletTx>,
 ) -> Result<(u32, u32, u32), ScanError> {
-    let height = BlockHeight::from(
-        u32::try_from(block.height)
-            .map_err(|_| ScanError::InvalidCompactBlock(BlockHeight::from(0)))?,
-    );
     let zip212 = zip212_enforcement(params, height);
 
     let (mut sap_pos, mut orch_pos, mut iorn_pos) = tree_sizes_at_block_start;
@@ -239,13 +237,7 @@ fn scan_block<P: Parameters>(
         orch_pos += u32::try_from(tx.actions.len()).unwrap();
 
         for (idx, action) in tx.actions.iter().enumerate() {
-            if let Some(nf) = action
-                .nullifier
-                .as_slice()
-                .try_into()
-                .ok()
-                .and_then(|b| orchard::note::Nullifier::from_bytes(b).into())
-            {
+            if let Some(nf) = action_nullifier(action) {
                 if nullifiers.orchard.contains(&nf) {
                     wtx.orchard_spends.push(OrchardSpend {
                         index: idx as u32,
@@ -400,7 +392,7 @@ pub fn scan<P: Parameters>(
     full_txs: &[(TxId, BlockHeight, Transaction)],
     keys: &ScanningKeys,
     params: &P,
-) -> Result<(), ScanError> {
+) {
     for (txid, height, tx) in full_txs {
         let Some(wtx) = txs.iter_mut().find(|t| t.txid == *txid) else {
             continue;
@@ -428,7 +420,6 @@ pub fn scan<P: Parameters>(
             );
         }
     }
-    Ok(())
 }
 
 /// Every bundled lightwalletd sends tree sizes, and positions can't be known

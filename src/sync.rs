@@ -80,7 +80,7 @@ async fn process_batch<P: Parameters + Sync, A: Account>(
     params: &P,
     account: &A,
     mut remaining_blocks: &[crate::proto::CompactBlock],
-) -> Result<Cursor, SyncError> {
+) -> Result<(), SyncError> {
     loop {
         let nullifiers = account
             .nullifiers()
@@ -101,7 +101,7 @@ async fn process_batch<P: Parameters + Sync, A: Account>(
             full_transactions.push((txid, height, parsed));
         }
 
-        scan(&mut transactions, &full_transactions, keys, params)?;
+        scan(&mut transactions, &full_transactions, keys, params);
 
         let block = scanned_blocks
             .last()
@@ -116,7 +116,7 @@ async fn process_batch<P: Parameters + Sync, A: Account>(
             .map_err(|source| SyncError::Account { source })?;
 
         if remaining.is_empty() {
-            return Ok(cursor);
+            return Ok(());
         }
         remaining_blocks = remaining;
     }
@@ -131,7 +131,7 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
 ) -> Result<(), SyncError> {
     'outer: loop {
         let (tip, _) = client.latest_block().await?;
-        let mut checkpoint = account
+        let checkpoint = account
             .checkpoint()
             .map_err(|source| SyncError::Account { source })?;
         let birthday = account
@@ -182,8 +182,7 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
                 && (blocks.len() == BLOCKS_PER_BATCH
                     || output_count + block_output_count > OUTPUTS_PER_BATCH)
             {
-                checkpoint =
-                    Some(process_batch(&mut fetch_client, keys, params, account, &blocks).await?);
+                process_batch(&mut fetch_client, keys, params, account, &blocks).await?;
                 blocks.clear();
                 output_count = 0;
             }
