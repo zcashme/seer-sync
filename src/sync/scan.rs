@@ -1,28 +1,22 @@
-#[cfg(not(feature = "zns-decrypt"))]
-use orchard::note_encryption::IronwoodDomain;
-use orchard::note_encryption::OrchardDomain;
-use sapling::note_encryption::{try_sapling_output_recovery, SaplingDomain, Zip212Enforcement};
-use zcash_note_encryption::{
-    batch::try_note_decryption as batch_try_note_decryption, try_note_decryption,
-};
 use zcash_primitives::transaction::components::sapling::zip212_enforcement;
 use zcash_primitives::transaction::{Transaction, TxId};
 use zcash_protocol::consensus::{BlockHeight, Parameters};
-use zcash_protocol::value::{ZatBalance, Zatoshis};
+use zcash_protocol::value::Zatoshis;
 use zcash_protocol::ShieldedPool;
 use zcash_script::script::Code as ScriptCode;
 use zcash_transparent::address::Script;
 use zcash_transparent::bundle::{OutPoint, TxOut};
 use zip32::Scope;
-#[cfg(feature = "zns-decrypt")]
-use zns_verify::decrypt::ZnsIronwoodDomain;
 
 use crate::proto::{ChainMetadata, CompactBlock, CompactOrchardAction, GetAddressUtxosReply};
 #[cfg(not(feature = "zns-decrypt"))]
 use crate::sync::decrypt::decrypt_compact_ironwood;
 #[cfg(feature = "zns-decrypt")]
-use crate::sync::decrypt::{decrypt_compact_ironwood_relaxed, rseed_guard, RelaxedIronwoodOutput};
-use crate::sync::decrypt::{decrypt_compact_orchard, decrypt_compact_sapling, ScanningKeys};
+use crate::sync::decrypt::{decrypt_compact_ironwood_relaxed, RelaxedIronwoodOutput};
+use crate::sync::decrypt::{
+    decrypt_compact_orchard, decrypt_compact_sapling, enrich_ironwood, enrich_orchard,
+    enrich_sapling, ScanningKeys,
+};
 
 pub struct Nullifiers {
     pub sapling: Vec<sapling::Nullifier>,
@@ -435,246 +429,6 @@ pub fn scan<P: Parameters>(
         }
     }
     Ok(())
-}
-
-fn enrich_sapling(
-    bundle: &sapling::Bundle<sapling::bundle::Authorized, ZatBalance>,
-    keys: &ScanningKeys,
-    zip212: Zip212Enforcement,
-    outputs: &mut Vec<SaplingOutput>,
-) {
-    if !outputs.is_empty() && !keys.sapling.is_empty() {
-        let ivks: Vec<_> = keys.sapling.iter().map(|key| key.ivk.clone()).collect();
-        let (wallet_indices, pairs): (Vec<_>, Vec<_>) = outputs
-            .iter()
-            .enumerate()
-            .filter_map(|(wallet_index, output)| {
-                bundle
-                    .shielded_outputs()
-                    .get(output.index as usize)
-                    .map(|encrypted| (wallet_index, (SaplingDomain::new(zip212), encrypted)))
-            })
-            .unzip();
-        for (wallet_index, result) in wallet_indices
-            .into_iter()
-            .zip(batch_try_note_decryption(&ivks, &pairs))
-        {
-            if let Some(((_, _, memo), _)) = result {
-                outputs[wallet_index].memo = Some(memo);
-            }
-        }
-    }
-
-    if !keys.sapling.iter().any(|key| key.ovk.is_some()) {
-        return;
-    }
-    for (index, encrypted) in bundle.shielded_outputs().iter().enumerate() {
-        if outputs.iter().any(|output| output.index == index as u32) {
-            continue;
-        }
-        for key in &keys.sapling {
-            let Some(ovk) = key.ovk.as_ref() else {
-                continue;
-            };
-            if let Some((note, recipient, memo)) =
-                try_sapling_output_recovery(ovk, encrypted, zip212)
-            {
-                outputs.push(SaplingOutput {
-                    index: index as u32,
-                    note,
-                    recipient,
-                    nf: None,
-                    position: 0,
-                    scope: key.scope,
-                    memo: Some(memo),
-                    is_sent: true,
-                    is_change: false,
-                });
-                break;
-            }
-        }
-    }
-}
-
-fn enrich_orchard(
-    bundle: &orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
-    keys: &ScanningKeys,
-    outputs: &mut Vec<OrchardOutput>,
-) {
-    for output in outputs.iter_mut() {
-        let Some(action) = bundle.actions().get(output.index as usize) else {
-            continue;
-        };
-        let domain = OrchardDomain::for_action(action);
-        if let Some((_, _, memo)) = keys
-            .orchard
-            .iter()
-            .find_map(|key| try_note_decryption(&domain, &key.ivk, action))
-        {
-            output.memo = Some(memo);
-        }
-    }
-
-    if !keys.orchard.iter().any(|key| key.ovk.is_some()) {
-        return;
-    }
-    for index in 0..bundle.actions().len() {
-        if outputs.iter().any(|output| output.index == index as u32) {
-            continue;
-        }
-        for key in &keys.orchard {
-            let Some(ovk) = key.ovk.as_ref() else {
-                continue;
-            };
-            if let Some((note, recipient, memo)) = bundle.recover_output_with_ovk(index, ovk) {
-                outputs.push(OrchardOutput {
-                    index: index as u32,
-                    note,
-                    recipient,
-                    nf: None,
-                    position: 0,
-                    scope: key.scope,
-                    memo: Some(memo),
-                    is_sent: true,
-                    is_change: false,
-                });
-                break;
-            }
-        }
-    }
-}
-
-#[cfg(not(feature = "zns-decrypt"))]
-fn enrich_ironwood(
-    bundle: &orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
-    keys: &ScanningKeys,
-    outputs: &mut Vec<OrchardOutput>,
-) {
-    for output in outputs.iter_mut() {
-        let Some(action) = bundle.actions().get(output.index as usize) else {
-            continue;
-        };
-        let domain = IronwoodDomain::for_action(action);
-        if let Some((_, _, memo)) = keys
-            .orchard
-            .iter()
-            .find_map(|key| try_note_decryption(&domain, &key.ivk, action))
-        {
-            output.memo = Some(memo);
-        }
-    }
-
-    if !keys.orchard.iter().any(|key| key.ovk.is_some()) {
-        return;
-    }
-    for index in 0..bundle.actions().len() {
-        if outputs.iter().any(|output| output.index == index as u32) {
-            continue;
-        }
-        for key in &keys.orchard {
-            let Some(ovk) = key.ovk.as_ref() else {
-                continue;
-            };
-            if let Some((note, recipient, memo)) = bundle.recover_output_with_ovk(index, ovk) {
-                outputs.push(OrchardOutput {
-                    index: index as u32,
-                    note,
-                    recipient,
-                    nf: None,
-                    position: 0,
-                    scope: key.scope,
-                    memo: Some(memo),
-                    is_sent: true,
-                    is_change: false,
-                });
-                break;
-            }
-        }
-    }
-}
-
-#[cfg(feature = "zns-decrypt")]
-fn enrich_ironwood(
-    bundle: &orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
-    keys: &ScanningKeys,
-    outputs: &mut Vec<OrchardOutput>,
-    relaxed: &mut Vec<RelaxedIronwoodOutput>,
-) {
-    // Full IVK scanning also discovers relaxed candidates absent from the compact results.
-    if !keys.orchard.is_empty() {
-        let ivks: Vec<_> = keys.orchard.iter().map(|key| key.ivk.clone()).collect();
-        let pairs: Vec<_> = bundle
-            .actions()
-            .iter()
-            .map(|action| (ZnsIronwoodDomain::for_action(action), action))
-            .collect();
-        for (index, result) in batch_try_note_decryption(&ivks, &pairs)
-            .into_iter()
-            .enumerate()
-        {
-            let Some(((candidate, _, memo), _)) = result else {
-                continue;
-            };
-            if rseed_guard(&candidate) {
-                if let Some(output) = outputs
-                    .iter_mut()
-                    .find(|output| output.index == index as u32)
-                {
-                    output.memo = Some(memo);
-                }
-            } else {
-                let hit = (
-                    index,
-                    candidate,
-                    *bundle.actions()[index].nullifier(),
-                    Some(memo),
-                    false,
-                );
-                match relaxed.iter_mut().find(|output| output.0 == index) {
-                    Some(output) => *output = hit,
-                    None => relaxed.push(hit),
-                }
-            }
-        }
-    }
-
-    if !keys.orchard.iter().any(|key| key.ovk.is_some()) {
-        return;
-    }
-    // Relaxed candidates remain eligible; the later OVK confirmation wins for self-sends.
-    for (index, action) in bundle.actions().iter().enumerate() {
-        if outputs.iter().any(|output| output.index == index as u32) {
-            continue;
-        }
-        let domain = ZnsIronwoodDomain::for_action(action);
-        for key in &keys.orchard {
-            let Some(ovk) = key.ovk.as_ref() else {
-                continue;
-            };
-            if let Some((candidate, recipient, memo)) = domain.try_decrypt_sent(action, ovk) {
-                if rseed_guard(&candidate) {
-                    outputs.push(OrchardOutput {
-                        index: index as u32,
-                        note: *candidate.note(),
-                        recipient,
-                        nf: None,
-                        position: 0,
-                        scope: key.scope,
-                        memo: Some(memo),
-                        is_sent: true,
-                        is_change: false,
-                    });
-                } else {
-                    let hit = (index, candidate, *action.nullifier(), Some(memo), true);
-                    match relaxed.iter_mut().find(|output| output.0 == index) {
-                        Some(output) => *output = hit,
-                        None => relaxed.push(hit),
-                    }
-                }
-                break;
-            }
-        }
-    }
 }
 
 /// Every bundled lightwalletd sends tree sizes, and positions can't be known
