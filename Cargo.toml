@@ -46,10 +46,10 @@ prost = "0.14"
 # ciphertext that compact blocks truncate).
 zcash_primitives = { version = "0.31", default-features = false }
 # gRPC + async (driver layer).
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 tonic = { version = "0.14", default-features = false, features = ["transport", "tls-ring", "tls-webpki-roots", "codegen"] }
 tonic-prost = "0.14"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
-tokio-stream = "0.1"
 http = "1"
 thiserror = "2"
 
@@ -61,9 +61,7 @@ zcash_script = "0.6"
 tonic-prost-build = { version = "0.14", default-features = false }
 
 [dev-dependencies]
-futures = "0.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
-tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.14", default-features = false, features = ["transport", "router", "codegen"] }
 zcash_keys = { version = "0.17", default-features = false, features = ["orchard", "sapling", "transparent-inputs"] }
 zip32 = "0.3"

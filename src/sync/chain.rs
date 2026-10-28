@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use tokio_stream::{Stream, StreamExt};
+use futures_util::future::try_join_all;
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkType, Parameters};
@@ -194,7 +195,7 @@ impl LwdClient {
         from: BlockHeight,
         to: BlockHeight,
     ) -> Result<Vec<RawTransaction>, RpcError> {
-        let mut stream = self
+        let stream = self
             .inner
             .get_taddress_transactions(tonic::Request::new(TransparentAddressBlockFilter {
                 address: address.to_owned(),
@@ -212,38 +213,26 @@ impl LwdClient {
             }))
             .await?
             .into_inner();
-        let mut transactions = Vec::new();
 
-        while let Some(transaction) = stream.next().await {
-            transactions.push(transaction?);
-        }
-
-        Ok(transactions)
+        Ok(stream.try_collect().await?)
     }
 
-    /// Fetches the full serialized transaction for every provided txid in parallel.
+    /// Fetches full transactions concurrently, preserving input order.
+    /// Unfinished fetches are dropped when this call is cancelled or returns an error.
     pub(crate) async fn fetch_raw_transactions(
         &mut self,
         txids: &[(TxId, BlockHeight)],
     ) -> Result<Vec<(TxId, BlockHeight, RawTransaction)>, RpcError> {
-        let mut handles = Vec::with_capacity(txids.len());
-        for &(txid, height) in txids {
+        try_join_all(txids.iter().map(|&(txid, height)| {
             let mut client = self.clone();
-            handles.push(tokio::spawn(async move {
+            async move {
                 client
                     .raw_transaction(&txid)
                     .await
                     .map(|raw| (txid, height, raw))
-            }));
-        }
-
-        let mut results = Vec::with_capacity(handles.len());
-        for handle in handles {
-            let result = handle.await.expect("fetch task panicked")?;
-            results.push(result);
-        }
-
-        Ok(results)
+            }
+        }))
+        .await
     }
 
     /// Returns unspent transparent outputs for the given addresses at or above
