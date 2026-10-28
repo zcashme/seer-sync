@@ -8,7 +8,7 @@ use std::time::Duration;
 use self::chain::{LwdClient, NoServer, RpcError};
 use self::decrypt::ScanningKeys;
 use self::scan::{scan, scan_compact, Nullifiers, ScanError, WalletTx};
-use futures_util::StreamExt;
+use futures_util::TryStreamExt;
 use tokio::time::sleep;
 use zcash_primitives::block::BlockHash;
 use zcash_primitives::transaction::{Transaction, TxId};
@@ -117,8 +117,7 @@ pub(crate) async fn run<P: Parameters + Sync, A: Account>(
         let mut blocks = Vec::with_capacity(BLOCKS_PER_BATCH);
         let mut output_count = 0;
 
-        while let Some(block) = stream.next().await {
-            let block = block?;
+        while let Some(block) = stream.try_next().await? {
             let prev_hash = BlockHash::from_slice(&block.prev_hash);
 
             if prior.is_some_and(|prior| prior.hash != prev_hash) {
