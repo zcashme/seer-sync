@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use futures_util::future::try_join_all;
-use tokio_stream::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use tonic::transport::{Channel, ClientTlsConfig};
 use zcash_primitives::block::BlockHash;
 use zcash_protocol::consensus::{BlockHeight, NetworkType, Parameters};
@@ -195,7 +195,7 @@ impl LwdClient {
         from: BlockHeight,
         to: BlockHeight,
     ) -> Result<Vec<RawTransaction>, RpcError> {
-        let mut stream = self
+        let stream = self
             .inner
             .get_taddress_transactions(tonic::Request::new(TransparentAddressBlockFilter {
                 address: address.to_owned(),
@@ -213,13 +213,8 @@ impl LwdClient {
             }))
             .await?
             .into_inner();
-        let mut transactions = Vec::new();
 
-        while let Some(transaction) = stream.next().await {
-            transactions.push(transaction?);
-        }
-
-        Ok(transactions)
+        Ok(stream.try_collect().await?)
     }
 
     /// Fetches full transactions concurrently, preserving input order.
