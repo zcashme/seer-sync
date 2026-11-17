@@ -9,13 +9,9 @@ use zcash_transparent::bundle::{OutPoint, TxOut};
 use zip32::Scope;
 
 use crate::proto::{ChainMetadata, CompactBlock, CompactOrchardAction, GetAddressUtxosReply};
-#[cfg(not(feature = "zns-decrypt"))]
-use crate::sync::decrypt::decrypt_compact_ironwood;
-#[cfg(feature = "zns-decrypt")]
-use crate::sync::decrypt::{decrypt_compact_ironwood_relaxed, RelaxedIronwoodOutput};
 use crate::sync::decrypt::{
-    decrypt_compact_orchard, decrypt_compact_sapling, enrich_ironwood, enrich_orchard,
-    enrich_sapling, ScanningKeys,
+    decrypt_compact_ironwood, decrypt_compact_orchard, decrypt_compact_sapling, enrich_ironwood,
+    enrich_orchard, enrich_sapling, ScanningKeys,
 };
 
 pub struct Nullifiers {
@@ -72,10 +68,6 @@ pub struct WalletTx {
     pub orchard_spends: Vec<OrchardSpend>,
     pub ironwood_outputs: Vec<OrchardOutput>,
     pub ironwood_spends: Vec<OrchardSpend>,
-    /// Ironwood notes the rseed guard could not self-validate. Unverified —
-    /// the caller must check bindings before use.
-    #[cfg(feature = "zns-decrypt")]
-    pub relaxed_ironwood_outputs: Vec<RelaxedIronwoodOutput>,
     pub transparent_outputs: Vec<TransparentOutput>,
     pub transparent_spends: Vec<TransparentSpend>,
 }
@@ -176,8 +168,6 @@ fn scan_block<P: Parameters>(
             ironwood_spends: Vec::new(),
             transparent_outputs: Vec::new(),
             transparent_spends: Vec::new(),
-            #[cfg(feature = "zns-decrypt")]
-            relaxed_ironwood_outputs: Vec::new(),
         };
 
         let sap_decrypted = decrypt_compact_sapling(&tx.outputs, keys, zip212);
@@ -247,57 +237,27 @@ fn scan_block<P: Parameters>(
             }
         }
 
-        #[cfg(not(feature = "zns-decrypt"))]
-        {
-            let iorn_decrypted = decrypt_compact_ironwood(&tx.ironwood_actions, keys);
-            for (idx, opt) in iorn_decrypted.into_iter().enumerate() {
-                let position = u64::from(iorn_pos) + idx as u64;
-                if let Some(((note, recipient), key_index)) = opt {
-                    let key = &keys.orchard[key_index];
-                    let nf = key
-                        .nk
-                        .as_ref()
-                        .and_then(|fvk| Option::from(note.nullifier(fvk)));
-                    wtx.ironwood_outputs.push(OrchardOutput {
-                        index: idx as u32,
-                        note,
-                        recipient,
-                        nf,
-                        position,
-                        scope: key.scope,
-                        memo: None,
-                        is_sent: false,
-                        is_change: key.scope == Scope::Internal,
-                    });
-                }
+        let iorn_decrypted = decrypt_compact_ironwood(&tx.ironwood_actions, keys);
+        for (idx, opt) in iorn_decrypted.into_iter().enumerate() {
+            let position = u64::from(iorn_pos) + idx as u64;
+            if let Some(((note, recipient), key_index)) = opt {
+                let key = &keys.orchard[key_index];
+                let nf = key
+                    .nk
+                    .as_ref()
+                    .and_then(|fvk| Option::from(note.nullifier(fvk)));
+                wtx.ironwood_outputs.push(OrchardOutput {
+                    index: idx as u32,
+                    note,
+                    recipient,
+                    nf,
+                    position,
+                    scope: key.scope,
+                    memo: None,
+                    is_sent: false,
+                    is_change: key.scope == Scope::Internal,
+                });
             }
-        }
-        #[cfg(feature = "zns-decrypt")]
-        {
-            let (iorn_decrypted, relaxed_hits) =
-                decrypt_compact_ironwood_relaxed(&tx.ironwood_actions, keys);
-            for (idx, opt) in iorn_decrypted.into_iter().enumerate() {
-                let position = u64::from(iorn_pos) + idx as u64;
-                if let Some(((note, recipient), key_index)) = opt {
-                    let key = &keys.orchard[key_index];
-                    let nf = key
-                        .nk
-                        .as_ref()
-                        .and_then(|fvk| Option::from(note.nullifier(fvk)));
-                    wtx.ironwood_outputs.push(OrchardOutput {
-                        index: idx as u32,
-                        note,
-                        recipient,
-                        nf,
-                        position,
-                        scope: key.scope,
-                        memo: None,
-                        is_sent: false,
-                        is_change: key.scope == Scope::Internal,
-                    });
-                }
-            }
-            wtx.relaxed_ironwood_outputs.extend(relaxed_hits);
         }
         iorn_pos += u32::try_from(tx.ironwood_actions.len()).unwrap();
 
@@ -314,18 +274,12 @@ fn scan_block<P: Parameters>(
             }
         }
 
-        #[cfg(feature = "zns-decrypt")]
-        let detected_relaxed = !wtx.relaxed_ironwood_outputs.is_empty();
-        #[cfg(not(feature = "zns-decrypt"))]
-        let detected_relaxed = false;
-
         let detected = !wtx.sapling_outputs.is_empty()
             || !wtx.sapling_spends.is_empty()
             || !wtx.orchard_outputs.is_empty()
             || !wtx.orchard_spends.is_empty()
             || !wtx.ironwood_outputs.is_empty()
-            || !wtx.ironwood_spends.is_empty()
-            || detected_relaxed;
+            || !wtx.ironwood_spends.is_empty();
 
         if detected {
             // This transaction is already kept. Record every Ironwood action
@@ -409,15 +363,7 @@ pub fn scan<P: Parameters>(
             enrich_orchard(bundle, keys, &mut wtx.orchard_outputs);
         }
         if let Some(bundle) = tx.ironwood_bundle() {
-            #[cfg(not(feature = "zns-decrypt"))]
             enrich_ironwood(bundle, keys, &mut wtx.ironwood_outputs);
-            #[cfg(feature = "zns-decrypt")]
-            enrich_ironwood(
-                bundle,
-                keys,
-                &mut wtx.ironwood_outputs,
-                &mut wtx.relaxed_ironwood_outputs,
-            );
         }
     }
 }

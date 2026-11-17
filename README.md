@@ -105,9 +105,7 @@ Spends are columns on the note they consume (`spent`, `spent_height`,
 
 - **Sapling** — trial decrypt + nullifier spend detection
 - **Orchard** — trial decrypt + nullifier spend detection
-- **Ironwood** — trial decrypt + nullifier spend detection (ZIP 2005); with the
-  opt-in `zns-decrypt` feature, Name Notes (commitments bound to application
-  data) are surfaced unverified for the caller to check
+- **Ironwood** — trial decrypt + nullifier spend detection (ZIP 2005)
 
 ## License
 

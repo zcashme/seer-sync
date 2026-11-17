@@ -678,8 +678,6 @@ mod tests {
             orchard_spends,
             ironwood_outputs: vec![],
             ironwood_spends: vec![],
-            #[cfg(feature = "zns-decrypt")]
-            relaxed_ironwood_outputs: vec![],
             transparent_outputs: vec![],
             transparent_spends: vec![],
         }

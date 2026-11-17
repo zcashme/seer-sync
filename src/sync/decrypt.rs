@@ -1,5 +1,4 @@
 use orchard::note_encryption::CompactAction;
-#[cfg(not(feature = "zns-decrypt"))]
 use orchard::note_encryption::IronwoodDomain;
 use orchard::note_encryption::OrchardDomain;
 use sapling::note_encryption::{
@@ -13,8 +12,6 @@ use zcash_note_encryption::{
 };
 use zcash_protocol::value::ZatBalance;
 use zip32::Scope;
-#[cfg(feature = "zns-decrypt")]
-use zns_verify::decrypt::{CandidateNote, ZnsIronwoodDomain};
 
 use crate::proto::{CompactOrchardAction, CompactSaplingOutput};
 use crate::sync::scan::{OrchardOutput, SaplingOutput};
@@ -161,7 +158,6 @@ pub(crate) fn decrypt_compact_orchard(
     results
 }
 
-#[cfg(not(feature = "zns-decrypt"))]
 pub(crate) fn decrypt_compact_ironwood(
     actions: &[CompactOrchardAction],
     keys: &ScanningKeys,
@@ -297,7 +293,6 @@ pub(crate) fn enrich_orchard(
     }
 }
 
-#[cfg(not(feature = "zns-decrypt"))]
 pub(crate) fn enrich_ironwood(
     bundle: &orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
     keys: &ScanningKeys,
@@ -340,160 +335,6 @@ pub(crate) fn enrich_ironwood(
                     is_sent: true,
                     is_change: false,
                 });
-                break;
-            }
-        }
-    }
-}
-
-// ── Relaxed Ironwood scan (`zns-decrypt`) ──────────────────────────────────
-//
-// Trial-decrypt with zns-verify's `ZnsIronwoodDomain` and route each result
-// with the rseed guard: self-consistent notes take the ordinary path
-// (byte-identical to the standard domain); the rest surface unverified.
-
-/// True when the decrypted note self-consistently produces its published
-/// commitment, i.e. it is an ordinary note under the standard rseed rule.
-#[cfg(feature = "zns-decrypt")]
-fn rseed_guard(candidate: &CandidateNote) -> bool {
-    use orchard::note::ExtractedNoteCommitment;
-
-    ExtractedNoteCommitment::from(candidate.note().commitment()).to_bytes()
-        == candidate.cmx().to_bytes()
-}
-
-/// An Ironwood note the rseed guard could not self-validate: (action index
-/// in the bundle, decrypted note + published cmx, action's public nullifier,
-/// raw memo, is_sent). Unverified — the caller must check the binding.
-#[cfg(feature = "zns-decrypt")]
-pub type RelaxedIronwoodOutput = (
-    usize,
-    CandidateNote,
-    orchard::note::Nullifier,
-    Option<[u8; 512]>,
-    bool,
-);
-
-#[cfg(feature = "zns-decrypt")]
-pub(crate) fn decrypt_compact_ironwood_relaxed(
-    actions: &[CompactOrchardAction],
-    keys: &ScanningKeys,
-) -> (
-    Vec<Option<CompactDecryptResult<orchard::Note, orchard::Address>>>,
-    Vec<RelaxedIronwoodOutput>,
-) {
-    let ivks: Vec<_> = keys.orchard.iter().map(|k| k.ivk.clone()).collect();
-    if ivks.is_empty() {
-        return ((0..actions.len()).map(|_| None).collect(), Vec::new());
-    }
-
-    let mut parsed = Vec::new();
-    for (i, a) in actions.iter().enumerate() {
-        if let Some(ca) = parse_compact_orchard(a) {
-            parsed.push((i, ca));
-        }
-    }
-
-    let pairs: Vec<_> = parsed
-        .iter()
-        .map(|(_, ca)| (ZnsIronwoodDomain::for_compact_action(ca), ca.clone()))
-        .collect();
-
-    let raw = try_compact_note_decryption(&ivks, &pairs);
-
-    let mut ordinary: Vec<Option<CompactDecryptResult<orchard::Note, orchard::Address>>> =
-        (0..actions.len()).map(|_| None).collect();
-    let mut relaxed = Vec::new();
-    for ((idx, ca), r) in parsed.into_iter().zip(raw) {
-        if let Some(((candidate, recipient), key_index)) = r {
-            if rseed_guard(&candidate) {
-                ordinary[idx] = Some(((*candidate.note(), recipient), key_index));
-            } else {
-                relaxed.push((idx, candidate, ca.nullifier(), None, false));
-            }
-        }
-    }
-    (ordinary, relaxed)
-}
-
-#[cfg(feature = "zns-decrypt")]
-pub(crate) fn enrich_ironwood(
-    bundle: &orchard::Bundle<orchard::bundle::Authorized, ZatBalance>,
-    keys: &ScanningKeys,
-    outputs: &mut Vec<OrchardOutput>,
-    relaxed: &mut Vec<RelaxedIronwoodOutput>,
-) {
-    // Full IVK scanning also discovers relaxed candidates absent from the compact results.
-    if !keys.orchard.is_empty() {
-        let ivks: Vec<_> = keys.orchard.iter().map(|key| key.ivk.clone()).collect();
-        let pairs: Vec<_> = bundle
-            .actions()
-            .iter()
-            .map(|action| (ZnsIronwoodDomain::for_action(action), action))
-            .collect();
-        for (index, result) in batch_try_note_decryption(&ivks, &pairs)
-            .into_iter()
-            .enumerate()
-        {
-            let Some(((candidate, _, memo), _)) = result else {
-                continue;
-            };
-            if rseed_guard(&candidate) {
-                if let Some(output) = outputs
-                    .iter_mut()
-                    .find(|output| output.index == index as u32)
-                {
-                    output.memo = Some(memo);
-                }
-            } else {
-                let hit = (
-                    index,
-                    candidate,
-                    *bundle.actions()[index].nullifier(),
-                    Some(memo),
-                    false,
-                );
-                match relaxed.iter_mut().find(|output| output.0 == index) {
-                    Some(output) => *output = hit,
-                    None => relaxed.push(hit),
-                }
-            }
-        }
-    }
-
-    if !keys.orchard.iter().any(|key| key.ovk.is_some()) {
-        return;
-    }
-    // Relaxed candidates remain eligible; the later OVK confirmation wins for self-sends.
-    for (index, action) in bundle.actions().iter().enumerate() {
-        if outputs.iter().any(|output| output.index == index as u32) {
-            continue;
-        }
-        let domain = ZnsIronwoodDomain::for_action(action);
-        for key in &keys.orchard {
-            let Some(ovk) = key.ovk.as_ref() else {
-                continue;
-            };
-            if let Some((candidate, recipient, memo)) = domain.try_decrypt_sent(action, ovk) {
-                if rseed_guard(&candidate) {
-                    outputs.push(OrchardOutput {
-                        index: index as u32,
-                        note: *candidate.note(),
-                        recipient,
-                        nf: None,
-                        position: 0,
-                        scope: key.scope,
-                        memo: Some(memo),
-                        is_sent: true,
-                        is_change: false,
-                    });
-                } else {
-                    let hit = (index, candidate, *action.nullifier(), Some(memo), true);
-                    match relaxed.iter_mut().find(|output| output.0 == index) {
-                        Some(output) => *output = hit,
-                        None => relaxed.push(hit),
-                    }
-                }
                 break;
             }
         }
