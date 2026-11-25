@@ -14,6 +14,7 @@ use crate::proto::{
 };
 
 const MAINNET_SERVERS: &[&str] = &[
+    "https://zec.global:443",
     "https://zec.rocks:443",
     "https://na.zec.rocks:443",
     "https://eu.zec.rocks:443",
